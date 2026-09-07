@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use chain_client::WriterSigner;
 use chain_types::people;
-use chain_types::people::runtime_types::next_people_paseo_runtime::{ProxyType, RuntimeCall};
+use chain_types::people::runtime_types::people_paseo_runtime::{ProxyType, RuntimeCall};
 use chain_types::people::runtime_types::{
     indiv_pallet_game, indiv_pallet_proof_of_ink, pallet_utility,
 };
