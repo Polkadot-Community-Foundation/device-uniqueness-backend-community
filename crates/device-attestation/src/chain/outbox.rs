@@ -406,8 +406,11 @@ pub async fn mark_submitting(
     Ok(done.rows_affected() == 1)
 }
 
-pub async fn mark_assigned(pool: &PgPool, guard: &Guard, id: i64) -> Result<bool, sqlx::Error> {
-    guarded_status(pool, guard, id, Status::Assigned, None, None).await
+pub async fn mark_assigned<'e, E>(executor: E, guard: &Guard, id: i64) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    guarded_status(executor, guard, id, Status::Assigned, None, None).await
 }
 
 pub async fn mark_retry(
@@ -429,13 +432,16 @@ pub async fn mark_retry(
     .await
 }
 
-pub async fn mark_failed(
-    pool: &PgPool,
+pub async fn mark_failed<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
     err: &str,
-) -> Result<bool, sqlx::Error> {
-    guarded_status(pool, guard, id, Status::FailedTerminal, None, Some(err)).await
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    guarded_status(executor, guard, id, Status::FailedTerminal, None, Some(err)).await
 }
 
 pub async fn mark_dotns_submitting(
@@ -557,14 +563,17 @@ const DOTNS_ABANDONED_REASON: &str =
 
 const DOTNS_OPEN_STATES: &str = "('PENDING', 'RETRY_AFTER')";
 
-async fn guarded_status(
-    pool: &PgPool,
+async fn guarded_status<'e, E>(
+    executor: E,
     guard: &Guard,
     id: i64,
     status: Status,
     retry: Option<(OffsetDateTime, i32)>,
     err: Option<&str>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let (not_before, attempt) = match retry {
         Some((nb, a)) => (Some(nb), Some(a)),
         None => (None, None),
@@ -596,7 +605,7 @@ async fn guarded_status(
         .bind(&guard.holder_id)
         .bind(guard.epoch)
         .bind(err)
-        .execute(pool)
+        .execute(executor)
         .await?;
     Ok(done.rows_affected() == 1)
 }

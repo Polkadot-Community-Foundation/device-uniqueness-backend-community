@@ -1,30 +1,51 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::HashMap;
-use std::str::FromStr as _;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    str::FromStr as _,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context as _;
 use chain_types::{AssetHubExtrinsicParamsBuilder, PeopleExtrinsicParamsBuilder};
 use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::PgPool;
-use subxt::client::OnlineClientAtBlockT;
-use subxt::dynamic::{self, Value};
-use subxt::error::DispatchError;
-use subxt::extrinsics::ExtrinsicEvents;
-use subxt::metadata::ArcMetadata;
-use subxt::tx::{DynamicPayload, TransactionProgress};
-use subxt::utils::AccountId32;
+use subxt::{
+    client::OnlineClientAtBlockT,
+    dynamic::Value,
+    extrinsics::ExtrinsicEvents,
+    metadata::ArcMetadata,
+    tx::{DynamicPayload, TransactionProgress},
+    utils::AccountId32,
+};
 use time::OffsetDateTime;
 
-use chain_client::{batch_item_results, settle_batch_size, WriterSigner};
+use chain_client::{settle_batch_size, WriterSigner};
 
 use super::asset_hub::{AssetHub, ValidityWindow};
 use super::lease;
 use super::outbox::{self, Guard, Reservation};
 use super::people::PeopleChain;
+use super::registry::NameRegistry as _;
 use crate::dotns;
+
+mod events;
+#[cfg(test)]
+mod fixtures;
+mod lane;
+mod observe;
+mod tx;
+
+use events::{check_proxied_call, item_results};
+use lane::{Defer, Dotns, Lane as _, Outcome, People};
+use observe::{
+    record_outbox_gauges, record_spec_version, record_writer_info, zero_init_submit_outcomes,
+};
+use tx::{
+    build_registration_batch_tx, build_registration_tx, build_reserve_name_batch_tx,
+    build_reserve_name_tx,
+};
 
 /// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
 /// unusable. Also the AIMD ceiling every lane climbs back to.
@@ -427,6 +448,7 @@ async fn connect_asset_hub(url: &str) -> anyhow::Result<(AssetHub, ValidityWindo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubmitFailureAction {
     Assign,
+    Park,
     Retry,
     Fail,
 }
@@ -510,6 +532,44 @@ fn check_dotns_submittable(
 /// to the candidate, so the row is on chain and belongs in `ASSIGNED`.
 const ALREADY_REGISTERED: &str = "PeopleLite::AlreadyRegistered";
 
+const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
+
+const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
+
+/// Rejections that another submission cannot talk the runtime out of, so the
+/// row fails on the first pass rather than paying `max_attempts` fees for the
+/// same answer.
+///
+/// All three come from `attest`'s optional `reserved_username` leg, which the
+/// runtime checks *before* it writes the lite username — so they cost the whole
+/// registration. The intake preflight refuses these claims before a row exists;
+/// what reaches here raced that check (a queue that filled in between). The
+/// writer cannot resubmit without the reservation, because the consumer
+/// signature covers it — only the client can re-sign.
+///
+/// `QueueFull` is not immutable in principle: entries expire and
+/// `remove_expired_username_reservation` is permissionless. But nothing drains
+/// within the seconds our backoff spans, so retrying only buys more fees.
+const DETERMINISTIC_REJECTIONS: &[&str] = &[
+    "Resources::UsernameReservationTaken",
+    "Resources::QueueFull",
+    "Resources::AlreadyHasReservation",
+];
+
+fn is_deterministic_rejection(reason: &str) -> bool {
+    DETERMINISTIC_REJECTIONS
+        .iter()
+        .any(|rejection| reason.contains(rejection))
+}
+
+fn terminal_reason(reason: &str) -> String {
+    if is_deterministic_rejection(reason) {
+        format!("rejected deterministically, not retried: {reason}")
+    } else {
+        format!("max attempts reached: {reason}")
+    }
+}
+
 fn classify_submit_failure(
     reason: &str,
     observed_owner: Option<[u8; 32]>,
@@ -519,7 +579,9 @@ fn classify_submit_failure(
 ) -> SubmitFailureAction {
     if observed_owner == Some(candidate) || reason.contains(ALREADY_REGISTERED) {
         SubmitFailureAction::Assign
-    } else if completed_attempts >= max_attempts {
+    } else if reason.contains(UNFUNDED_SIGNER) {
+        SubmitFailureAction::Park
+    } else if is_deterministic_rejection(reason) || completed_attempts >= max_attempts {
         SubmitFailureAction::Fail
     } else {
         SubmitFailureAction::Retry
@@ -689,7 +751,15 @@ impl Writer {
         for r in due {
             match parse_account(&r.candidate_account_id) {
                 Ok(candidate) => parsed.push((r, candidate)),
-                Err(_) => self.fail(guard, r, "invalid candidate SS58").await?,
+                Err(_) => {
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("invalid candidate SS58"),
+                    )
+                    .await?
+                }
             }
         }
         if parsed.is_empty() {
@@ -700,7 +770,7 @@ impl Writer {
             .iter()
             .map(|(r, _)| r.full_username.as_str())
             .collect();
-        let owners = match self.chain.username_owners(&names).await {
+        let owners = match self.chain.owners(&names).await {
             Ok(owners) => owners,
             Err(e) => {
                 // One read now covers the whole claimed set, so one bad
@@ -719,10 +789,17 @@ impl Writer {
         let mut submittable = Vec::with_capacity(parsed.len());
         for (r, candidate) in parsed {
             match owners.get(&r.full_username) {
-                Some(owner) if *owner == candidate => self.assign_observed(guard, r).await?,
+                Some(owner) if *owner == candidate => {
+                    People::record(&self.pool, guard, r, Outcome::Observed).await?
+                }
                 Some(_) => {
-                    self.fail(guard, r, "username owned by another account")
-                        .await?
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("username owned by another account"),
+                    )
+                    .await?
                 }
                 None => submittable.push((r, candidate)),
             }
@@ -744,7 +821,15 @@ impl Writer {
         let payload = build_registration_tx(r, &candidate, self.proxy_for.as_ref());
         let nonce = match self.nonce().await {
             Ok(n) => n,
-            Err(e) => return self.retry(guard, r, &format!("nonce fetch: {e}")).await,
+            Err(e) => {
+                return People::record(
+                    &self.pool,
+                    guard,
+                    r,
+                    Outcome::Retry(&format!("nonce fetch: {e}")),
+                )
+                .await
+            }
         };
 
         match self.submit(guard, r, &payload, nonce).await {
@@ -753,18 +838,13 @@ impl Writer {
                 // A lone row still proves the lane works, so it grows the size
                 // back toward the max after a halving search.
                 self.people_batch.succeeded(self.batch_max);
-                self.assign(guard, r).await
+                People::record(&self.pool, guard, r, Outcome::Landed).await
             }
             Err(e) => {
                 self.next_nonce = None;
                 let reason = e.to_string();
 
-                let observed_owner = self
-                    .chain
-                    .username_owner(&r.full_username)
-                    .await
-                    .ok()
-                    .flatten();
+                let observed_owner = self.chain.owner(&r.full_username).await.ok().flatten();
                 match classify_submit_failure(
                     &reason,
                     observed_owner,
@@ -772,11 +852,23 @@ impl Writer {
                     r.attempt + 1,
                     self.config.max_attempts,
                 ) {
-                    SubmitFailureAction::Assign => self.assign(guard, r).await,
-                    SubmitFailureAction::Retry => self.retry(guard, r, &reason).await,
+                    SubmitFailureAction::Assign => {
+                        People::record(&self.pool, guard, r, Outcome::Landed).await
+                    }
+                    SubmitFailureAction::Park => {
+                        People::record(&self.pool, guard, r, Outcome::Park(&reason)).await
+                    }
+                    SubmitFailureAction::Retry => {
+                        People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
-                        self.fail(guard, r, &format!("max attempts reached: {reason}"))
-                            .await
+                        People::record(
+                            &self.pool,
+                            guard,
+                            r,
+                            Outcome::Failed(&terminal_reason(&reason)),
+                        )
+                        .await
                     }
                 }
             }
@@ -857,15 +949,14 @@ impl Writer {
         backoff: time::Duration,
         reason: &str,
     ) -> anyhow::Result<()> {
-        let not_before = OffsetDateTime::now_utc() + backoff;
+        let until = OffsetDateTime::now_utc() + backoff;
         for (r, _) in rows {
-            // `r.attempt`, not `attempt + 1`: where a submit was attempted,
-            // `mark_submitting` already wrote the incremented value, and a
-            // whole-batch fault must not leave it there.
-            if !outbox::mark_retry(&self.pool, guard, r.id, not_before, r.attempt, reason).await? {
-                anyhow::bail!("lease lost while re-queueing a failed batch");
-            }
-            record_submit_outcome("people", "retry");
+            let outcome = Outcome::Defer {
+                until,
+                reason,
+                cause: Defer::Batch,
+            };
+            People::record(&self.pool, guard, r, outcome).await?;
         }
         Ok(())
     }
@@ -935,7 +1026,7 @@ impl Writer {
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => "people")
             .increment(failed.len() as u64);
-        let owners = match self.chain.username_owners(&failed).await {
+        let owners = match self.chain.owners(&failed).await {
             Ok(owners) => owners,
             Err(e) => {
                 // Best-effort, exactly as the single-submit path's reconcile
@@ -947,7 +1038,7 @@ impl Writer {
 
         for ((r, candidate), item) in rows.iter().zip(items) {
             let Err(reason) = item else {
-                self.assign(guard, r).await?;
+                People::record(&self.pool, guard, r, Outcome::Landed).await?;
                 continue;
             };
             let observed = owners.get(&r.full_username).copied();
@@ -958,11 +1049,23 @@ impl Writer {
                 r.attempt + 1,
                 self.config.max_attempts,
             ) {
-                SubmitFailureAction::Assign => self.assign(guard, r).await?,
-                SubmitFailureAction::Retry => self.retry(guard, r, &reason).await?,
+                SubmitFailureAction::Assign => {
+                    People::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
+                SubmitFailureAction::Park => {
+                    People::record(&self.pool, guard, r, Outcome::Park(&reason)).await?
+                }
+                SubmitFailureAction::Retry => {
+                    People::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
+                }
                 SubmitFailureAction::Fail => {
-                    self.fail(guard, r, &format!("max attempts reached: {reason}"))
-                        .await?
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed(&terminal_reason(&reason)),
+                    )
+                    .await?
                 }
             }
         }
@@ -982,7 +1085,7 @@ impl Writer {
         reason: &str,
     ) -> anyhow::Result<()> {
         let names: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match self.chain.username_owners(&names).await {
+        let owners = match self.chain.owners(&names).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -998,7 +1101,7 @@ impl Writer {
         let mut unlanded = Vec::new();
         for (r, candidate) in rows {
             if owners.get(&r.full_username) == Some(candidate) {
-                self.assign(guard, r).await?;
+                People::record(&self.pool, guard, r, Outcome::Landed).await?;
             } else {
                 unlanded.push((*r, *candidate));
             }
@@ -1143,7 +1246,15 @@ impl Writer {
         for r in &stuck {
             match parse_account(&r.candidate_account_id) {
                 Ok(candidate) => parsed.push((r, candidate)),
-                Err(_) => self.fail(guard, r, "invalid candidate SS58").await?,
+                Err(_) => {
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("invalid candidate SS58"),
+                    )
+                    .await?
+                }
             }
         }
         if parsed.is_empty() {
@@ -1161,7 +1272,7 @@ impl Writer {
                 .iter()
                 .map(|(r, _)| r.full_username.as_str())
                 .collect();
-            let owners = match self.chain.username_owners(&names).await {
+            let owners = match self.chain.owners(&names).await {
                 Ok(owners) => owners,
                 Err(e) => {
                     // Left `SUBMITTING` rather than guessed about: unknown is
@@ -1177,10 +1288,15 @@ impl Writer {
             };
             for (r, candidate) in chunk {
                 if owners.get(&r.full_username) == Some(candidate) {
-                    self.assign_observed(guard, r).await?;
+                    People::record(&self.pool, guard, r, Outcome::Observed).await?;
                 } else {
-                    self.retry(guard, r, "reconcile: not yet on-chain, re-queued")
-                        .await?;
+                    People::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Retry("reconcile: not yet on-chain, re-queued"),
+                    )
+                    .await?;
                 }
             }
         }
@@ -1316,7 +1432,13 @@ impl Writer {
         let mut gated = Vec::with_capacity(due.len());
         for r in due {
             let Ok(candidate) = parse_account(&r.candidate_account_id) else {
-                self.dotns_fail(guard, r, "invalid candidate SS58").await?;
+                Dotns::record(
+                    &self.pool,
+                    guard,
+                    r,
+                    Outcome::Failed("invalid candidate SS58"),
+                )
+                .await?;
                 continue;
             };
             match check_dotns_submittable(r, &candidate, &self.config.attester, window, now) {
@@ -1332,7 +1454,7 @@ impl Writer {
             .iter()
             .map(|(r, _)| r.full_username.as_str())
             .collect();
-        let owners = match asset_hub.lite_label_owners(&labels).await {
+        let owners = match asset_hub.owners(&labels).await {
             Ok(owners) => owners,
             Err(e) => {
                 // One read covers every gated row, so a bad response is a
@@ -1350,10 +1472,17 @@ impl Writer {
         let mut submittable = Vec::with_capacity(gated.len());
         for (r, candidate) in gated {
             match owners.get(&r.full_username) {
-                Some(owner) if *owner == candidate => self.dotns_reserve(guard, r).await?,
+                Some(owner) if *owner == candidate => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
                 Some(_) => {
-                    self.dotns_fail(guard, r, "lite label reserved by another account")
-                        .await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("lite label reserved by another account"),
+                    )
+                    .await?
                 }
                 None => submittable.push((r, candidate)),
             }
@@ -1379,26 +1508,37 @@ impl Writer {
                     signed_at,
                     deadline_secs,
                 } => {
-                    self.dotns_expire(
+                    Dotns::record(
+                        &self.pool,
                         guard,
                         r,
-                        &format!(
+                        Outcome::Expired(&format!(
                             "reservation signature expired: signed_at={signed_at}, window \
                              {deadline_secs}s, now={now}. Only the client can re-sign."
-                        ),
+                        )),
                     )
                     .await
                 }
                 DotnsReject::NotInLane => {
-                    self.dotns_fail(guard, r, "row has no complete dotns block")
-                        .await
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("row has no complete dotns block"),
+                    )
+                    .await
                 }
                 DotnsReject::BadSignature => {
-                    self.dotns_fail(guard, r, "dotns signature does not verify")
-                        .await
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed("dotns signature does not verify"),
+                    )
+                    .await
                 }
                 DotnsReject::UnbuildableLabel(why) | DotnsReject::UnbuildableReserved(why) => {
-                    self.dotns_fail(guard, r, &why).await
+                    Dotns::record(&self.pool, guard, r, Outcome::Failed(&why)).await
                 }
                 DotnsReject::FutureDated {
                     signed_at,
@@ -1406,16 +1546,20 @@ impl Writer {
                 } => {
                     let until = OffsetDateTime::from_unix_timestamp(submittable_at)
                         .unwrap_or_else(|_| OffsetDateTime::now_utc());
-                    self.dotns_defer(
+                    Dotns::record(
+                        &self.pool,
                         guard,
                         r,
-                        until,
-                        &format!(
-                            "reservation signature is future-dated: signed_at={signed_at}, \
-                             now={now}, gateway tolerates {}s of skew. Re-queued until \
-                             {submittable_at}.",
-                            window.max_future_skew_secs
-                        ),
+                        Outcome::Defer {
+                            until,
+                            reason: &format!(
+                                "reservation signature is future-dated: signed_at={signed_at}, \
+                                 now={now}, gateway tolerates {}s of skew. Re-queued until \
+                                 {submittable_at}.",
+                                window.max_future_skew_secs
+                            ),
+                            cause: Defer::NotYet,
+                        },
                     )
                     .await
                 }
@@ -1439,9 +1583,8 @@ impl Writer {
         let nonce = match self.nonce_ah(asset_hub).await {
             Ok(n) => n,
             Err(e) => {
-                return self
-                    .dotns_retry(guard, r, &format!("asset hub nonce fetch: {e}"))
-                    .await
+                let reason = format!("asset hub nonce fetch: {e}");
+                return Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await;
             }
         };
 
@@ -1452,16 +1595,12 @@ impl Writer {
             Ok(()) => {
                 self.next_nonce_ah = Some(nonce + 1);
                 self.dotns_batch.succeeded(self.batch_max);
-                self.dotns_reserve(guard, r).await
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await
             }
             Err(e) => {
                 self.next_nonce_ah = None;
                 let reason = e.to_string();
-                let observed = asset_hub
-                    .lite_label_owner(&r.full_username)
-                    .await
-                    .ok()
-                    .flatten();
+                let observed = asset_hub.owner(&r.full_username).await.ok().flatten();
                 match classify_submit_failure(
                     &reason,
                     observed,
@@ -1469,11 +1608,23 @@ impl Writer {
                     r.dotns_attempt + 1,
                     self.config.max_attempts,
                 ) {
-                    SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await,
-                    SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await,
+                    SubmitFailureAction::Assign => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Landed).await
+                    }
+                    SubmitFailureAction::Park => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Park(&reason)).await
+                    }
+                    SubmitFailureAction::Retry => {
+                        Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await
+                    }
                     SubmitFailureAction::Fail => {
-                        self.dotns_fail(guard, r, &format!("max attempts reached: {reason}"))
-                            .await
+                        Dotns::record(
+                            &self.pool,
+                            guard,
+                            r,
+                            Outcome::Failed(&terminal_reason(&reason)),
+                        )
+                        .await
                     }
                 }
             }
@@ -1547,21 +1698,14 @@ impl Writer {
         backoff: time::Duration,
         reason: &str,
     ) -> anyhow::Result<()> {
-        let not_before = OffsetDateTime::now_utc() + backoff;
+        let until = OffsetDateTime::now_utc() + backoff;
         for (r, _) in rows {
-            if !outbox::mark_dotns_retry(
-                &self.pool,
-                guard,
-                r.id,
-                not_before,
-                r.dotns_attempt,
+            let outcome = Outcome::Defer {
+                until,
                 reason,
-            )
-            .await?
-            {
-                anyhow::bail!("lease lost while re-queueing a failed dotns batch");
-            }
-            record_submit_outcome("dotns", "retry");
+                cause: Defer::Batch,
+            };
+            Dotns::record(&self.pool, guard, r, outcome).await?;
         }
         Ok(())
     }
@@ -1621,7 +1765,7 @@ impl Writer {
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => "dotns")
             .increment(failed.len() as u64);
-        let owners = match asset_hub.lite_label_owners(&failed).await {
+        let owners = match asset_hub.owners(&failed).await {
             Ok(owners) => owners,
             Err(e) => {
                 tracing::warn!(error = %e, "post-batch label owner read failed; failed items will retry");
@@ -1631,7 +1775,7 @@ impl Writer {
 
         for ((r, candidate), item) in rows.iter().zip(items) {
             let Err(reason) = item else {
-                self.dotns_reserve(guard, r).await?;
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await?;
                 continue;
             };
             let observed = owners.get(&r.full_username).copied();
@@ -1642,11 +1786,23 @@ impl Writer {
                 r.dotns_attempt + 1,
                 self.config.max_attempts,
             ) {
-                SubmitFailureAction::Assign => self.dotns_reserve(guard, r).await?,
-                SubmitFailureAction::Retry => self.dotns_retry(guard, r, &reason).await?,
+                SubmitFailureAction::Assign => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Landed).await?
+                }
+                SubmitFailureAction::Park => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Park(&reason)).await?
+                }
+                SubmitFailureAction::Retry => {
+                    Dotns::record(&self.pool, guard, r, Outcome::Retry(&reason)).await?
+                }
                 SubmitFailureAction::Fail => {
-                    self.dotns_fail(guard, r, &format!("max attempts reached: {reason}"))
-                        .await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        r,
+                        Outcome::Failed(&terminal_reason(&reason)),
+                    )
+                    .await?
                 }
             }
         }
@@ -1663,7 +1819,7 @@ impl Writer {
         reason: &str,
     ) -> anyhow::Result<()> {
         let labels: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match asset_hub.lite_label_owners(&labels).await {
+        let owners = match asset_hub.owners(&labels).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -1679,7 +1835,7 @@ impl Writer {
         let mut unlanded = Vec::new();
         for (r, candidate) in rows {
             if owners.get(&r.full_username) == Some(candidate) {
-                self.dotns_reserve(guard, r).await?;
+                Dotns::record(&self.pool, guard, r, Outcome::Landed).await?;
             } else {
                 unlanded.push((*r, *candidate));
             }
@@ -1777,104 +1933,30 @@ impl Writer {
         };
         for r in outbox::dotns_submitting(&self.pool).await? {
             let Some(candidate) = parse_account(&r.candidate_account_id).ok() else {
-                self.dotns_fail(guard, &r, "invalid candidate SS58").await?;
+                Dotns::record(
+                    &self.pool,
+                    guard,
+                    &r,
+                    Outcome::Failed("invalid candidate SS58"),
+                )
+                .await?;
                 continue;
             };
-            match asset_hub.lite_label_owner(&r.full_username).await? {
-                Some(owner) if owner == candidate => self.dotns_reserve(guard, &r).await?,
+            match asset_hub.owner(&r.full_username).await? {
+                Some(owner) if owner == candidate => {
+                    Dotns::record(&self.pool, guard, &r, Outcome::Landed).await?
+                }
                 _ => {
-                    self.dotns_retry(guard, &r, "reconcile: not yet on Asset Hub, re-queued")
-                        .await?
+                    Dotns::record(
+                        &self.pool,
+                        guard,
+                        &r,
+                        Outcome::Retry("reconcile: not yet on Asset Hub, re-queued"),
+                    )
+                    .await?
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn dotns_reserve(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_reserved(&self.pool, guard, r.id).await? {
-            anyhow::bail!("lease lost while reserving dotns name");
-        }
-        record_submit_outcome("dotns", "ok");
-        tracing::info!(id = r.id, username = %r.full_username, "dotns reserved on-chain");
-        Ok(())
-    }
-
-    async fn dotns_fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_failed(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while failing dotns reservation");
-        }
-        record_submit_outcome("dotns", "terminal");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            reason,
-            "dotns reservation failed terminally; the People registration is unaffected"
-        );
-        Ok(())
-    }
-
-    async fn dotns_expire(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_expired(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while expiring dotns reservation");
-        }
-        record_submit_outcome("dotns", "terminal");
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            reason,
-            "dotns reservation signature expired before submission"
-        );
-        Ok(())
-    }
-
-    async fn dotns_defer(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        until: OffsetDateTime,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, until, r.dotns_attempt, reason)
-            .await?
-        {
-            anyhow::bail!("lease lost while deferring dotns reservation");
-        }
-        tracing::warn!(
-            id = r.id,
-            username = %r.full_username,
-            until = %until,
-            reason,
-            "dotns reservation deferred; not yet within the gateway's skew bound"
-        );
-        Ok(())
-    }
-
-    async fn dotns_retry(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        reason: &str,
-    ) -> anyhow::Result<()> {
-        let attempt = r.dotns_attempt + 1;
-        let backoff = 2u64.saturating_pow(attempt.clamp(0, 6) as u32);
-        let not_before = OffsetDateTime::now_utc() + time::Duration::seconds(backoff as i64);
-        if !outbox::mark_dotns_retry(&self.pool, guard, r.id, not_before, attempt, reason).await? {
-            anyhow::bail!("lease lost while scheduling dotns retry");
-        }
-        record_submit_outcome("dotns", "retry");
-        tracing::warn!(
-            id = r.id,
-            attempt,
-            backoff_secs = backoff,
-            reason,
-            "dotns reservation retry scheduled"
-        );
         Ok(())
     }
 
@@ -1967,382 +2049,6 @@ impl Writer {
         }
         Ok(())
     }
-
-    /// Mark a row `ASSIGNED` because this writer's own submission put it
-    /// on-chain — including the reconcile of a submit that errored after the
-    /// extrinsic landed.
-    async fn assign(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        self.mark_assigned(guard, r, true).await
-    }
-
-    /// Mark a row `ASSIGNED` because the chain *already* showed the candidate as
-    /// the owner: an idempotent replay, or a row a previous writer submitted.
-    ///
-    /// Deliberately does not record `dub_registration_latency_seconds`. The row
-    /// may have been registered days ago or carried across a restart, so its
-    /// `created_at` age is not this writer's intake→on-chain time, and that
-    /// histogram is read as the writer's own throughput number.
-    async fn assign_observed(&self, guard: &Guard, r: &Reservation) -> anyhow::Result<()> {
-        self.mark_assigned(guard, r, false).await
-    }
-
-    async fn mark_assigned(
-        &self,
-        guard: &Guard,
-        r: &Reservation,
-        submitted: bool,
-    ) -> anyhow::Result<()> {
-        if !outbox::mark_assigned(&self.pool, guard, r.id).await? {
-            anyhow::bail!("lease lost while assigning");
-        }
-        record_submit_outcome("people", "ok");
-        let waited = (OffsetDateTime::now_utc() - r.created_at).as_seconds_f64();
-        if submitted {
-            // End to end, intake to on-chain — the number the throughput gate is
-            // measured against, and the one batching exists to move. Measured
-            // from the row's own `created_at`, so a backlog drained in one batch
-            // reports each row's real wait rather than the batch's.
-            metrics::histogram!("dub_registration_latency_seconds").record(waited.max(0.0));
-        }
-        tracing::info!(
-            id = r.id,
-            username = %r.full_username,
-            waited_secs = waited,
-            observed = !submitted,
-            "registration assigned on-chain"
-        );
-        Ok(())
-    }
-
-    async fn fail(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        if !outbox::mark_failed(&self.pool, guard, r.id, reason).await? {
-            anyhow::bail!("lease lost while failing");
-        }
-        record_submit_outcome("people", "terminal");
-        tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
-        Ok(())
-    }
-
-    async fn retry(&self, guard: &Guard, r: &Reservation, reason: &str) -> anyhow::Result<()> {
-        let attempt = r.attempt + 1;
-        let backoff = 2u64.saturating_pow(attempt.clamp(0, 6) as u32);
-        let not_before = OffsetDateTime::now_utc() + time::Duration::seconds(backoff as i64);
-        if !outbox::mark_retry(&self.pool, guard, r.id, not_before, attempt, reason).await? {
-            anyhow::bail!("lease lost while scheduling retry");
-        }
-        record_submit_outcome("people", "retry");
-        tracing::warn!(
-            id = r.id,
-            attempt,
-            backoff_secs = backoff,
-            reason,
-            "registration retry scheduled"
-        );
-        Ok(())
-    }
-}
-
-fn record_writer_info(config: &WriterConfig, signer: &AccountId32) {
-    metrics::gauge!(
-        "dub_writer_info",
-        "signer" => hex_account(&signer.0),
-        "attester" => hex_account(&config.attester),
-        "dotns_lane" => if config.dotns_gateway_enabled { "enabled" } else { "disabled" }
-    )
-    .set(1.0);
-}
-
-async fn record_spec_version<C: subxt::Config>(
-    chain: &'static str,
-    client: &subxt::OnlineClient<C>,
-) {
-    match client.at_current_block().await {
-        Ok(at) => {
-            metrics::gauge!("dub_chain_spec_version", "chain" => chain)
-                .set(at.spec_version() as f64);
-            metrics::gauge!("dub_chain_transaction_version", "chain" => chain)
-                .set(at.transaction_version() as f64);
-        }
-        Err(error) => {
-            tracing::warn!(chain, %error, "reading the runtime version failed");
-        }
-    }
-}
-
-const SUBMIT_LANES: [&str; 2] = ["people", "dotns"];
-const SUBMIT_OUTCOMES: [&str; 3] = ["ok", "retry", "terminal"];
-
-fn zero_init_submit_outcomes() {
-    for lane in SUBMIT_LANES {
-        for outcome in SUBMIT_OUTCOMES {
-            metrics::counter!("dub_chain_submit_total", "lane" => lane, "outcome" => outcome)
-                .absolute(0);
-        }
-        // Same reason, for the batch counters: "no batch has ever failed" and
-        // "the exporter is not reporting this lane" must not look alike.
-        metrics::counter!("dub_chain_batch_failed_total", "lane" => lane).absolute(0);
-        metrics::counter!("dub_chain_batch_item_failed_total", "lane" => lane).absolute(0);
-    }
-}
-
-fn record_submit_outcome(lane: &'static str, outcome: &'static str) {
-    metrics::counter!("dub_chain_submit_total", "lane" => lane, "outcome" => outcome).increment(1);
-}
-
-async fn record_outbox_gauges(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for (status, depth) in outbox::depth_by_status(pool).await? {
-        let status = status.as_str();
-        metrics::gauge!("dub_outbox_depth", "status" => status).set(depth.depth as f64);
-        metrics::gauge!("dub_outbox_oldest_age_seconds", "status" => status)
-            .set(depth.oldest_age_secs.unwrap_or(0.0));
-    }
-    // The Asset Hub lane's own depths. A separate series, because a row can
-    // rest in ASSIGNED + DOTNS_FAILED_TERMINAL and one gauge cannot say both.
-    for (status, depth) in outbox::dotns_depth_by_status(pool).await? {
-        let status = status.as_str();
-        metrics::gauge!("dub_dotns_outbox_depth", "status" => status).set(depth.depth as f64);
-        metrics::gauge!("dub_dotns_outbox_oldest_age_seconds", "status" => status)
-            .set(depth.oldest_age_secs.unwrap_or(0.0));
-    }
-    Ok(())
-}
-
-/// Fail a submit whose proxied call was rejected inside a successful
-/// `Proxy.proxy` extrinsic.
-///
-/// A rejected inner call still emits `ExtrinsicSuccess`, so without this check
-/// `wait_for_success` reports a registration that never landed as `ASSIGNED`.
-fn check_proxied_call<T: subxt::Config>(
-    events: &ExtrinsicEvents<T>,
-    metadata: &ArcMetadata,
-) -> anyhow::Result<()> {
-    for event in events.iter() {
-        let event = event.context("decoding events")?;
-        if event.pallet_name() != "Proxy" || event.event_name() != "ProxyExecuted" {
-            continue;
-        }
-        if let Err(reason) = dispatch_result(event.field_bytes())? {
-            anyhow::bail!("proxied call failed: {}", describe(reason, metadata));
-        }
-    }
-    Ok(())
-}
-
-fn dispatch_result(field_bytes: &[u8]) -> anyhow::Result<Result<(), &[u8]>> {
-    match field_bytes.split_first() {
-        Some((0, _)) => Ok(Ok(())),
-        Some((1, error)) => Ok(Err(error)),
-        _ => anyhow::bail!("ProxyExecuted's result is not a Result<(), DispatchError>"),
-    }
-}
-
-fn item_results<T: subxt::Config>(
-    events: &ExtrinsicEvents<T>,
-    metadata: &ArcMetadata,
-) -> anyhow::Result<Vec<Result<(), String>>> {
-    let decoded = events
-        .iter()
-        .collect::<Result<Vec<_>, _>>()
-        .context("decoding batch events")?;
-
-    Ok(
-        batch_item_results(decoded, |event| (event.pallet_name(), event.event_name()))
-            .into_iter()
-            .map(|item| item.map_err(|event| describe(event.field_bytes(), metadata)))
-            .collect(),
-    )
-}
-
-fn describe(bytes: &[u8], metadata: &ArcMetadata) -> String {
-    match DispatchError::decode_from(bytes, metadata.clone()) {
-        Ok(DispatchError::Module(module)) => module.details_string(),
-        Ok(other) => format!("{other:?}"),
-        Err(e) => format!("undecodable dispatch error: {e}"),
-    }
-}
-
-fn build_registration_tx(
-    r: &Reservation,
-    candidate: &[u8; 32],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    match proxy_for {
-        Some(real) => {
-            let args = vec![
-                // real: MultiAddress::Id(attester authority)
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                // force_proxy_type: Option<ProxyType> = None (any granted type)
-                Value::unnamed_variant("None", []),
-                attest_call(r, candidate),
-            ];
-            dynamic::tx("Proxy", "proxy", args)
-        }
-        None => dynamic::tx("PeopleLite", "attest", attest_args(r, candidate)),
-    }
-}
-
-/// Build a whole pass as one extrinsic: `Utility.force_batch` of `attest`
-/// calls, optionally wrapped in `Proxy.proxy(real = attester authority, …)`.
-///
-/// `force_batch`, never `batch_all`: one poison row must not block its batch.
-/// The call order here **is** the positional contract the item fan-out relies
-/// on.
-///
-/// Never called with a single row — that stays a bare `attest`
-/// ([`build_registration_tx`]).
-fn build_registration_batch_tx(
-    rows: &[(&Reservation, [u8; 32])],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    let calls = Value::unnamed_composite(
-        rows.iter()
-            .map(|(r, candidate)| attest_call(r, candidate))
-            .collect::<Vec<_>>(),
-    );
-    match proxy_for {
-        Some(real) => dynamic::tx(
-            "Proxy",
-            "proxy",
-            vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                force_batch_call(calls),
-            ],
-        ),
-        None => dynamic::tx("Utility", "force_batch", vec![calls]),
-    }
-}
-
-/// `Utility.force_batch(calls)` as a `RuntimeCall` value, for wrapping in a
-/// proxy.
-fn force_batch_call(calls: Value) -> Value {
-    Value::unnamed_variant("Utility", [Value::unnamed_variant("force_batch", [calls])])
-}
-
-/// Builds the dotNS reservation extrinsic: `DotnsGateway.reserve_name`.
-///
-/// Optionally wrapped in `Proxy.proxy(real = attester authority, …)`.
-///
-/// Argument order is asserted against the connected runtime's metadata at
-/// startup ([`AssetHub::connect`]). A chain running the older
-/// proof-of-ownership variant never reaches this function.
-fn build_reserve_name_tx(
-    r: &Reservation,
-    candidate: &[u8; 32],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    match proxy_for {
-        Some(real) => {
-            let args = vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                reserve_name_call(r, candidate),
-            ];
-            dynamic::tx("Proxy", "proxy", args)
-        }
-        None => dynamic::tx(
-            "DotnsGateway",
-            "reserve_name",
-            reserve_name_args(r, candidate),
-        ),
-    }
-}
-
-/// Build a whole dotNS pass as one `Utility.force_batch` of `reserve_name`
-/// calls, optionally proxied. The Asset Hub twin of
-/// [`build_registration_batch_tx`], with the same positional contract.
-///
-/// Never called with a single row — that stays a bare `reserve_name`.
-fn build_reserve_name_batch_tx(
-    rows: &[(&Reservation, [u8; 32])],
-    proxy_for: Option<&[u8; 32]>,
-) -> DynamicPayload<Vec<Value>> {
-    let calls = Value::unnamed_composite(
-        rows.iter()
-            .map(|(r, candidate)| reserve_name_call(r, candidate))
-            .collect::<Vec<_>>(),
-    );
-    match proxy_for {
-        Some(real) => dynamic::tx(
-            "Proxy",
-            "proxy",
-            vec![
-                Value::unnamed_variant("Id", [Value::from_bytes(real)]),
-                Value::unnamed_variant("None", []),
-                force_batch_call(calls),
-            ],
-        ),
-        None => dynamic::tx("Utility", "force_batch", vec![calls]),
-    }
-}
-
-/// One `DotnsGateway.reserve_name` call as a `RuntimeCall` value.
-fn reserve_name_call(r: &Reservation, candidate: &[u8; 32]) -> Value {
-    Value::unnamed_variant(
-        "DotnsGateway",
-        [Value::unnamed_variant(
-            "reserve_name",
-            reserve_name_args(r, candidate),
-        )],
-    )
-}
-
-fn reserve_name_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
-    let reserved_base_label = match &r.reserved_username {
-        Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
-        None => Value::unnamed_variant("None", []),
-    };
-    vec![
-        Value::from_bytes(candidate),
-        sr25519_signature(r.dotns_signature.as_deref().unwrap_or_default()),
-        Value::from_bytes(r.full_username.as_bytes()),
-        Value::from_bytes(&r.identifier_key),
-        reserved_base_label,
-        Value::u128(u128::from(
-            r.dotns_signed_at.unwrap_or_default().unsigned_abs(),
-        )),
-    ]
-}
-
-fn attest_call(r: &Reservation, candidate: &[u8; 32]) -> Value {
-    Value::unnamed_variant(
-        "PeopleLite",
-        [Value::unnamed_variant("attest", attest_args(r, candidate))],
-    )
-}
-
-fn attest_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
-    let reserved_username = match &r.reserved_username {
-        Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
-        None => Value::unnamed_variant("None", []),
-    };
-    let consumer = Value::named_composite(vec![
-        (
-            "signature".to_string(),
-            sr25519_signature(&r.consumer_registration_signature),
-        ),
-        ("account".to_string(), Value::from_bytes(candidate)),
-        (
-            "identifier_key".to_string(),
-            Value::from_bytes(&r.identifier_key),
-        ),
-        (
-            "username".to_string(),
-            Value::from_bytes(r.full_username.as_bytes()),
-        ),
-        ("reserved_username".to_string(), reserved_username),
-    ]);
-    vec![
-        Value::from_bytes(candidate),
-        sr25519_signature(&r.candidate_signature),
-        Value::from_bytes(&r.ring_vrf_key),
-        Value::from_bytes(&r.proof_of_ownership),
-        Value::unnamed_variant("Some", [consumer]),
-    ]
-}
-
-fn sr25519_signature(bytes: &[u8]) -> Value {
-    Value::unnamed_variant("Sr25519", [Value::from_bytes(bytes)])
 }
 
 fn parse_account(ss58: &str) -> anyhow::Result<[u8; 32]> {
@@ -2371,229 +2077,8 @@ fn env_u16(key: &str, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use super::fixtures::*;
     use super::*;
-    use chain_types::people::runtime_types::sp_runtime::{
-        DispatchError as RuntimeDispatchError, ModuleError,
-    };
-    use subxt::ext::scale_encode::EncodeAsType as _;
-
-    fn reservation() -> Reservation {
-        Reservation {
-            id: 1,
-            full_username: "testing.42".to_string(),
-            candidate_account_id: String::new(),
-            candidate_signature: vec![1; 64],
-            ring_vrf_key: vec![2; 32],
-            proof_of_ownership: vec![3; 64],
-            consumer_registration_signature: vec![4; 64],
-            identifier_key: vec![5; 65],
-            reserved_username: None,
-            attempt: 0,
-            dotns_signature: None,
-            dotns_signed_at: None,
-            dotns_attempt: 0,
-            created_at: OffsetDateTime::UNIX_EPOCH,
-        }
-    }
-
-    /// A lone registration submits a bare `attest`. It should not pay for a
-    /// `force_batch` wrapper, and this is the path whose `ProxyExecuted` is
-    /// still a genuine per-row verdict.
-    #[test]
-    fn a_single_row_set_submits_a_bare_attest() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let payload = build_registration_tx(&reservation, &candidate, None);
-
-        assert_eq!(payload.pallet_name(), "PeopleLite");
-        assert_eq!(payload.call_name(), "attest");
-        assert_eq!(payload.call_data(), &attest_args(&reservation, &candidate));
-    }
-
-    /// Two rows: one `Utility.force_batch` whose calls are the rows' own
-    /// `attest`s, in claim order. That order **is** the positional contract the
-    /// item fan-out decides each row by.
-    #[test]
-    fn a_multi_row_batch_is_a_force_batch_of_attests_in_claim_order() {
-        let (first, second) = (reservation(), other_reservation());
-        let (a, b) = ([7; 32], [8; 32]);
-        let rows = [(&first, a), (&second, b)];
-        let payload = build_registration_batch_tx(&rows, None);
-
-        assert_eq!(payload.pallet_name(), "Utility");
-        assert_eq!(payload.call_name(), "force_batch");
-        assert_eq!(payload.call_data().len(), 1);
-        assert_eq!(
-            payload.call_data()[0],
-            Value::unnamed_composite([attest_call(&first, &a), attest_call(&second, &b)])
-        );
-    }
-
-    /// Proxied, the batch is the proxied call: `Proxy.proxy`'s third argument
-    /// is the whole `force_batch`, not one attest.
-    #[test]
-    fn a_proxied_batch_wraps_the_force_batch() {
-        let (first, second) = (reservation(), other_reservation());
-        let (a, b) = ([7; 32], [8; 32]);
-        let rows = [(&first, a), (&second, b)];
-        let payload = build_registration_batch_tx(&rows, Some(&[9; 32]));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            force_batch_call(Value::unnamed_composite([
-                attest_call(&first, &a),
-                attest_call(&second, &b)
-            ]))
-        );
-    }
-
-    /// AIMD, and the shared backoff: a whole-batch failure halves the size and
-    /// defers the *set* once, rather than putting every row back into the very
-    /// next pass on its own `2^attempt`.
-    #[test]
-    fn a_failing_lane_halves_its_batch_and_backs_off_once_per_failure() {
-        let mut lane = BatchLane::new("test", 25);
-        assert_eq!(lane.size, 25);
-
-        assert_eq!(lane.failed(25), time::Duration::seconds(2));
-        assert_eq!(lane.size, 12);
-        assert_eq!(lane.failed(25), time::Duration::seconds(4));
-        assert_eq!(lane.size, 6);
-
-        // Success clears the run and climbs back one at a time.
-        lane.succeeded(25);
-        assert_eq!(lane.size, 7);
-        assert_eq!(lane.failed(25), time::Duration::seconds(2));
-
-        // Floor 1: the search ends at a single row, never at zero — a batch of
-        // nothing is not a submission.
-        let mut floored = BatchLane::new("test", 25);
-        for _ in 0..10 {
-            floored.failed(25);
-        }
-        assert_eq!(floored.size, 1);
-
-        // The backoff exponent is clamped, so a long outage does not push the
-        // next attempt past an hour.
-        assert_eq!(floored.failed(25), time::Duration::seconds(64));
-    }
-
-    /// A chain that rejects every batch of two or more must not make the lane
-    /// alternate 1 -> 2 -> fail forever, paying a fee and a nonce on every other
-    /// pass. The lane remembers the size that failed and stops below it, and
-    /// only probes again after a long clean run.
-    #[test]
-    fn a_size_that_failed_is_remembered_and_only_re_probed_after_a_clean_run() {
-        let mut lane = BatchLane::new("test", 25);
-
-        // Walk down to the floor the way a force_batch-rejecting proxy would.
-        // The halving skips 2 (3 / 2 == 1), so 3 is all the lane knows so far.
-        while lane.size > 1 {
-            lane.failed(25);
-        }
-        assert_eq!(lane.size, 1);
-        assert_eq!(lane.ceiling, Some(3));
-
-        // The single row succeeds and the lane probes 2 — the one size below
-        // its ceiling it has not tried. That fails, and now it knows.
-        lane.succeeded(25);
-        assert_eq!(lane.size, 2);
-        lane.failed(25);
-        assert_eq!(lane.size, 1);
-        assert_eq!(
-            lane.ceiling,
-            Some(2),
-            "2 is the smallest size known to fail"
-        );
-
-        // From here single rows keep succeeding and the lane stays at 1 rather
-        // than climbing straight back into the size that just failed.
-        for _ in 0..(CEILING_PROBE_RUN - 1) {
-            lane.succeeded(25);
-            assert_eq!(lane.size, 1);
-        }
-
-        // Only after a long clean run does it relax the ceiling and try 2
-        // again — one wasted batch per run, not one per pass.
-        lane.succeeded(25);
-        assert_eq!(lane.ceiling, Some(3));
-        assert_eq!(lane.size, 2);
-
-        // A lane that never failed is never capped.
-        let mut healthy = BatchLane::new("test", 25);
-        healthy.size = 1;
-        for _ in 0..5 {
-            healthy.succeeded(25);
-        }
-        assert_eq!(healthy.size, 6);
-        assert_eq!(healthy.ceiling, None);
-    }
-
-    /// A second row that differs from [`reservation`] in every field the call
-    /// carries, so an out-of-order batch cannot pass by coincidence.
-    fn other_reservation() -> Reservation {
-        Reservation {
-            id: 2,
-            full_username: "second.07".to_string(),
-            candidate_signature: vec![11; 64],
-            ring_vrf_key: vec![12; 32],
-            proof_of_ownership: vec![13; 64],
-            consumer_registration_signature: vec![14; 64],
-            identifier_key: vec![15; 65],
-            reserved_username: Some("second".to_string()),
-            ..reservation()
-        }
-    }
-
-    #[test]
-    fn proxied_registration_wraps_attest_directly() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let proxy_for = [8; 32];
-        let payload = build_registration_tx(&reservation, &candidate, Some(&proxy_for));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            attest_call(&reservation, &candidate)
-        );
-    }
-
-    #[test]
-    fn failed_attest_retries_then_fails_without_becoming_assigned() {
-        let candidate = [7; 32];
-        let reason = "PeopleLite.InvalidAttestationSignature";
-
-        assert_eq!(
-            classify_submit_failure(reason, None, candidate, 1, 3),
-            SubmitFailureAction::Retry
-        );
-        assert_eq!(
-            classify_submit_failure(reason, None, candidate, 3, 3),
-            SubmitFailureAction::Fail
-        );
-    }
-
-    #[test]
-    fn submit_error_assigns_only_after_successful_reconciliation() {
-        let candidate = [7; 32];
-
-        assert_eq!(
-            classify_submit_failure("finalization timed out", Some(candidate), candidate, 1, 3),
-            SubmitFailureAction::Assign
-        );
-        assert_eq!(
-            classify_submit_failure(ALREADY_REGISTERED, None, candidate, 1, 3),
-            SubmitFailureAction::Assign
-        );
-        assert_eq!(
-            classify_submit_failure("dispatch failed", Some([8; 32]), candidate, 1, 3),
-            SubmitFailureAction::Retry
-        );
-    }
 
     const FROM_ENV_VARS: &[&str] = &[
         "DEVICE_ATTESTATION_DATABASE_URL",
@@ -2625,7 +2110,197 @@ mod tests {
     ];
 
     const ALICE_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+
     const ALICE_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+
+    #[test]
+    fn a_failing_lane_halves_its_batch_and_backs_off_once_per_failure() {
+        let mut lane = BatchLane::new("test", 25);
+        assert_eq!(lane.size, 25);
+
+        assert_eq!(lane.failed(25), time::Duration::seconds(2));
+        assert_eq!(lane.size, 12);
+        assert_eq!(lane.failed(25), time::Duration::seconds(4));
+        assert_eq!(lane.size, 6);
+
+        lane.succeeded(25);
+        assert_eq!(lane.size, 7);
+        assert_eq!(lane.failed(25), time::Duration::seconds(2));
+
+        let mut floored = BatchLane::new("test", 25);
+        for _ in 0..10 {
+            floored.failed(25);
+        }
+        assert_eq!(floored.size, 1);
+
+        assert_eq!(floored.failed(25), time::Duration::seconds(64));
+    }
+
+    #[test]
+    fn a_size_that_failed_is_remembered_and_only_re_probed_after_a_clean_run() {
+        let mut lane = BatchLane::new("test", 25);
+
+        while lane.size > 1 {
+            lane.failed(25);
+        }
+        assert_eq!(lane.size, 1);
+        assert_eq!(lane.ceiling, Some(3));
+
+        lane.succeeded(25);
+        assert_eq!(lane.size, 2);
+        lane.failed(25);
+        assert_eq!(lane.size, 1);
+        assert_eq!(
+            lane.ceiling,
+            Some(2),
+            "2 is the smallest size known to fail"
+        );
+
+        for _ in 0..(CEILING_PROBE_RUN - 1) {
+            lane.succeeded(25);
+            assert_eq!(lane.size, 1);
+        }
+
+        lane.succeeded(25);
+        assert_eq!(lane.ceiling, Some(3));
+        assert_eq!(lane.size, 2);
+
+        let mut healthy = BatchLane::new("test", 25);
+        healthy.size = 1;
+        for _ in 0..5 {
+            healthy.succeeded(25);
+        }
+        assert_eq!(healthy.size, 6);
+        assert_eq!(healthy.ceiling, None);
+    }
+
+    #[test]
+    fn failed_attest_retries_then_fails_without_becoming_assigned() {
+        let candidate = [7; 32];
+        let reason = "PeopleLite.InvalidAttestationSignature";
+
+        assert_eq!(
+            classify_submit_failure(reason, None, candidate, 1, 3),
+            SubmitFailureAction::Retry
+        );
+        assert_eq!(
+            classify_submit_failure(reason, None, candidate, 3, 3),
+            SubmitFailureAction::Fail
+        );
+    }
+
+    const UNFUNDED_ERROR: &str = "max attempts reached: Error during transaction progress: \
+         The transaction is not valid: Invalid transaction: Inability to pay some fees \
+         (e.g. account balance too low)";
+
+    #[test]
+    fn an_unfunded_signer_parks_and_never_becomes_terminal() {
+        let candidate = [7; 32];
+
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, None, candidate, 1, 3),
+            SubmitFailureAction::Park
+        );
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, None, candidate, 99, 3),
+            SubmitFailureAction::Park
+        );
+        assert_eq!(
+            classify_submit_failure(UNFUNDED_ERROR, Some(candidate), candidate, 99, 3),
+            SubmitFailureAction::Assign
+        );
+    }
+
+    #[test]
+    fn a_deterministic_rejection_fails_on_the_first_pass() {
+        let candidate = [7; 32];
+        let reason = "proxied call failed: Resources::UsernameReservationTaken";
+
+        assert_eq!(
+            classify_submit_failure(reason, None, candidate, 1, 8),
+            SubmitFailureAction::Fail
+        );
+        assert_eq!(
+            classify_submit_failure(reason, Some(candidate), candidate, 1, 8),
+            SubmitFailureAction::Assign
+        );
+        assert_eq!(
+            classify_submit_failure(
+                "proxied call failed: Resources::Whatever",
+                None,
+                candidate,
+                1,
+                8
+            ),
+            SubmitFailureAction::Retry
+        );
+    }
+
+    #[test]
+    fn every_reservation_leg_rejection_fails_on_the_first_pass() {
+        let candidate = [7; 32];
+        // All three abort `attest` before the lite username is written, and the
+        // consumer signature covers `reserved_username`, so no resubmission
+        // this writer can build would land. Retrying only spends fees.
+        for error in [
+            "Resources::UsernameReservationTaken",
+            "Resources::QueueFull",
+            "Resources::AlreadyHasReservation",
+        ] {
+            let reason = format!("proxied call failed: {error}");
+            assert_eq!(
+                classify_submit_failure(&reason, None, candidate, 1, 8),
+                SubmitFailureAction::Fail,
+                "{error} should not be retried"
+            );
+            assert!(
+                terminal_reason(&reason).starts_with("rejected deterministically, not retried"),
+                "{error} should be reported as a deterministic rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn a_queue_full_from_another_pallet_still_retries() {
+        // The match is a substring test, so the guard is the pallet prefix.
+        // Only `Resources`' queue bounds the reservation leg.
+        let candidate = [7; 32];
+        assert_eq!(
+            classify_submit_failure(
+                "proxied call failed: DotnsGateway::QueueFull",
+                None,
+                candidate,
+                1,
+                8
+            ),
+            SubmitFailureAction::Retry
+        );
+    }
+
+    #[test]
+    fn terminal_text_names_the_rule_that_ended_the_row() {
+        assert!(terminal_reason("Resources::UsernameReservationTaken")
+            .starts_with("rejected deterministically, not retried"));
+        assert!(terminal_reason("dispatch failed").starts_with("max attempts reached"));
+    }
+
+    #[test]
+    fn submit_error_assigns_only_after_successful_reconciliation() {
+        let candidate = [7; 32];
+
+        assert_eq!(
+            classify_submit_failure("finalization timed out", Some(candidate), candidate, 1, 3),
+            SubmitFailureAction::Assign
+        );
+        assert_eq!(
+            classify_submit_failure(ALREADY_REGISTERED, None, candidate, 1, 3),
+            SubmitFailureAction::Assign
+        );
+        assert_eq!(
+            classify_submit_failure("dispatch failed", Some([8; 32]), candidate, 1, 3),
+            SubmitFailureAction::Retry
+        );
+    }
 
     fn from_env_with(vars: &[(&str, &str)]) -> anyhow::Result<WriterConfig> {
         for key in FROM_ENV_VARS {
@@ -2777,86 +2452,6 @@ mod tests {
         assert_eq!(config.batch_size, 25);
     }
 
-    /// A `DispatchError` encoded the way a runtime writes one into an event
-    /// field: against the shape the metadata declares, not a hand-rolled guess
-    /// at the variant indices.
-    fn encoded(error: RuntimeDispatchError) -> Vec<u8> {
-        let metadata = chain_types::metadata_arc();
-        let ty = metadata
-            .dispatch_error_ty()
-            .expect("vendored metadata declares a DispatchError type");
-        let mut out = Vec::new();
-        error
-            .encode_as_type_to(ty, metadata.types(), &mut out)
-            .expect("DispatchError encodes against its own declared type");
-        out
-    }
-
-    /// A module error as a runtime encodes it into an event field.
-    fn module_error(index: u8, error: u8) -> Vec<u8> {
-        encoded(RuntimeDispatchError::Module(ModuleError {
-            index,
-            error: [error, 0, 0, 0],
-        }))
-    }
-
-    /// Regression: the silent-failure fix — a proxied call the chain rejected
-    /// was being recorded as `ASSIGNED`, because the outer extrinsic succeeds.
-    #[test]
-    fn module_errors_resolve_to_pallet_and_variant_names() {
-        let metadata = chain_types::metadata_arc();
-
-        assert_eq!(
-            describe(&module_error(62, 1), &metadata),
-            "PeopleLite::InvalidAttestationSignature"
-        );
-        assert_eq!(
-            describe(&module_error(62, 3), &metadata),
-            "PeopleLite::AlreadyRegistered"
-        );
-        assert_eq!(
-            describe(&encoded(RuntimeDispatchError::BadOrigin), &metadata),
-            "BadOrigin"
-        );
-    }
-
-    /// `ProxyExecuted` carries a `Result<(), DispatchError>`. An `Ok` is not a
-    /// verdict on anything the call contained; an `Err` must reach the operator
-    /// named, not as opaque bytes; and a third shape is a decoding failure
-    /// rather than a silent success.
-    #[test]
-    fn proxy_results_split_into_outcome_and_named_reason() {
-        let metadata = chain_types::metadata_arc();
-
-        assert_eq!(dispatch_result(&[0]).expect("Ok result"), Ok(()));
-
-        let mut err = vec![1];
-        err.extend_from_slice(&module_error(62, 3));
-        let reason = dispatch_result(&err)
-            .expect("Err result")
-            .expect_err("carries an error");
-        assert_eq!(describe(reason, &metadata), "PeopleLite::AlreadyRegistered");
-
-        assert!(dispatch_result(&[]).is_err());
-        assert!(dispatch_result(&[7]).is_err());
-    }
-
-    /// An error the vendored metadata cannot name is reported as unresolvable,
-    /// never as a different pallet's error.
-    #[test]
-    fn unresolvable_errors_are_reported_as_such() {
-        let rendered = describe(&module_error(200, 1), &chain_types::metadata_arc());
-        assert!(
-            rendered.starts_with("Unknown pallet error"),
-            "unexpected rendering: {rendered}"
-        );
-    }
-
-    /// The rendered name must still hit the `AlreadyRegistered` branch — and
-    /// only People's. Both lanes now resolve error names against their own
-    /// connected runtime and share this classifier, so the match is
-    /// pallet-qualified: a gateway error spelled the same way is a failure to
-    /// retry, not a reservation that landed.
     #[test]
     fn rendered_already_registered_still_assigns() {
         assert_eq!(
@@ -2879,49 +2474,6 @@ mod tests {
             ),
             SubmitFailureAction::Retry
         );
-    }
-
-    #[test]
-    fn direct_mode_submits_attest_unwrapped() {
-        let reservation = reservation();
-        let candidate = [7; 32];
-        let payload = build_registration_tx(&reservation, &candidate, None);
-
-        assert_eq!(payload.pallet_name(), "PeopleLite");
-        assert_eq!(payload.call_name(), "attest");
-    }
-    const WINDOW: u64 = 259_200;
-    const SKEW: u64 = 30;
-    const SIGNED_AT: i64 = 1_750_000_000;
-
-    const BOUNDS: ValidityWindow = ValidityWindow {
-        max_validity_secs: WINDOW,
-        max_future_skew_secs: SKEW,
-    };
-
-    fn signed_reservation() -> (Reservation, [u8; 32], [u8; 32]) {
-        let keypair = subxt_signer::sr25519::Keypair::from_uri(
-            &subxt_signer::SecretUri::from_str("//dotns-writer-test").expect("valid uri"),
-        )
-        .expect("keypair");
-        let candidate = keypair.public_key().0;
-        let attester = [11u8; 32];
-        let identifier_key = vec![5; 65];
-
-        let message = dotns::reservation_message(
-            &candidate,
-            &attester,
-            b"testing",
-            &identifier_key,
-            None,
-            SIGNED_AT as u64,
-        );
-
-        let mut r = reservation();
-        r.identifier_key = identifier_key;
-        r.dotns_signature = Some(keypair.sign(&message).0.to_vec());
-        r.dotns_signed_at = Some(SIGNED_AT);
-        (r, candidate, attester)
     }
 
     #[test]
@@ -3081,65 +2633,5 @@ mod tests {
             ),
             Err(DotnsReject::Expired { .. })
         ));
-    }
-
-    #[test]
-    fn direct_reservation_targets_the_gateway_pallet() {
-        let (r, candidate, _) = signed_reservation();
-        let payload = build_reserve_name_tx(&r, &candidate, None);
-
-        assert_eq!(payload.pallet_name(), "DotnsGateway");
-        assert_eq!(payload.call_name(), "reserve_name");
-        assert_eq!(payload.call_data().len(), dotns::RESERVE_NAME_FIELDS.len());
-        assert_eq!(payload.call_data(), &reserve_name_args(&r, &candidate));
-    }
-
-    /// The dotNS lane batches the same way, with the same positional contract.
-    #[test]
-    fn a_multi_row_dotns_batch_is_a_force_batch_of_reserve_names() {
-        let (first, candidate, _) = signed_reservation();
-        let mut second = first.clone();
-        second.id = 2;
-        second.full_username = "second.07".to_string();
-        let rows = [(&first, candidate), (&second, candidate)];
-
-        let direct = build_reserve_name_batch_tx(&rows, None);
-        assert_eq!(direct.pallet_name(), "Utility");
-        assert_eq!(direct.call_name(), "force_batch");
-        assert_eq!(
-            direct.call_data()[0],
-            Value::unnamed_composite([
-                reserve_name_call(&first, &candidate),
-                reserve_name_call(&second, &candidate)
-            ])
-        );
-
-        let proxied = build_reserve_name_batch_tx(&rows, Some(&[9; 32]));
-        assert_eq!(proxied.pallet_name(), "Proxy");
-        assert_eq!(proxied.call_name(), "proxy");
-        assert_eq!(
-            proxied.call_data()[2],
-            force_batch_call(direct.call_data()[0].clone())
-        );
-    }
-
-    #[test]
-    fn proxied_reservation_wraps_reserve_name_directly() {
-        let (r, candidate, _) = signed_reservation();
-        let proxy_for = [8; 32];
-        let payload = build_reserve_name_tx(&r, &candidate, Some(&proxy_for));
-
-        assert_eq!(payload.pallet_name(), "Proxy");
-        assert_eq!(payload.call_name(), "proxy");
-        assert_eq!(
-            payload.call_data()[2],
-            Value::unnamed_variant(
-                "DotnsGateway",
-                [Value::unnamed_variant(
-                    "reserve_name",
-                    reserve_name_args(&r, &candidate)
-                )]
-            )
-        );
     }
 }

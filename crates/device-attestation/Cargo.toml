@@ -57,6 +57,8 @@ sqlx = { version = "0.8", default-features = false, features = [
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 base64 = "0.22"
 sha2 = "0.10"
+# Widevine dedup: HMAC-SHA256 pseudonymization of the raw device id.
+hmac = "0.12"
 # Payment lane: deposit-account derivation (blake2_256 of the
 # pallet_multisig entropy tuple and of the keyless dummy signatory).
 blake2 = "0.10"

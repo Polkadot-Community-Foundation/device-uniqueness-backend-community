@@ -5,6 +5,29 @@ use std::time::Duration;
 
 use sqlx::{PgPool, Row as _};
 
+/// Lock and validate the current writer lease for a transaction that will
+/// mutate lease-guarded state. Holding this row lock through commit prevents a
+/// replacement writer from taking over while that state transition is still
+/// in flight. Returns `false` when the lease is stale or expired.
+pub async fn fence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    holder_id: &str,
+    epoch: i64,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT 1 FROM writer_lease \
+         WHERE name = $1 AND holder_id = $2 AND lease_epoch = $3 AND expires_at > now() \
+         FOR UPDATE",
+    )
+    .bind(name)
+    .bind(holder_id)
+    .bind(epoch)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.is_some())
+}
+
 pub async fn try_acquire(
     pool: &PgPool,
     name: &str,

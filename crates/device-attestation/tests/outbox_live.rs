@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use device_attestation::chain::lease;
 use device_attestation::chain::outbox::{self, Guard, InsertError, NewReservation, Status};
+use device_attestation::widevine::store::{self as widevine_store, PendingDevice};
 
 async fn test_pool() -> sqlx::PgPool {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
@@ -253,6 +254,190 @@ async fn stale_guards_never_advance_a_row() {
         .await
         .expect("mark assigned"));
     assert_eq!(status_of(&pool, id).await, "ASSIGNED");
+
+    cleanup(&pool, &base, &lease_name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn terminal_failure_fences_takeover_and_releases_the_device_atomically() {
+    let pool = test_pool().await;
+    let pid = std::process::id();
+    let base = format!("outboxfence{pid}");
+    let lease_name = format!("outbox-live-fence-{pid}");
+    let holder = "holder-a";
+    let id = outbox::insert(&pool, &reservation(&base, "31"))
+        .await
+        .expect("insert");
+    set_status(&pool, &format!("{base}.31"), "SUBMITTING").await;
+    let device = PendingDevice { hmac: [31; 32] };
+    widevine_store::insert_pending(&pool, &device, id)
+        .await
+        .expect("insert pending device");
+
+    let first_epoch = lease::try_acquire(&pool, &lease_name, holder, Duration::from_secs(60))
+        .await
+        .expect("acquire")
+        .expect("lease free");
+    let first_guard = Guard {
+        lease_name: lease_name.clone(),
+        holder_id: holder.to_string(),
+        epoch: first_epoch,
+    };
+
+    // Rolling the terminal transaction back preserves both halves.
+    let mut rollback_tx = pool.begin().await.expect("begin rollback transaction");
+    assert!(lease::fence(
+        &mut rollback_tx,
+        &first_guard.lease_name,
+        &first_guard.holder_id,
+        first_guard.epoch,
+    )
+    .await
+    .expect("fence lease"));
+    assert!(
+        outbox::mark_failed(&mut *rollback_tx, &first_guard, id, "terminal")
+            .await
+            .expect("mark failed")
+    );
+    assert!(
+        widevine_store::release_for_reservation(&mut *rollback_tx, id)
+            .await
+            .expect("release pending device")
+    );
+    rollback_tx.rollback().await.expect("rollback");
+    assert_eq!(status_of(&pool, id).await, "SUBMITTING");
+    assert!(widevine_store::seen(&pool, &device.hmac)
+        .await
+        .expect("device lookup"));
+
+    let epoch = lease::try_acquire(&pool, &lease_name, holder, Duration::from_secs(60))
+        .await
+        .expect("refresh")
+        .expect("same holder refreshes");
+    let guard = Guard {
+        lease_name: lease_name.clone(),
+        holder_id: holder.to_string(),
+        epoch,
+    };
+    let mut tx = pool.begin().await.expect("begin terminal transaction");
+    assert!(
+        lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch)
+            .await
+            .expect("fence lease")
+    );
+    assert!(outbox::mark_failed(&mut *tx, &guard, id, "terminal")
+        .await
+        .expect("mark failed"));
+    assert!(widevine_store::release_for_reservation(&mut *tx, id)
+        .await
+        .expect("release pending device"));
+    sqlx::query("UPDATE writer_lease SET expires_at = now() - interval '1 second' WHERE name = $1")
+        .bind(&lease_name)
+        .execute(&mut *tx)
+        .await
+        .expect("expire fenced lease");
+
+    let takeover = tokio::time::timeout(
+        Duration::from_millis(100),
+        lease::try_acquire(&pool, &lease_name, "holder-b", Duration::from_secs(60)),
+    )
+    .await;
+    assert!(
+        takeover.is_err(),
+        "takeover must wait for the fenced transaction"
+    );
+
+    tx.commit().await.expect("commit terminal transaction");
+    let takeover_epoch =
+        lease::try_acquire(&pool, &lease_name, "holder-b", Duration::from_secs(60))
+            .await
+            .expect("takeover after commit")
+            .expect("expired lease is takeable after commit");
+    assert!(takeover_epoch > epoch);
+    assert_eq!(status_of(&pool, id).await, "FAILED_TERMINAL");
+    assert!(!widevine_store::seen(&pool, &device.hmac)
+        .await
+        .expect("device lookup"));
+
+    cleanup(&pool, &base, &lease_name).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; set DEVICE_ATTESTATION_TEST_DATABASE_URL and run with --ignored"]
+async fn assignment_and_device_consumption_commit_or_roll_back_together() {
+    let pool = test_pool().await;
+    let pid = std::process::id();
+    let base = format!("outboxassign{pid}");
+    let lease_name = format!("outbox-live-assign-{pid}");
+    let id = outbox::insert(&pool, &reservation(&base, "41"))
+        .await
+        .expect("insert");
+    set_status(&pool, &format!("{base}.41"), "SUBMITTING").await;
+    let device = PendingDevice { hmac: [41; 32] };
+    widevine_store::insert_pending(&pool, &device, id)
+        .await
+        .expect("insert pending device");
+
+    let epoch = lease::try_acquire(&pool, &lease_name, "holder-a", Duration::from_secs(60))
+        .await
+        .expect("acquire")
+        .expect("lease free");
+    let guard = Guard {
+        lease_name: lease_name.clone(),
+        holder_id: "holder-a".to_string(),
+        epoch,
+    };
+
+    let mut rollback_tx = pool.begin().await.expect("begin rollback transaction");
+    assert!(lease::fence(
+        &mut rollback_tx,
+        &guard.lease_name,
+        &guard.holder_id,
+        guard.epoch,
+    )
+    .await
+    .expect("fence lease"));
+    assert!(outbox::mark_assigned(&mut *rollback_tx, &guard, id)
+        .await
+        .expect("mark assigned"));
+    widevine_store::consume_for_reservation(&mut *rollback_tx, id)
+        .await
+        .expect("consume device");
+    rollback_tx.rollback().await.expect("rollback");
+    assert_eq!(status_of(&pool, id).await, "SUBMITTING");
+    let pending: (String, Option<i64>) = sqlx::query_as(
+        "SELECT status::text, reservation_id FROM widevine_devices WHERE device_hmac = $1",
+    )
+    .bind(&device.hmac[..])
+    .fetch_one(&pool)
+    .await
+    .expect("pending device state");
+    assert_eq!(pending, ("PENDING".to_string(), Some(id)));
+
+    let mut tx = pool.begin().await.expect("begin assignment transaction");
+    assert!(
+        lease::fence(&mut tx, &guard.lease_name, &guard.holder_id, guard.epoch)
+            .await
+            .expect("fence lease")
+    );
+    assert!(outbox::mark_assigned(&mut *tx, &guard, id)
+        .await
+        .expect("mark assigned"));
+    widevine_store::consume_for_reservation(&mut *tx, id)
+        .await
+        .expect("consume device");
+    tx.commit().await.expect("commit assignment transaction");
+
+    assert_eq!(status_of(&pool, id).await, "ASSIGNED");
+    let consumed: (String, Option<i64>) = sqlx::query_as(
+        "SELECT status::text, reservation_id FROM widevine_devices WHERE device_hmac = $1",
+    )
+    .bind(&device.hmac[..])
+    .fetch_one(&pool)
+    .await
+    .expect("consumed device state");
+    assert_eq!(consumed, ("CONSUMED".to_string(), None));
 
     cleanup(&pool, &base, &lease_name).await;
 }

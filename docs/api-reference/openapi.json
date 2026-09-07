@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, or a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright).",
+            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -482,8 +482,20 @@
               }
             }
           },
+          "403": {
+            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "error": "DEVICE_EVIDENCE_INVALID",
+                  "message": "device evidence invalid"
+                }
+              }
+            }
+          },
           "409": {
-            "description": "Preferred digits taken, no digits available, or username taken.",
+            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a full-person name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -524,7 +536,7 @@
             }
           },
           "503": {
-            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable).",
+            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -561,7 +573,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits.",
+            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -577,6 +589,9 @@
                         2,
                         3
                       ]
+                    },
+                    "takenx": {
+                      "status": "EXHAUSTED"
                     },
                     "abc": {
                       "status": "INVALID"
@@ -1256,7 +1271,7 @@
               "string",
               "null"
             ],
-            "description": "Optional reserved-name override.",
+            "description": "The bare full-person name to reserve. Its own name on chain — it need\nnot be `username`, and availability is checked against *this* name, not\nagainst the base of the lite username in the same claim.",
             "example": "reservedname"
           }
         }
@@ -1290,7 +1305,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "description": "`AVAILABLE`, `EXHAUSTED` (all 100 taken), or `INVALID` (fails base rules).",
+            "description": "`AVAILABLE`, `EXHAUSTED` (nothing claimable under this base), or `INVALID` (fails base rules).",
             "example": "AVAILABLE"
           },
           "availableDigits": {
@@ -1435,6 +1450,36 @@
             ],
             "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Ignored unless\n`REGISTRATION_VOUCHERS_ENABLED`.",
             "example": "base64url-voucher-key"
+          },
+          "attestationChain": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
+            "example": [
+              "base64-der-leaf",
+              "base64-der-root"
+            ]
+          },
+          "deviceChallenge": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 32-byte single-use challenge from `/auth/challenges`, bound\ninto the leaf key's attestation challenge.",
+            "example": "base64-32-byte-challenge"
+          },
+          "deviceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64 32-byte device pseudonym:\n`SHA-256(\"dub/poud/widevine-id/v1\" ‖ rawWidevineId)`, computed on the\ndevice — the raw id never leaves it.",
+            "example": "base64-32-byte-device-id"
           },
           "dotns": {
             "oneOf": [

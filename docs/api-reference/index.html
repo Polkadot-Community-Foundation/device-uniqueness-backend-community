@@ -1532,6 +1532,7 @@ credential key (no-op <code>202 {}</code> while <code>AUTH_ENABLED=false</code>)
             <span class="chip green">202</span>
             <span class="chip red">400</span>
             <span class="chip red">401</span>
+            <span class="chip red">403</span>
             <span class="chip blue">409</span>
             <span class="chip yellow">429</span>
             <span class="chip red">500</span>
@@ -1563,6 +1564,17 @@ credential key (no-op <code>202 {}</code> while <code>AUTH_ENABLED=false</code>)
                 <tr><td class="name">lifetimePoUDVoucher</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional single-use registration voucher (the INSTANT lane): bypasses
 the PoUD gate and the registration queue. Ignored unless
 <code>REGISTRATION_VOUCHERS_ENABLED</code>.</td></tr>
+                <tr><td class="name">attestationChain</td><td class="type">string[]</td><td class="req">no</td><td class="desc">Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
+base64 DER attestation chain, 2-10 entries, whose leaf key was created
+with <code>attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
+accountKey ‖ deviceId)</code>. All three evidence fields are present
+together or not at all; ignored unless <code>WIDEVINE_DEDUP_ENABLED</code>.
+Sent only when the app measured Widevine L1.</td></tr>
+                <tr><td class="name">deviceChallenge</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 32-byte single-use challenge from <code>/auth/challenges</code>, bound
+into the leaf key's attestation challenge.</td></tr>
+                <tr><td class="name">deviceId</td><td class="type">string</td><td class="req">no</td><td class="desc">Base64 32-byte device pseudonym:
+<code>SHA-256(&quot;dub/poud/widevine-id/v1&quot; ‖ rawWidevineId)</code>, computed on the
+device — the raw id never leaves it.</td></tr>
                 <tr><td class="name">dotns</td><td class="type">object</td><td class="req">no</td><td class="desc"></td></tr>
               </tbody>
             </table>
@@ -1575,7 +1587,9 @@ the PoUD gate and the registration queue. Ignored unless
               <tbody>
                 <tr><td class="name">signature</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte signature.</td></tr>
                 <tr><td class="name">signedAt</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Unix timestamp the reservation was signed at.</td></tr>
-                <tr><td class="name">reservedUsername</td><td class="type">string</td><td class="req">no</td><td class="desc">Optional reserved-name override.</td></tr>
+                <tr><td class="name">reservedUsername</td><td class="type">string</td><td class="req">no</td><td class="desc">The bare full-person name to reserve. Its own name on chain — it need
+not be <code>username</code>, and availability is checked against *this* name, not
+against the base of the lite username in the same claim.</td></tr>
               </tbody>
             </table>
           </div>
@@ -1594,6 +1608,12 @@ the PoUD gate and the registration queue. Ignored unless
   <span class="s">"consumerRegistrationSignature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
   <span class="s">"identifierKey"</span><span class="p">:</span> <span class="s">"0x...65 bytes..."</span><span class="p">,</span>
   <span class="s">"lifetimePoUDVoucher"</span><span class="p">:</span> <span class="s">"base64url-voucher-key"</span><span class="p">,</span>
+  <span class="s">"attestationChain"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s">"base64-der-leaf"</span><span class="p">,</span>
+    <span class="s">"base64-der-root"</span>
+  <span class="p">]</span><span class="p">,</span>
+  <span class="s">"deviceChallenge"</span><span class="p">:</span> <span class="s">"base64-32-byte-challenge"</span><span class="p">,</span>
+  <span class="s">"deviceId"</span><span class="p">:</span> <span class="s">"base64-32-byte-device-id"</span><span class="p">,</span>
   <span class="s">"dotns"</span><span class="p">:</span> <span class="p">{</span>
     <span class="s">"signature"</span><span class="p">:</span> <span class="s">"0x...64 bytes..."</span><span class="p">,</span>
     <span class="s">"signedAt"</span><span class="p">:</span> <span class="n">1780000000</span><span class="p">,</span>
@@ -1636,6 +1656,16 @@ the PoUD gate and the registration queue. Ignored unless
       <span class="s">"message"</span><span class="p">:</span> <span class="s">"Invalid signature."</span>
     <span class="p">}</span>
   <span class="p">]</span>
+<span class="p">}</span></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head">
+              <span class="code-head-label">Response · 403 · application/json</span>
+              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
+            </div>
+<pre><span class="p">{</span>
+  <span class="s">"error"</span><span class="p">:</span> <span class="s">"DEVICE_EVIDENCE_INVALID"</span><span class="p">,</span>
+  <span class="s">"message"</span><span class="p">:</span> <span class="s">"device evidence invalid"</span>
 <span class="p">}</span></pre>
           </div>
           <div class="code-block">
@@ -1694,7 +1724,7 @@ the PoUD gate and the registration queue. Ignored unless
                 <span class="sc-code c400">400</span>
                 <span class="sc-label">The request body contains invalid values.</span>
               </div>
-              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, or a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright).</div>
+              <div class="sc-desc">Validation failed (with per-field <code>fields</code>), malformed JSON, a <code>lifetimePoUDVoucher</code> that is unknown, already used, or expired (<code>{&quot;error&quot;: &quot;Voucher already used&quot;}</code> — a voucher failure rejects the claim outright), or — with <code>WIDEVINE_DEDUP_ENFORCE</code> — structurally malformed device evidence (<code>{&quot;error&quot;: &quot;DEVICE_EVIDENCE_MALFORMED&quot;}</code>: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1705,10 +1735,17 @@ the PoUD gate and the registration queue. Ignored unless
             </div>
             <div class="status-card">
               <div class="sc-head">
+                <span class="sc-code c403">403</span>
+                <span class="sc-label">DEVICE_EVIDENCE_INVALID</span>
+              </div>
+              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
+            </div>
+            <div class="status-card">
+              <div class="sc-head">
                 <span class="sc-code c409">409</span>
                 <span class="sc-label">Preferred digits 07 already taken for username tallesx</span>
               </div>
-              <div class="sc-desc">Preferred digits taken, no digits available, or username taken.</div>
+              <div class="sc-desc">Preferred digits taken, no digits available, username taken, or the claim carries <code>dotns.reservedUsername</code> for a full-person name that is already owned or whose reservation queue is full — checked against the reserved name itself, which <code>attest</code> takes as its own argument and which need not be <code>username</code>. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another <code>dotns.reservedUsername</code>.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1736,7 +1773,7 @@ the PoUD gate and the registration queue. Ignored unless
                 <span class="sc-code c503">503</span>
                 <span class="sc-label">Failed to mark iOS device as registered with Apple DeviceCheck</span>
               </div>
-              <div class="sc-desc">The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable).</div>
+              <div class="sc-desc">The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (<code>DEVICE_EVIDENCE_UNAVAILABLE</code>; retryable).</div>
             </div>
           </div>
         </div>
@@ -1801,6 +1838,9 @@ the PoUD gate and the registration queue. Ignored unless
         <span class="n">3</span>
       <span class="p">]</span>
     <span class="p">}</span><span class="p">,</span>
+    <span class="s">"takenx"</span><span class="p">:</span> <span class="p">{</span>
+      <span class="s">"status"</span><span class="p">:</span> <span class="s">"EXHAUSTED"</span>
+    <span class="p">}</span><span class="p">,</span>
     <span class="s">"abc"</span><span class="p">:</span> <span class="p">{</span>
       <span class="s">"status"</span><span class="p">:</span> <span class="s">"INVALID"</span>
     <span class="p">}</span>
@@ -1837,7 +1877,7 @@ the PoUD gate and the registration queue. Ignored unless
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits.</div>
+              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">

@@ -1,0 +1,74 @@
+name: Image
+
+# Builds THE service image (one image, eight `--role`s) and pushes it to the
+# PCF Artifact Registry. This is the PCF fork's deploy artifact; the upstream
+# release workflow publishes binaries and a compose bundle only.
+#
+# Auth is keyless: GitHub OIDC -> GCP Workload Identity Federation. The
+# provider trusts this repository by exact name (pcf-infra
+# terraform/identity-federation.tf) and the SA holds artifactregistry.writer
+# on the `identity-backend` GAR repository, which this image lives under.
+#
+# Tag = YYYYMMDD-HHMMSS-<sha8>, the same shape the previous backend used, so
+# the pcf-infra `image.tag` bump looks identical.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: us-docker.pkg.dev/polkadot-community-foundation/identity-backend/device-uniqueness-backend
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIP_GITHUB }}
+          service_account: ${{ secrets.GCP_SA_GITHUB }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker us-docker.pkg.dev --quiet
+
+      - id: tag
+        run: echo "tag=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          CACHE_FROM: ${{ env.IMAGE_REPO }}:buildcache
+          CACHE_TO: ${{ env.IMAGE_REPO }}:buildcache
+        run: docker buildx bake --push all
+
+      - name: Summary
+        run: |
+          {
+            echo "## Pushed"
+            echo
+            echo '```'
+            echo "${IMAGE_REPO}:${{ steps.tag.outputs.tag }}"
+            echo '```'
+            echo "Roll it: bump \`image.tag\` in pcf-infra \`kubernetes/device-uniqueness-backend/values-pcf-prod.yaml\`."
+          } >> "$GITHUB_STEP_SUMMARY"

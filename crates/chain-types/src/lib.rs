@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Refresh with:
+//! PCF fork: the blob is generated from the public `people-paseo` (products devnet), e.g.
+//! `--url wss://people-paseo.rotko.net`. Refresh with:
 //! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Game,ProofOfInk,Members -f bytes -o crates/chain-types/metadata/people.scale`
 
 use subxt::config::transaction_extensions as tx_ext;
@@ -24,6 +25,28 @@ static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
 /// subxt's own error-decoding entry point
 pub fn metadata_arc() -> subxt::metadata::ArcMetadata {
     METADATA.clone()
+}
+
+/// Vendored spec_version for people-chain. Asset Hub is dynamically generated
+/// so doesn't need this.
+pub fn vendored_spec_version() -> u32 {
+    static SPEC_VERSION: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+        use subxt::ext::scale_decode::DecodeAsType as _;
+
+        let metadata = metadata_arc();
+        let version = metadata
+            .pallet_by_name("System")
+            .and_then(|pallet| pallet.constant_by_name("Version"))
+            .expect("vendored metadata carries System::Version");
+        people::runtime_types::sp_version::RuntimeVersion::decode_as_type(
+            &mut version.value(),
+            version.ty(),
+            metadata.types(),
+        )
+        .expect("System::Version decodes as a RuntimeVersion")
+        .spec_version
+    });
+    *SPEC_VERSION
 }
 
 macro_rules! delegating_config {
@@ -157,6 +180,10 @@ pub type PeopleTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    // Declared by `people-paseo` (the PCF products devnet, Paseo People 1004);
+    // absent from `next-people-paseo`. Resolved by name, so a runtime without
+    // it is unaffected.
+    tx_ext::CheckMetadataHash,
     Noop<StorageWeightReclaim>,
 );
 
@@ -164,7 +191,7 @@ extrinsic_params_builder! {
     PeopleExtrinsicParamsBuilder<PeopleConfig> => PeopleTransactionExtensions,
     |mortality, nonce, tip| (
         (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (),
+        mortality, nonce, (), tip, (), (),
     )
 }
 
@@ -179,6 +206,7 @@ pub type AssetHubTransactionExtensions<T> = (
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
+    Noop<AsScarcity>,
     Noop<AsDotnsGateway>,
     Noop<RestrictOrigins>,
     Noop<CheckNonZeroSender>,
@@ -189,6 +217,10 @@ pub type AssetHubTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    // Declared by the public `asset-hub-paseo` (the PCF products devnet, AH
+    // 1000): the claims pallet's unit-payload extension. Not on the `next-`
+    // Asset Hubs.
+    Noop<PrevalidateAttests>,
     tx_ext::CheckMetadataHash,
     Noop<EthSetOrigin>,
     Noop<StorageWeightReclaim>,
@@ -197,8 +229,8 @@ pub type AssetHubTransactionExtensions<T> = (
 extrinsic_params_builder! {
     AssetHubExtrinsicParamsBuilder<AssetHubConfig> => AssetHubTransactionExtensions,
     |mortality, nonce, tip| (
-        (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (), (), (),
+        (), (), (), (), (), (), (), (), (), (), (), (),
+        mortality, nonce, (), tip, (), (), (), (),
     )
 }
 
@@ -293,8 +325,10 @@ noop_names! {
     StorageWeightReclaim,
     AsPgas = &[0],
     AsRingAlias = &[0],
+    AsScarcity = &[0],
     AsDotnsGateway = &[0],
     EthSetOrigin,
+    PrevalidateAttests,
 }
 
 #[cfg(test)]
@@ -325,6 +359,7 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "CheckMetadataHash",
         "StorageWeightReclaim",
     ];
 
@@ -334,6 +369,119 @@ mod tests {
         "AuthorizeCall",
         "AsPgas",
         "AsRingAlias",
+        "AsScarcity",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
+    struct KnownRuntime {
+        env: &'static str,
+        spec_name: &'static str,
+        spec_version: u32,
+        tuple: &'static [&'static str],
+        extensions: &'static [&'static str],
+    }
+
+    /// What the public `people-paseo` 2004003 (PCF products devnet, Paseo
+    /// People 1004) declares, in order. The vendored `people.scale` is
+    /// generated from this runtime.
+    const PEOPLE_DEVNET_EXTENSIONS: &[&str] = &[
+        "AuthorizeValueTransfer",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "AsProofOfInkParticipant",
+        "ScoreAsParticipant",
+        "GameAsInvited",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "HonourAuth",
+        "AuthorizeCall",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
+    /// What the public `asset-hub-paseo` 2004002 (PCF products devnet, AH
+    /// 1000) declares, in order.
+    const ASSET_HUB_DEVNET_EXTENSIONS: &[&str] = &[
+        "AuthorizeValueTransfer",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsRingAlias",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
+    /// What `next-people-paseo` 3000000 declares, in order. paseo-next-v2 and
+    /// previewnet upgraded together and their metadata is identical, so one
+    /// list covers both.
+    const PEOPLE_V3_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "AsProofOfInkParticipant",
+        "ScoreAsParticipant",
+        "GameAsInvited",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "HonourAuth",
+        "AuthorizeCall",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "StorageWeightReclaim",
+    ];
+
+    /// What `next-asset-hub-paseo` 3000000 declares, in order. `AsRingAlias`
+    /// is gone and `AsScarcity` took its place; the tuple carries both,
+    /// because the runtimes below are still in the list.
+    const ASSET_HUB_V3_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "AsScarcity",
+        "AuthorizeCall",
+        "AsPgas",
         "AsDotnsGateway",
         "RestrictOrigins",
         "CheckNonZeroSender",
@@ -349,15 +497,39 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    struct KnownRuntime {
-        env: &'static str,
-        spec_name: &'static str,
-        spec_version: u32,
-        tuple: &'static [&'static str],
-        extensions: &'static [&'static str],
-    }
-
+    /// Every runtime a deployment is known to have talked to. The tuples are
+    /// the union of these sets, not a snapshot of the newest one: an entry
+    /// stays here — and its gate stays in the tuple — so that a binary
+    /// pointed at a node that has not upgraded yet can still sign.
     const KNOWN_RUNTIMES: &[KnownRuntime] = &[
+        KnownRuntime {
+            env: "products-devnet",
+            spec_name: "people-paseo",
+            spec_version: 2_004_003,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_DEVNET_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "products-devnet asset hub",
+            spec_name: "asset-hub-paseo",
+            spec_version: 2_004_002,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_DEVNET_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 / previewnet",
+            spec_name: "next-people-paseo",
+            spec_version: 3_000_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 / previewnet asset hub",
+            spec_name: "next-asset-hub-paseo",
+            spec_version: 3_000_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_V3_EXTENSIONS,
+        },
         KnownRuntime {
             env: "paseo-next-v2",
             spec_name: "next-people-paseo",
@@ -507,6 +679,17 @@ mod tests {
     }
 
     #[test]
+    fn vendored_metadata_names_the_runtime_it_came_from() {
+        assert_eq!(
+            vendored_spec_version(),
+            2_004_003,
+            "the blob's own System::Version is what chain-client logs the live \
+             chain against, so refreshing the blob moves this number with it \
+             (PCF fork: vendored from the public people-paseo, the products devnet)"
+        );
+    }
+
+    #[test]
     fn slot_zero_noops_encode_their_runtime_value() {
         assert_eq!(AuthorizeValueTransfer::NAME, "AuthorizeValueTransfer");
         assert_eq!(AuthorizeValueTransfer::VALUE, &[0]);
@@ -571,8 +754,8 @@ mod tests {
     fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
-            spec_version: 1_000_030,
-            transaction_version: 4,
+            spec_version: 3_000_000,
+            transaction_version: 5,
             metadata: people_metadata(),
         }
     }
@@ -596,14 +779,14 @@ mod tests {
             out
         }
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [28],
             "nonce 7 must encode as Compact(7), 7 << 2"
         );
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [0],
@@ -619,7 +802,7 @@ mod tests {
         use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
         let state = offline_client_state();
-        let (.., mortality, _, _, tip, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., mortality, _, _, tip, _, _) = PeopleExtrinsicParamsBuilder::new().build();
 
         let mut era = Vec::new();
         CheckMortality::new(&state, mortality)
@@ -645,7 +828,7 @@ mod tests {
             PeopleExtrinsicParamsBuilder::new(),
             PeopleExtrinsicParamsBuilder::default(),
         ] {
-            let (.., mortality, nonce, _, tip, _) = builder.build();
+            let (.., mortality, nonce, _, tip, _, _) = builder.build();
             let mut out = Vec::new();
 
             tx_ext::CheckMortality::new(&state, mortality)
@@ -710,19 +893,19 @@ mod tests {
             config.spec_and_transaction_version_for_block_number(0),
             None
         );
-        assert!(config.metadata_for_spec_version(1_000_030).is_none());
+        assert!(config.metadata_for_spec_version(3_000_000).is_none());
 
         let metadata = people_metadata();
-        config.set_metadata_for_spec_version(1_000_030, metadata.clone());
+        config.set_metadata_for_spec_version(3_000_000, metadata.clone());
         let cached = config
-            .metadata_for_spec_version(1_000_030)
+            .metadata_for_spec_version(3_000_000)
             .expect("registered metadata is readable back");
         assert!(
             std::sync::Arc::ptr_eq(&cached, &metadata),
             "delegation must return the registered Arc"
         );
         assert!(
-            config.metadata_for_spec_version(1_000_031).is_none(),
+            config.metadata_for_spec_version(3_000_001).is_none(),
             "registration must not leak to other spec versions"
         );
     }

@@ -216,6 +216,30 @@ Operational invariants an agent must respect when touching the code.
   People Chain calls (`PeopleLite.attest` / `Resources.register_lite_person`), advancing
   `RESERVED → SUBMITTING → ASSIGNED | RETRY_AFTER | FAILED_TERMINAL`. The DB row is source of truth;
   chain is reconciled to it. No service reads another service's tables.
+- **A claim's optional full-name reservation is checked before it is accepted, because it cannot be
+  dropped afterwards.** `dotns.reservedUsername` is relayed into `attest`'s `reserved_username` — the
+  bare, undiscriminated *full-person* name. It is **its own name**: `attest` takes it as a separate
+  argument from the lite username, and nothing requires it to be that username's base, so the
+  preflight reads the reservation state of the reserved name — not of the base being claimed under —
+  and only skips the extra read when the two are equal. The runtime validates that leg **before** it
+  writes the lite username, so a name already owned (`Resources::UsernameReservationTaken`), a
+  reservation queue at `Resources::MaxReservationQueueLength` (`QueueFull`), or an account that
+  already reserved (`AlreadyHasReservation`) costs the caller the **whole** registration, not just
+  the reservation.
+  The writer cannot resubmit without the reservation: the consumer signature covers
+  `reserved_username`, so only the client can re-sign. Intake therefore refuses such a claim with a
+  `409` before a row or a fee exists, and the writer treats all three as deterministic rejections so
+  anything that races the check costs one fee rather than `CHAIN_WRITER_MAX_ATTEMPTS`.
+- **Availability answers for the whole claim, not just the discriminators.** `EXHAUSTED` means
+  nothing claimable under this base — no free discriminator (the offered pool is `01..=99`; `00` is
+  never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
+  and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
+  keys, so they cost no extra round trip and cannot disagree about their block.
+  *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
+  and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
+  unconditionally and no client is planned that can register without the reservation leg, so the
+  withheld case has no caller. Making the last two conditions contingent on the caller's declared
+  intent would only pay off if that changed.
 - **The writer submits a whole pass as one extrinsic.** A claimed set becomes one
   `Utility.force_batch` of `attest` calls (proxied as a whole when the signer is a delegate), so N
   registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
@@ -310,7 +334,15 @@ Operational invariants an agent must respect when touching the code.
   guard. The backend **cannot re-sign**; only the client holds the candidate key. An aged-out row
   is `EXPIRED`: terminal, never retried. A future-dated one is *deferred* behind
   `dotns_not_before` without spending an attempt — the clock resolves it, so failing it would kill
-  a row that was always going to succeed.
+  a row that was always going to succeed. **A signer that cannot pay is deferred on the same
+  reasoning**: `Inability to pay some fees` is rejected at validation, so it enters no block, spends
+  no fee and says nothing about the row. It *parks* — re-queued at an unchanged attempt, never
+  counted toward `CHAIN_WRITER_MAX_ATTEMPTS`, never terminal however long the outage runs. The
+  budget exists to stop a bad row retrying forever; a funding gap is not a bad row, and burning
+  eight attempts in three minutes against a three-day signature would discard a claim only the
+  client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
+  out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
+  rather than paying its fee eight times over.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: `DOTNS_GATEWAY_ENABLED` on with no `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the

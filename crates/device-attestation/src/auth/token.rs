@@ -268,7 +268,7 @@ async fn key_attestation_verdict(
         now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
     Ok(key_attest::verify::verify_chain(&chain, &params)
-        .map(|()| false)
+        .map(|_| false)
         .map_err(|e| e.to_string()))
 }
 

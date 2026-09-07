@@ -93,6 +93,20 @@ pub struct Config {
     /// frozen bare `PAYMENT_REQUIRED` body (a dead end); enabled, blocks
     /// return a deposit address + amount and store the claim for the watcher.
     pub payment: Option<PaymentConfig>,
+    /// Widevine dedup gate; `None` while `WIDEVINE_DEDUP_ENABLED=false`, in
+    /// which case the evidence fields are ignored entirely.
+    pub widevine: Option<WidevineConfig>,
+}
+
+/// Widevine dedup parameters (all under `WIDEVINE_DEDUP_ENABLED=true`).
+#[derive(Debug)]
+pub struct WidevineConfig {
+    /// `WIDEVINE_DEDUP_ENFORCE`: soft mode verifies and logs only; `true`
+    /// makes the dedup routing live.
+    pub enforce: bool,
+    /// 32-byte HMAC-SHA256 key (`WIDEVINE_DEDUP_HMAC_KEY`) pseudonymizing
+    /// the client-hashed device id before storage.
+    pub hmac_key: SecretBox<[u8; 32]>,
 }
 
 /// Payment-lane parameters (all required when `PAYMENT_LANE_ENABLED=true`).
@@ -185,6 +199,19 @@ impl Config {
             return Err(ConfigError::Missing("ANDROID_SIGNING_DIGEST_WEBSITE"));
         }
 
+        let enforce_auth = env_bool("ENFORCE_AUTH", false)?;
+        let widevine = parse_widevine()?;
+        // Warn, not fatal: an advisory rollout stage is deliberate.
+        if widevine.as_ref().is_some_and(|w| w.enforce) && !(auth_enabled && enforce_auth) {
+            tracing::warn!(
+                auth_enabled,
+                enforce_auth,
+                "WIDEVINE_DEDUP_ENFORCE is set without hard attestation \
+                 (AUTH_ENABLED + ENFORCE_AUTH); the dedup gate is advisory \
+                 in this configuration"
+            );
+        }
+
         Ok(Self {
             bind_addr,
             database_url: SecretString::from(database_url),
@@ -199,7 +226,7 @@ impl Config {
             auth_rate_limit: parse_var("AUTH_RATE_LIMIT", "30")?,
             auth_rate_window: Duration::from_secs(parse_var("AUTH_RATE_WINDOW_SECS", "60")?),
             auth_enabled,
-            enforce_auth: env_bool("ENFORCE_AUTH", false)?,
+            enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
             // Defaults off in code while `.env.example` and `docker-compose.yml` ship it
@@ -236,6 +263,7 @@ impl Config {
             google_credentials: parse_google_credentials()?,
             device_check: parse_device_check()?,
             payment: parse_payment()?,
+            widevine: parse_widevine()?,
         })
     }
 
@@ -275,6 +303,7 @@ impl Config {
             google_credentials: None,
             device_check: None,
             payment: None,
+            widevine: None,
         }
     }
 
@@ -544,6 +573,42 @@ fn decode_payment_amount(raw: &str) -> Result<u64, ConfigError> {
     Ok(amount_planck)
 }
 
+/// Parse the Widevine dedup block: `None` while `WIDEVINE_DEDUP_ENABLED` is
+/// false; enabled, the HMAC key is required and validated (fail-fast — a
+/// missing key would make every device record uncomputable).
+fn parse_widevine() -> Result<Option<WidevineConfig>, ConfigError> {
+    if !env_bool("WIDEVINE_DEDUP_ENABLED", false)? {
+        return Ok(None);
+    }
+    let raw = std::env::var("WIDEVINE_DEDUP_HMAC_KEY")
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or(ConfigError::Missing("WIDEVINE_DEDUP_HMAC_KEY"))?;
+    Ok(Some(WidevineConfig {
+        enforce: env_bool("WIDEVINE_DEDUP_ENFORCE", false)?,
+        hmac_key: decode_widevine_hmac_key(&raw)?,
+    }))
+}
+
+/// Decode `WIDEVINE_DEDUP_HMAC_KEY`: one 32-byte key as hex (optional `0x`)
+/// or base64.
+fn decode_widevine_hmac_key(raw: &str) -> Result<SecretBox<[u8; 32]>, ConfigError> {
+    use base64::Engine as _;
+
+    const KEY: &str = "WIDEVINE_DEDUP_HMAC_KEY";
+    let invalid = |reason: String| ConfigError::Invalid { key: KEY, reason };
+
+    let bytes = hex::decode(raw.strip_prefix("0x").unwrap_or(raw))
+        .ok()
+        .or_else(|| base64::engine::general_purpose::STANDARD.decode(raw).ok())
+        .ok_or_else(|| invalid("expected hex or base64".to_string()))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| invalid("key must be exactly 32 bytes".to_string()))?;
+    Ok(SecretBox::new(Box::new(key)))
+}
+
 /// Parse an env var into `T`, falling back to `default` when unset.
 fn parse_var<T>(key: &'static str, default: &str) -> Result<T, ConfigError>
 where
@@ -781,6 +846,31 @@ mod tests {
     }
 
     #[test]
+    fn widevine_hmac_key_decodes_a_32_byte_key() {
+        use base64::Engine as _;
+        use secrecy::ExposeSecret as _;
+
+        let hex_key = hex::encode([1u8; 32]);
+        let b64_key = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
+        assert_eq!(
+            *decode_widevine_hmac_key(&format!("0x{hex_key}"))
+                .expect("hex")
+                .expose_secret(),
+            [1u8; 32]
+        );
+        assert_eq!(
+            *decode_widevine_hmac_key(&b64_key)
+                .expect("base64")
+                .expose_secret(),
+            [2u8; 32]
+        );
+
+        // Wrong length, not a key at all.
+        assert!(decode_widevine_hmac_key(&hex::encode([1u8; 16])).is_err());
+        assert!(decode_widevine_hmac_key("not-a-key!").is_err());
+    }
+
+    #[test]
     fn split_list_trims_and_drops_empties() {
         assert_eq!(split_list(" a , ,b,, c "), vec!["a", "b", "c"]);
         assert!(split_list("").is_empty());
@@ -851,6 +941,7 @@ mod tests {
         assert_eq!(config.attester_account, alice);
         assert!(config.payment.is_none());
         assert!(config.device_check.is_none());
+        assert!(config.widevine.is_none());
 
         std::env::set_var(
             "PLAY_INTEGRITY_DECRYPTION_KEY",

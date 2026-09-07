@@ -32,7 +32,12 @@ pub enum ConnectError {
 
 /// Connect to a People Chain RPC and load its metadata.
 pub async fn connect(url: &str) -> Result<OnlineClient<PeopleConfig>, ConnectError> {
-    connect_as::<PeopleConfig>(url, "People Chain").await
+    connect_as::<PeopleConfig>(
+        url,
+        "People Chain",
+        Some(chain_types::vendored_spec_version()),
+    )
+    .await
 }
 
 /// [`connect`], also handing back the RPC client the online client was built
@@ -40,23 +45,29 @@ pub async fn connect(url: &str) -> Result<OnlineClient<PeopleConfig>, ConnectErr
 pub async fn connect_with_rpc(
     url: &str,
 ) -> Result<(OnlineClient<PeopleConfig>, RpcClient), ConnectError> {
-    connect_as_with_rpc::<PeopleConfig>(url, "People Chain").await
+    connect_as_with_rpc::<PeopleConfig>(
+        url,
+        "People Chain",
+        Some(chain_types::vendored_spec_version()),
+    )
+    .await
 }
 
 /// Connect to an Asset Hub RPC and load its metadata.
 pub async fn connect_asset_hub(url: &str) -> Result<OnlineClient<AssetHubConfig>, ConnectError> {
-    connect_as::<AssetHubConfig>(url, "Asset Hub").await
+    connect_as::<AssetHubConfig>(url, "Asset Hub", None).await
 }
 
 pub async fn connect_asset_hub_with_rpc(
     url: &str,
 ) -> Result<(OnlineClient<AssetHubConfig>, RpcClient), ConnectError> {
-    connect_as_with_rpc::<AssetHubConfig>(url, "Asset Hub").await
+    connect_as_with_rpc::<AssetHubConfig>(url, "Asset Hub", None).await
 }
 
 async fn connect_as_with_rpc<T: subxt::Config + Default>(
     url: &str,
     chain: &'static str,
+    vendored_spec_version: Option<u32>,
 ) -> Result<(OnlineClient<T>, RpcClient), ConnectError> {
     let rpc = reconnecting_rpc_client(url, chain).await?;
     let client = OnlineClient::<T>::from_rpc_client(rpc.clone())
@@ -66,20 +77,70 @@ async fn connect_as_with_rpc<T: subxt::Config + Default>(
             url: url.to_string(),
             source,
         })?;
+    report_runtime_version(&client, chain, url, vendored_spec_version).await;
     Ok((client, rpc))
 }
 
 async fn connect_as<T: subxt::Config + Default>(
     url: &str,
     chain: &'static str,
+    vendored_spec_version: Option<u32>,
 ) -> Result<OnlineClient<T>, ConnectError> {
-    OnlineClient::<T>::from_rpc_client(reconnecting_rpc_client(url, chain).await?)
+    let client = OnlineClient::<T>::from_rpc_client(reconnecting_rpc_client(url, chain).await?)
         .await
         .map_err(|source| ConnectError::Client {
             chain,
             url: url.to_string(),
             source,
-        })
+        })?;
+    report_runtime_version(&client, chain, url, vendored_spec_version).await;
+    Ok(client)
+}
+
+/// Log what the live runtime is at connect. Warn when it has
+/// moved past the metadata the codegen was built from.
+async fn report_runtime_version<T: subxt::Config>(
+    client: &OnlineClient<T>,
+    chain: &'static str,
+    url: &str,
+    vendored_spec_version: Option<u32>,
+) {
+    let at_block = match client.at_current_block().await {
+        Ok(at_block) => at_block,
+        Err(error) => {
+            tracing::warn!(
+                chain,
+                url,
+                ?error,
+                "could not read the live runtime version"
+            );
+            return;
+        }
+    };
+    let spec_version = at_block.spec_version();
+    let transaction_version = at_block.transaction_version();
+
+    match vendored_spec_version {
+        Some(vendored) if vendored != spec_version => tracing::warn!(
+            chain,
+            url,
+            spec_version,
+            transaction_version,
+            vendored_spec_version = vendored,
+            "live runtime and the vendored metadata disagree; refresh \
+             crates/chain-types/metadata/people.scale (or repoint at a node \
+             on the version it was built from) — until then any signed call \
+             whose types changed is rejected as not compatible with the live \
+             chain"
+        ),
+        _ => tracing::info!(
+            chain,
+            url,
+            spec_version,
+            transaction_version,
+            "connected to the chain"
+        ),
+    }
 }
 
 async fn reconnecting_rpc_client(

@@ -81,7 +81,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "apidoc-gen"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "device-attestation",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "chain-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chain-types",
@@ -821,11 +821,12 @@ dependencies = [
  "subxt-signer",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "chain-types"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "subxt",
 ]
@@ -1239,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "device-attestation"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "aes-kw",
@@ -1253,6 +1254,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "http-common",
  "jsonwebtoken",
@@ -1328,7 +1330,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "dub"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2076,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "http-common"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2333,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "invite-tickets"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2604,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "jwt-verify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2959,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "notifications"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3781,7 +3783,7 @@ checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
 
 [[package]]
 name = "routegen"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dub",
@@ -5454,7 +5456,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turn"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5600,7 +5602,7 @@ dependencies = [
 
 [[package]]
 name = "username-indexer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",

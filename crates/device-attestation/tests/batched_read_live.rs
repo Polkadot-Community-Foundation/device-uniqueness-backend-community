@@ -145,6 +145,84 @@ async fn batched_read_matches_per_key_read() {
 
 #[tokio::test]
 #[ignore = "requires a live People Chain RPC; set PEOPLE_RPC_URL and run with --ignored"]
+async fn base_state_reads_the_reservation_leg_from_the_same_batch() {
+    let chain = step("connect", PeopleChain::connect(&rpc_url()))
+        .await
+        .expect("connect");
+    let at = step("selecting a block", chain.online().at_current_block())
+        .await
+        .expect("current block");
+
+    let (owned_base, _) = step("scanning usernames", some_registered_lite_username(&at))
+        .await
+        .expect("iterate usernames")
+        .expect(
+            "no registered {base}.{NN} username on this chain — point PEOPLE_RPC_URL at a chain \
+             with registrations",
+        );
+    let free_base = format!("dubprobe{}", std::process::id());
+
+    for base in [owned_base.clone(), free_base.clone()] {
+        let state = step("batched base-state read", chain.base_state_at(&base, &at))
+            .await
+            .expect("base state");
+
+        let per_key = step(
+            "per-key read (100 requests)",
+            taken_discriminators_per_key(&at, &base),
+        )
+        .await
+        .expect("per-key read");
+        assert_eq!(
+            per_key, state.taken,
+            "appending the reservation keys shifted the discriminator answers for {base}"
+        );
+
+        let full_name_owned = at
+            .storage()
+            .try_fetch(
+                people::storage().resources().username_owner_of(),
+                (owner_key(&base),),
+            )
+            .await
+            .expect("per-key bare-name read")
+            .is_some();
+        assert_eq!(
+            state.full_name_owned, full_name_owned,
+            "batched bare-name answer disagreed with the per-key read for {base}"
+        );
+
+        let queue_len = at
+            .storage()
+            .try_fetch(
+                people::storage().resources().username_reservation_queue(),
+                (owner_key(&base),),
+            )
+            .await
+            .expect("per-key queue read")
+            .map(|value| value.decode().expect("decode queue").0.len() as u32)
+            .unwrap_or(0);
+        assert_eq!(
+            state.queue_len, queue_len,
+            "batched queue length disagreed with the per-key read for {base}"
+        );
+
+        assert!(
+            state.queue_capacity > 0,
+            "Resources::MaxReservationQueueLength read as zero"
+        );
+
+        if base == free_base {
+            assert!(
+                !state.full_name_owned && state.queue_len == 0,
+                "unregistered probe base {free_base} has a reservation leg: {state:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a live People Chain RPC; set PEOPLE_RPC_URL and run with --ignored"]
 async fn batched_owner_read_matches_per_name_read() {
     let chain = step("connect", PeopleChain::connect(&rpc_url()))
         .await

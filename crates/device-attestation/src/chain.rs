@@ -5,6 +5,7 @@ pub mod asset_hub;
 pub mod lease;
 pub mod outbox;
 pub mod people;
+pub(crate) mod registry;
 pub mod writer;
 
 pub use people::PeopleChain;

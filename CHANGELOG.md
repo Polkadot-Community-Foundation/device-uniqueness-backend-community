@@ -8,6 +8,57 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-02
+
+### Fixed
+
+- **The invite-ticket pool mints again after People Chain 3000000.** The
+  vendored metadata is refreshed from `next-people-paseo` 3000000, which
+  paseo-next-v2 and previewnet both run (their metadata is identical). The
+  upgrade did not touch `Game`/`ProofOfInk::set_invite_ticket` at all — what
+  moved was `RuntimeCall`, which `PeopleLite` grew `register_with_fee` and
+  `create_lite_people_collection` into. The pool never signs a bare
+  `set_invite_ticket`; it signs the `Utility.force_batch` and `Proxy.proxy`
+  wrappers around it, and those carry `RuntimeCall`, so every tick failed
+  validation with `The extrinsic payload is not compatible with the live
+  chain` and no ticket was minted. `/api/v1/invitation-ticket/claim` kept
+  serving the pool it already had, so the first symptom an operator would
+  have seen is `422 Pool exhausted` once it drained. Nothing about the wire format changed: pallet and call indices
+  are identical on both sides of the upgrade, and username registration
+  (`PeopleLite::attest`, `Resources::register_lite_person`) was never
+  affected.
+- **The dotNS lane can sign against Asset Hub 3000000.** That runtime dropped
+  the `AsRingAlias` transaction extension and declares `AsScarcity` in its
+  place. `AssetHubTransactionExtensions` had no member for it, and subxt
+  resolves a runtime's extensions by name, so every Asset Hub submission
+  would have failed to encode. The tuple now carries both gates: as with the
+  People tuple, it is the union across every runtime in `KNOWN_RUNTIMES`, not
+  a snapshot of the newest, so a binary pointed at a node that has not
+  upgraded yet still signs.
+- **An unfundable signer no longer fails registrations terminally.** A
+  transaction rejected with `Inability to pay some fees`
+  (`InvalidTransaction::Payment`) never enters a block, spends nothing and says
+  nothing about the row, so it now **parks** the row — re-queued at an
+  *unchanged* `attempt` behind a 5-minute `not_before` — instead of spending one
+  of `CHAIN_WRITER_MAX_ATTEMPTS`. Previously a drained signer walked a row
+  through its whole budget in about three minutes (`2^attempt` backoff, clamped
+  at 6) and wrote `FAILED_TERMINAL`. On the dotNS lane that was unrecoverable:
+  the client's reservation stays valid for `MaxValiditySeconds` (three days) and
+  only the client holds the key that can re-sign it, so a funding gap an
+  operator had not noticed yet destroyed claims that had days of validity left.
+  Parked rows resume on their own once the signer is topped up; the existing
+  `chain-writer signer balance below floor` warning and
+  `dub_account_free_balance_planck` gauge remain how the outage is seen, now
+  joined by `dub_chain_submit_total{outcome="parked"}`.
+- **A rejection that cannot change is no longer retried.** A dispatch error
+  named in `DETERMINISTIC_REJECTIONS` — currently
+  `Resources::UsernameReservationTaken` — is terminal on the first pass. Such a
+  call reached a block and paid its fee, and is byte-identical on every retry,
+  so the previous behaviour paid the same fee eight times to be told the same
+  thing, draining the very signer whose exhaustion then parks the lane.
+  `last_error` now distinguishes the two terminal routes: `rejected
+  deterministically, not retried: …` versus `max attempts reached: …`.
+
 ### Changed
 
 - **`device-attestation-chain-writer` submits a whole pass as one extrinsic.** A
@@ -50,6 +101,15 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Added
 
+- **Metadata drift is visible at boot.** Every chain connection now logs the
+  live `spec_version` and `transaction_version` once, and the People Chain
+  connections compare it against the `spec_version` the vendored blob was
+  generated from — read out of the blob's own `System::Version`, so the two
+  cannot be edited apart. A mismatch is a `WARN` naming the file to refresh.
+  Previously a runtime upgrade under a stale blob announced itself only as a
+  throttled pool tick or a failed write, minutes to days later. The check is
+  diagnostic and never fatal: most upgrades change nothing this workspace
+  signs, and a chain that cannot be read has already failed the connect.
 - **Batch observability.** `dub_chain_batch_size{lane}` (the adaptive size in
   use), `dub_chain_batch_items{lane}` (rows per submission),
   `dub_chain_batch_failed_total{lane}` (whole-batch failures),
@@ -152,5 +212,9 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.5.0...HEAD
+
+[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/rel
+eases/tag/v0.5.0
+
 [0.4.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.4.0

@@ -7,35 +7,44 @@ pub mod register;
 
 use std::collections::BTreeSet;
 
-use axum::body::Bytes;
-use axum::extract::Request;
-use axum::http::header::{HeaderMap, HeaderValue};
-use axum::http::StatusCode;
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::{
+    body::Bytes,
+    extract::{Request, State},
+    http::{
+        header::{HeaderMap, HeaderValue},
+        StatusCode,
+    },
+    middleware::Next,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
 use http_common::error::not_found;
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::http::state::AppState;
-use axum::extract::State;
+use crate::{
+    chain::{
+        outbox,
+        people::{BaseState, ReservationState},
+    },
+    http::state::AppState,
+};
 
 use self::error::{UsernamesError, UsernamesResult};
-use crate::chain::outbox;
 
 const MIN_BASE_LEN: usize = 6;
 
-/// Maximum base-username length on the registration path
-/// (`MAX_USERNAME_LENGTH - N_USERNAME_DIGITS - 1`; availability has no cap).
+/// Maximum base-username length
+/// (`MAX_USERNAME_LENGTH - N_USERNAME_DIGITS - 1`).
 pub(crate) const MAX_BASE_LEN: usize = 29;
 
 /// Base-username rules, shared by the read and write paths so they can't
-/// disagree: length >= 6, lowercase ASCII letters.
+/// disagree: length 6..=29, lowercase ASCII letters.
 fn is_valid_base(base: &str) -> bool {
-    base.len() >= MIN_BASE_LEN && base.bytes().all(|b| b.is_ascii_lowercase())
+    (MIN_BASE_LEN..=MAX_BASE_LEN).contains(&base.len())
+        && base.bytes().all(|b| b.is_ascii_lowercase())
 }
 
 /// The free discriminators for a base: `1..=99` minus the taken set (`00` is
@@ -50,18 +59,12 @@ fn merge_discriminators(mut chain: BTreeSet<u8>, outbox: BTreeSet<u8>) -> BTreeS
     chain
 }
 
-/// Allocations visible either on People Chain or in the durable reservation
-/// outbox. Both reads run concurrently; their union is the availability and
-/// registration source of truth while a reservation is waiting for the writer.
-pub(crate) async fn taken_discriminators(
-    state: &AppState,
-    base: &str,
-) -> UsernamesResult<BTreeSet<u8>> {
+pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<BaseState> {
     let (chain, pending) = tokio::try_join!(
         async {
             state
                 .chain
-                .taken_discriminators(base)
+                .base_state(base)
                 .await
                 .map_err(UsernamesError::from)
         },
@@ -71,7 +74,21 @@ pub(crate) async fn taken_discriminators(
                 .map_err(UsernamesError::from)
         },
     )?;
-    Ok(merge_discriminators(chain, pending))
+    Ok(BaseState {
+        taken: merge_discriminators(chain.taken, pending),
+        ..chain
+    })
+}
+
+pub(crate) async fn reservation_state(
+    state: &AppState,
+    name: &str,
+) -> UsernamesResult<ReservationState> {
+    state
+        .chain
+        .reservation_state(name)
+        .await
+        .map_err(UsernamesError::from)
 }
 
 /// Subject-keyed rate limit for the authenticated usernames surface (never
@@ -193,10 +210,11 @@ mod tests {
     #[test]
     fn base_validation_shared_by_read_and_write_paths() {
         assert!(is_valid_base("alicexyz"));
-        assert!(is_valid_base(&"a".repeat(30)));
+        assert!(is_valid_base(&"a".repeat(MAX_BASE_LEN)));
         assert!(!is_valid_base("short"));
         assert!(!is_valid_base("Alicexyz"));
         assert!(!is_valid_base("alice123"));
+        assert!(!is_valid_base(&"a".repeat(MAX_BASE_LEN + 1)));
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod openapi;
 pub mod payment;
 pub mod queue;
 pub mod usernames;
+pub mod widevine;
 
 pub use chain::PeopleChain;
 pub use config::Config;

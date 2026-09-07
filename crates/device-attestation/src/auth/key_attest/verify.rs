@@ -99,6 +99,22 @@ pub const GRAPHENEOS_VERIFIED_BOOT_KEYS: &[&str] = &[
 const BOOT_STATE_VERIFIED: u64 = 0;
 const BOOT_STATE_SELF_SIGNED: u64 = 1;
 
+/// Known-public AVB signing keys (SHA-256 of the AVB public-key blob,
+/// lowercase hex): the AOSP test keys from `external/avb/test/data/`.
+/// Real OEMs have shipped these as production AVB roots ("AVBTestKeyInTheWild",
+/// SPICES 2025), so an affected device reports a locked bootloader and
+/// `Verified` boot — with genuine, unrevoked hardware attestation — while
+/// anyone can sign and boot modified firmware on it. Google's CRL does not
+/// cover this, so the keys are denied outright.
+const KNOWN_PUBLIC_VERIFIED_BOOT_KEYS: &[&str] = &[
+    // testkey_rsa2048.pem
+    "22de3994532196f61c039e90260d78a93a4c57362c7e789be928036e80b77c8c",
+    // testkey_rsa4096.pem (the default AOSP build signing key)
+    "7728e30f50bfa5cea165f473175a08803f6a8346642b5aa10913e9d9e6defef6",
+    // testkey_rsa8192.pem
+    "e15e2365469ce672a91d02cc8d9c2f29b787481e574d3b56ac774153d7ced614",
+];
+
 /// Everything the verifier needs besides the chain itself.
 pub struct VerifyParams<'a> {
     /// Challenge the client minted the keystore key with (`setAttestationChallenge`).
@@ -231,10 +247,15 @@ fn check_policy(
         .root_of_trust
         .as_ref()
         .ok_or_else(|| KeyAttestError::RootOfTrust("missing".to_string()))?;
+    let key_hex = hex::encode(&root_of_trust.verified_boot_key);
+    if KNOWN_PUBLIC_VERIFIED_BOOT_KEYS.contains(&key_hex.as_str()) {
+        return Err(KeyAttestError::RootOfTrust(format!(
+            "known-public AVB test key {key_hex}"
+        )));
+    }
     match root_of_trust.verified_boot_state {
         BOOT_STATE_VERIFIED => {}
         BOOT_STATE_SELF_SIGNED => {
-            let key_hex = hex::encode(&root_of_trust.verified_boot_key);
             if !params
                 .trusted_verified_boot_keys
                 .contains(&key_hex.as_str())
@@ -674,6 +695,46 @@ mod tests {
             check_policy(&missing, &params),
             Err(KeyAttestError::RootOfTrust(_))
         ));
+    }
+
+    #[test]
+    fn known_public_avb_test_keys_are_denied_even_when_verified() {
+        let input = ParamsInput::new();
+        let challenge = b"challenge".to_vec();
+        let packages = vec!["io.pcf.polkadotapp".to_string()];
+        let params = VerifyParams {
+            challenge: &challenge,
+            package_names: &packages,
+            playstore_digest: &input.playstore,
+            website_digest: &input.website,
+            trusted_roots_der: &input.roots,
+            // Even an explicitly trusted SelfSigned entry must not resurrect a
+            // denylisted key: the denylist wins over the allowlist.
+            trusted_verified_boot_keys: KNOWN_PUBLIC_VERIFIED_BOOT_KEYS,
+            revoked_serials: &input.revoked,
+            now_unix: input.now,
+        };
+        for key in KNOWN_PUBLIC_VERIFIED_BOOT_KEYS {
+            for boot_state in [BOOT_STATE_VERIFIED, BOOT_STATE_SELF_SIGNED] {
+                let description = KeyDescription {
+                    attestation_security_level: 1,
+                    key_security_level: 1,
+                    attestation_challenge: challenge.clone(),
+                    package_names: packages.clone(),
+                    signing_digests: vec![digest(PLAY_STORE_DIGEST).to_vec()],
+                    root_of_trust: Some(extension::RootOfTrust {
+                        verified_boot_key: hex::decode(key).expect("valid hex"),
+                        device_locked: true,
+                        verified_boot_state: boot_state,
+                    }),
+                };
+                assert!(matches!(
+                    check_policy(&description, &params),
+                    Err(KeyAttestError::RootOfTrust(ref reason))
+                        if reason.contains("known-public AVB test key")
+                ));
+            }
+        }
     }
 
     #[test]

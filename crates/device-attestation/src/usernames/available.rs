@@ -3,10 +3,12 @@
 
 use std::collections::BTreeMap;
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{
+    body::Bytes,
+    extract::State,
+    response::{IntoResponse, Response},
+    Json,
+};
 use http_common::AuthSubject;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,8 +16,12 @@ use utoipa::ToSchema;
 
 use crate::http::state::AppState;
 
-use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, is_valid_base, taken_discriminators};
+use super::{
+    available_digits, base_state,
+    error::{FieldError, UsernamesError, UsernamesResult},
+    is_valid_base,
+};
+use crate::chain::people::BaseState;
 
 const MAX_USERNAMES: usize = 100;
 
@@ -43,7 +49,7 @@ pub struct AvailableV1Response {
 /// Availability of a single base username.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct NameAvailability {
-    /// `AVAILABLE`, `EXHAUSTED` (all 100 taken), or `INVALID` (fails base rules).
+    /// `AVAILABLE`, `EXHAUSTED` (nothing claimable under this base), or `INVALID` (fails base rules).
     #[schema(example = "AVAILABLE")]
     status: &'static str,
     /// Free discriminators (`1..=99`); present only when `AVAILABLE`.
@@ -60,10 +66,16 @@ pub(crate) struct NameAvailability {
     security(("bearer_jwt" = [])),
     request_body = AvailableRequest,
     responses(
-        (status = 200, description = "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits.",
+        (status = 200, description = "Per-base availability read from People Chain UsernameOwnerOf \
+            plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. \
+            `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the \
+            bare full-person name is owned or its reservation queue is full — the last two would \
+            make a claim carrying `dotns.reservedUsername` fail on chain and take the lite \
+            username with it.",
          body = AvailableV1Response,
          example = json!({ "_tag": "v1", "value": {
              "tallesx": { "status": "AVAILABLE", "availableDigits": [1, 2, 3] },
+             "takenx": { "status": "EXHAUSTED" },
              "abc": { "status": "INVALID" }
          } })),
         (status = 400, description = "Invalid `usernames`, or malformed JSON.",
@@ -151,20 +163,24 @@ async fn availability_for(state: &AppState, base: &str) -> UsernamesResult<NameA
         });
     }
 
-    let taken = taken_discriminators(state, base).await?;
-    if taken.len() >= 100 {
-        return Ok(NameAvailability {
+    Ok(availability_of(&base_state(state, base).await?))
+}
+
+/// The availability verdict for one base, given everything read about it.
+fn availability_of(state: &BaseState) -> NameAvailability {
+    // Pool is 01..=99 (00 is never offered); available = pool minus taken.
+    let digits = available_digits(&state.taken);
+    if digits.is_empty() || state.rejects_reservations() {
+        return NameAvailability {
             status: "EXHAUSTED",
             available_digits: None,
-        });
+        };
     }
 
-    // Pool is 01..=99 (00 is never offered); available = pool minus taken.
-    let digits = available_digits(&taken);
-    Ok(NameAvailability {
+    NameAvailability {
         status: "AVAILABLE",
         available_digits: Some(digits),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +230,52 @@ mod tests {
             serde_json::to_value(response).unwrap(),
             json!({ "_tag": "v1", "value": { "short": { "status": "INVALID" } } })
         );
+    }
+
+    fn base_state(taken: impl IntoIterator<Item = u8>) -> BaseState {
+        BaseState {
+            taken: taken.into_iter().collect(),
+            full_name_owned: false,
+            queue_len: 0,
+            queue_capacity: 10,
+        }
+    }
+
+    #[test]
+    fn a_base_with_free_digits_is_available() {
+        let availability = availability_of(&base_state([1, 2, 3]));
+        assert_eq!(availability.status, "AVAILABLE");
+        let digits = availability.available_digits.expect("digits");
+        assert_eq!(digits.len(), 96);
+        assert!(!digits.contains(&1));
+    }
+
+    #[test]
+    fn a_base_with_no_free_digits_is_exhausted_even_though_00_is_free() {
+        let availability = availability_of(&base_state(1..=99));
+        assert_eq!(availability.status, "EXHAUSTED");
+        assert!(availability.available_digits.is_none());
+    }
+
+    #[test]
+    fn a_base_whose_reservation_leg_would_be_rejected_is_exhausted() {
+        let owned = BaseState {
+            full_name_owned: true,
+            ..base_state([])
+        };
+        assert_eq!(availability_of(&owned).status, "EXHAUSTED");
+
+        let queue_full = BaseState {
+            queue_len: 10,
+            ..base_state([])
+        };
+        assert_eq!(availability_of(&queue_full).status, "EXHAUSTED");
+
+        let queue_nearly_full = BaseState {
+            queue_len: 9,
+            ..base_state([])
+        };
+        assert_eq!(availability_of(&queue_nearly_full).status, "AVAILABLE");
     }
 
     #[test]

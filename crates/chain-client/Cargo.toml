@@ -16,6 +16,7 @@ schnorrkel = "0.11"
 anyhow.workspace = true
 hex = "0.4"
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 jsonrpsee-core = { version = "0.24", features = ["server"] }
