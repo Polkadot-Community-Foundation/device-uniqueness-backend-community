@@ -5,12 +5,11 @@ name: Image
 # release workflow publishes binaries and a compose bundle only.
 #
 # Auth is keyless: GitHub OIDC -> GCP Workload Identity Federation. The
-# provider trusts this repository by exact name (pcf-infra
-# terraform/identity-federation.tf) and the SA holds artifactregistry.writer
-# on the `identity-backend` GAR repository, which this image lives under.
+# provider trusts this repository by exact name and the SA holds
+# artifactregistry.writer on the `identity-backend` GAR repository, which this
+# image lives under.
 #
-# Tag = YYYYMMDD-HHMMSS-<sha8>, the same shape the previous backend used, so
-# the pcf-infra `image.tag` bump looks identical.
+# Tag = YYYYMMDD-HHMMSS-<sha8>, the same shape the previous backend used.
 
 on:
   push:
@@ -70,5 +69,5 @@ jobs:
             echo '```'
             echo "${IMAGE_REPO}:${{ steps.tag.outputs.tag }}"
             echo '```'
-            echo "Roll it: bump \`image.tag\` in pcf-infra \`kubernetes/device-uniqueness-backend/values-pcf-prod.yaml\`."
+            echo "Roll it: pin this tag in the deployment."
           } >> "$GITHUB_STEP_SUMMARY"
