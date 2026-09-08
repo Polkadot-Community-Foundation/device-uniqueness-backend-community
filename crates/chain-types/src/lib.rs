@@ -394,9 +394,10 @@ mod tests {
         extensions: &'static [&'static str],
     }
 
-    /// What the public `people-paseo` 2004003 (PCF products devnet, Paseo
-    /// People 1004) declares, in order. The vendored `people.scale` is
-    /// generated from this runtime.
+    /// What the public `people-paseo` 2005001 (PCF products devnet, Paseo
+    /// People 1004, Paseo runtimes v2.5.1) declares, in order — unchanged
+    /// from 2004003. The vendored `people.scale` is generated from this
+    /// runtime (from the released wasm, ahead of enactment).
     const PEOPLE_DEVNET_EXTENSIONS: &[&str] = &[
         "AuthorizeValueTransfer",
         "VerifyMultiSignature",
@@ -423,13 +424,13 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    /// What the public `asset-hub-paseo` 2004002 (PCF products devnet, AH
-    /// 1000) declares, in order.
+    /// What the public `asset-hub-paseo` 2005000 (PCF products devnet, AH
+    /// 1000, Paseo runtimes v2.5.0) declares, in order. `AsRingAlias` is
+    /// gone relative to 2004002; the tuple still names it, harmlessly.
     const ASSET_HUB_DEVNET_EXTENSIONS: &[&str] = &[
         "AuthorizeValueTransfer",
         "AuthorizeCall",
         "AsPgas",
-        "AsRingAlias",
         "AsDotnsGateway",
         "RestrictOrigins",
         "CheckNonZeroSender",
@@ -505,14 +506,14 @@ mod tests {
         KnownRuntime {
             env: "products-devnet",
             spec_name: "people-paseo",
-            spec_version: 2_004_003,
+            spec_version: 2_005_001,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_DEVNET_EXTENSIONS,
         },
         KnownRuntime {
             env: "products-devnet asset hub",
             spec_name: "asset-hub-paseo",
-            spec_version: 2_004_002,
+            spec_version: 2_005_000,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
             extensions: ASSET_HUB_DEVNET_EXTENSIONS,
         },
@@ -682,7 +683,7 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            2_004_003,
+            2_005_001,
             "the blob's own System::Version is what chain-client logs the live \
              chain against, so refreshing the blob moves this number with it \
              (PCF fork: vendored from the public people-paseo, the products devnet)"
