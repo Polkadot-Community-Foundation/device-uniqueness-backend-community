@@ -110,18 +110,22 @@ pub struct DryRun {
 
 /// Pulls the fields this lane needs out of a dynamically decoded
 /// `pallet_revive::ContractResult`.
+///
+/// Runtimes built from polkadot-sdk stable2509 onwards name the weight field
+/// `weight_required`; older ones call it `gas_required`. Both shapes are accepted.
 pub fn decode_dry_run(value: &Value) -> anyhow::Result<DryRun> {
     let gas = value
-        .at("gas_required")
-        .context("ContractResult has no gas_required")?;
+        .at("weight_required")
+        .or_else(|| value.at("gas_required"))
+        .context("ContractResult has neither weight_required nor gas_required")?;
     let ref_time = gas
         .at("ref_time")
         .and_then(|v| v.as_u128())
-        .context("gas_required.ref_time")?;
+        .context("weight_required.ref_time")?;
     let proof_size = gas
         .at("proof_size")
         .and_then(|v| v.as_u128())
-        .context("gas_required.proof_size")?;
+        .context("weight_required.proof_size")?;
     let deposit = value
         .at("storage_deposit")
         .context("ContractResult has no storage_deposit")?;
@@ -327,6 +331,42 @@ mod tests {
         // H160([u8; 20]) decodes as a composite around the byte composite.
         let wrapped = Value::unnamed_composite([Value::from_bytes([9u8; 20])]);
         assert_eq!(composite_bytes(&wrapped), vec![9u8; 20]);
+    }
+
+    fn contract_result(weight_field: &str) -> Value {
+        let weight = Value::named_composite([
+            ("ref_time", Value::u128(400)),
+            ("proof_size", Value::u128(80)),
+        ]);
+        let ok = Value::named_composite([
+            ("flags", Value::u128(0)),
+            ("data", Value::from_bytes([0u8; 32])),
+        ]);
+        Value::named_composite([
+            ("weight_consumed", weight.clone()),
+            (weight_field, weight),
+            (
+                "storage_deposit",
+                Value::named_variant("Charge", [("0", Value::u128(1_000))]),
+            ),
+            (
+                "max_storage_deposit",
+                Value::named_variant("Charge", [("0", Value::u128(1_000))]),
+            ),
+            ("gas_consumed", Value::u128(7)),
+            ("result", Value::named_variant("Ok", [("0", ok)])),
+        ])
+    }
+
+    #[test]
+    fn dry_run_decodes_both_weight_field_names() {
+        for field in ["weight_required", "gas_required"] {
+            let dry = decode_dry_run(&contract_result(field)).unwrap();
+            assert_eq!(dry.cost.ref_time, 400, "{field}");
+            assert_eq!(dry.cost.proof_size, 80, "{field}");
+            assert_eq!(dry.cost.storage_deposit, 1_000, "{field}");
+            assert_eq!(dry.result.unwrap(), vec![0u8; 32]);
+        }
     }
 
     #[test]
