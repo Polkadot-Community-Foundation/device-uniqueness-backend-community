@@ -384,6 +384,28 @@ registration in its own half.
 included. A selector written as `{role="signer"}` alone matches both chains —
 always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
 
+## dotNS settlement (pending claims)
+
+A gateway-minted lite name is registered from a Root origin, which cannot
+deploy the owner's `LabelStore`, so the `DotnsPopController` parks the label
+as a **pending claim** (7-day deadline by default) until a signed origin calls
+`settlePendingClaims(user, limit)`. The client apps never do. With
+`DOTNS_SETTLE_ENABLED=true` (default while the dotNS lane is on) the
+chain-writer settles as a third party every `DOTNS_SETTLE_INTERVAL_SECS`:
+
+- it walks `DotnsGateway::AccountNames` (every gateway-minted account, whichever
+  backend submitted it), dry-runs `pendingClaimCountOf` and, for accounts with
+  claims, dry-runs `settlePendingClaims` before submitting `Revive.call` sized
+  from that dry run (+25 % weight, +10 % deposit);
+- the signer pays gas and the `LabelStore` storage deposit, and is
+  `Revive.map_account`-ed once if it has no revive mapping yet;
+- a controller revert is skipped, not retried into a fee;
+  `dub_dotns_settle_total{outcome="ok"|"failed"|"revert"}` and
+  `dub_dotns_pending_claim_accounts` are the signals.
+
+Log lines: `settling dotns pending claims` → `dotns pending claims settled`.
+An account is only remembered as settled once a pass reads a zero count.
+
 ## Writer rules
 
 - **Exactly one instance.** A nonce lane is (signing account, chain). Never

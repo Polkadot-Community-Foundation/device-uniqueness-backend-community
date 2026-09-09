@@ -163,6 +163,11 @@ services:
       # drained here (stranded-queue warning only); off = janitor drain.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
       QUEUE_FALLBACK_AFTER_SECS: ${QUEUE_FALLBACK_AFTER_SECS:-60}
+      # dotNS settlement of gateway-minted names (see .env.example).
+      DOTNS_SETTLE_ENABLED: ${DOTNS_SETTLE_ENABLED:-true}
+      DOTNS_SETTLE_INTERVAL_SECS: ${DOTNS_SETTLE_INTERVAL_SECS:-60}
+      DOTNS_SETTLE_CLAIM_LIMIT: ${DOTNS_SETTLE_CLAIM_LIMIT:-10}
+      DOTNS_SETTLE_MAX_PER_PASS: ${DOTNS_SETTLE_MAX_PER_PASS:-20}
       # Attester-resources watch (read-only): allowance is the primary's under
       # proxy signing, fees are the signer's, so the floors are separate.
       ATTESTER_RESOURCE_POLL_SECS: ${ATTESTER_RESOURCE_POLL_SECS:-60}

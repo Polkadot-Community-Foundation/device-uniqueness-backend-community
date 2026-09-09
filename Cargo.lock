@@ -1270,6 +1270,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sha3",
  "sqlx",
  "subxt",
  "subxt-rpcs",

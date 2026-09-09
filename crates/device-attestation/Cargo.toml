@@ -62,6 +62,8 @@ hmac = "0.12"
 # Payment lane: deposit-account derivation (blake2_256 of the
 # pallet_multisig entropy tuple and of the keyless dummy signatory).
 blake2 = "0.10"
+# dotNS settlement: keccak-256 for the revive address mapping and Solidity selectors.
+sha3 = "0.10"
 hex = "0.4"
 rand = "0.8"
 time = "0.3"

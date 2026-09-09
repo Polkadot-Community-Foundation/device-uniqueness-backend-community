@@ -6,6 +6,7 @@ pub mod lease;
 pub mod outbox;
 pub mod people;
 pub(crate) mod registry;
+pub mod settle;
 pub mod writer;
 
 pub use people::PeopleChain;
