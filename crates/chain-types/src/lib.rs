@@ -396,8 +396,9 @@ mod tests {
 
     /// What the public `people-paseo` 2005001 (PCF products devnet, Paseo
     /// People 1004, Paseo runtimes v2.5.1) declares, in order — unchanged
-    /// from 2004003. The vendored `people.scale` is generated from this
-    /// runtime (from the released wasm, ahead of enactment).
+    /// from 2004003. Kept so a binary pointed at a node still on v2.5.1
+    /// signs; the vendored `people.scale` now comes from 2005002, see
+    /// [`PEOPLE_DEVNET_V252_EXTENSIONS`].
     const PEOPLE_DEVNET_EXTENSIONS: &[&str] = &[
         "AuthorizeValueTransfer",
         "VerifyMultiSignature",
@@ -429,6 +430,62 @@ mod tests {
     /// gone relative to 2004002; the tuple still names it, harmlessly.
     const ASSET_HUB_DEVNET_EXTENSIONS: &[&str] = &[
         "AuthorizeValueTransfer",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
+    /// What the public `people-paseo` 2005002 (Paseo runtimes v2.5.2)
+    /// declares, in order. v2.5.2 removes the W3S `AuthorizeValueTransfer`
+    /// extension, so slot 0 of the origin-modifier tuple is the unit
+    /// extension and the metadata names `UnitTransactionExtension` there;
+    /// the other 22 are as in 2005001. The vendored `people.scale` is
+    /// generated from this runtime (from the released wasm, ahead of
+    /// enactment).
+    const PEOPLE_DEVNET_V252_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "AsProofOfInkParticipant",
+        "ScoreAsParticipant",
+        "GameAsInvited",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "HonourAuth",
+        "AuthorizeCall",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
+    /// What the public `asset-hub-paseo` 2005002 (Paseo runtimes v2.5.2)
+    /// declares, in order: 2005000 with `AuthorizeValueTransfer` replaced by
+    /// `UnitTransactionExtension` in slot 0.
+    const ASSET_HUB_DEVNET_V252_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
         "AuthorizeCall",
         "AsPgas",
         "AsDotnsGateway",
@@ -503,6 +560,20 @@ mod tests {
     /// stays here — and its gate stays in the tuple — so that a binary
     /// pointed at a node that has not upgraded yet can still sign.
     const KNOWN_RUNTIMES: &[KnownRuntime] = &[
+        KnownRuntime {
+            env: "products-devnet",
+            spec_name: "people-paseo",
+            spec_version: 2_005_002,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_DEVNET_V252_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "products-devnet asset hub",
+            spec_name: "asset-hub-paseo",
+            spec_version: 2_005_002,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_DEVNET_V252_EXTENSIONS,
+        },
         KnownRuntime {
             env: "products-devnet",
             spec_name: "people-paseo",
@@ -683,7 +754,7 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            2_005_001,
+            2_005_002,
             "the blob's own System::Version is what chain-client logs the live \
              chain against, so refreshing the blob moves this number with it \
              (PCF fork: vendored from the public people-paseo, the products devnet)"
