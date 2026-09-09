@@ -28,6 +28,7 @@ use super::lease;
 use super::outbox::{self, Guard, Reservation};
 use super::people::PeopleChain;
 use super::registry::NameRegistry as _;
+use super::settle;
 use crate::dotns;
 
 mod events;
@@ -128,6 +129,17 @@ pub struct WriterConfig {
     pub dotns_gateway_enabled: bool,
     /// Asset Hub RPC endpoint. Required when the dotNS lane is enabled.
     pub asset_hub_rpc_url: Option<String>,
+    /// Whether the settlement pass runs (`DOTNS_SETTLE_ENABLED`, default on
+    /// while the dotNS lane is enabled). It settles gateway-minted names into
+    /// their owners' `LabelStore`s from this writer's Asset Hub signer.
+    pub dotns_settle_enabled: bool,
+    /// Cadence of the settlement pass over `DotnsGateway::AccountNames`.
+    pub dotns_settle_interval: Duration,
+    /// `limit` argument of `settlePendingClaims`: claims settled per call.
+    pub dotns_settle_claim_limit: u64,
+    /// Upper bound on settlement submissions in one pass, so a backlog cannot
+    /// starve the registration lanes.
+    pub dotns_settle_max_per_pass: usize,
 }
 
 impl WriterConfig {
@@ -187,6 +199,17 @@ impl WriterConfig {
                 Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
                 _ => None,
             },
+            dotns_settle_enabled: crate::config::env_bool("DOTNS_SETTLE_ENABLED", true)?,
+            dotns_settle_interval: Duration::from_secs(crate::queue::env_u64_strict(
+                "DOTNS_SETTLE_INTERVAL_SECS",
+                60,
+            )?),
+            dotns_settle_claim_limit: crate::queue::env_u64_strict("DOTNS_SETTLE_CLAIM_LIMIT", 10)?,
+            dotns_settle_max_per_pass: usize::try_from(crate::queue::env_u64_strict(
+                "DOTNS_SETTLE_MAX_PER_PASS",
+                20,
+            )?)
+            .context("DOTNS_SETTLE_MAX_PER_PASS must fit a usize")?,
         })
     }
 }
@@ -257,6 +280,7 @@ pub async fn run(config: WriterConfig) -> anyhow::Result<()> {
         batch_max,
         people_batch: BatchLane::new("people", batch_max),
         dotns_batch: BatchLane::new("dotns", batch_max),
+        settle: SettleState::default(),
     };
     writer.run_forever().await
 }
@@ -282,6 +306,19 @@ struct Writer {
     /// — are unrelated to People's, so one shared number would be wrong for
     /// both.
     dotns_batch: BatchLane,
+    /// Settlement lane memory: what was already found settled, whether the
+    /// signer has its revive mapping, and one-shot warnings.
+    settle: SettleState,
+}
+
+/// Per-process state of the dotNS settlement pass.
+#[derive(Default)]
+struct SettleState {
+    cache: settle::SettledCache,
+    /// `Some(true)` once `Revive::OriginalAccount` shows the signer mapped (or
+    /// this writer mapped it); `None` until checked.
+    signer_mapped: Option<bool>,
+    warned_no_dispatcher: bool,
 }
 
 /// One lane's adaptive batch state.
@@ -642,6 +679,7 @@ impl Writer {
 
     async fn active_loop(&mut self, guard: &Guard) -> anyhow::Result<()> {
         let mut last_payment_pass: Option<std::time::Instant> = None;
+        let mut last_settle_pass: Option<std::time::Instant> = None;
         let mut last_stranded_check: Option<std::time::Instant> = None;
         let mut last_resource_pass: Option<std::time::Instant> = None;
         loop {
@@ -684,6 +722,14 @@ impl Writer {
                         "queue disabled with advancer gone; promoted leftover queued claims"
                     ),
                     Err(e) => tracing::warn!(error = %e, "queue janitor drain failed"),
+                }
+            }
+            if self.config.dotns_settle_enabled
+                && last_settle_pass.is_none_or(|t| t.elapsed() >= self.config.dotns_settle_interval)
+            {
+                last_settle_pass = Some(std::time::Instant::now());
+                if let Err(e) = self.settle_pass(guard).await {
+                    tracing::warn!(error = %e, "dotns settlement pass failed");
                 }
             }
             if last_payment_pass.is_none_or(|t| t.elapsed() >= self.config.payment_poll_interval) {
@@ -1925,6 +1971,181 @@ impl Writer {
             .finalize(guard, signed.submit_and_watch().await?, "dotns submit")
             .await?;
         check_proxied_call(&events, &metadata)
+    }
+
+    /// Settle gateway-minted names into their owners' `LabelStore`s.
+    ///
+    /// Chain-driven: walks `DotnsGateway::AccountNames` (every account the
+    /// gateway ever minted for, whichever backend submitted it), asks the PoP
+    /// controller for each account's pending-claim count, and settles as a
+    /// third party from this writer's signer. A dry run sizes every call so
+    /// the extrinsic never carries a guessed weight, and a controller revert
+    /// is skipped rather than retried into a fee. Accounts found settled are
+    /// remembered by record value, so a later full-name claim re-arms them.
+    async fn settle_pass(&mut self, guard: &Guard) -> anyhow::Result<()> {
+        let Some((asset_hub, _)) = self.dotns_client().await else {
+            return Ok(());
+        };
+        let Some(controller) = asset_hub.dispatcher_address().await? else {
+            if !self.settle.warned_no_dispatcher {
+                self.settle.warned_no_dispatcher = true;
+                tracing::warn!("DotnsGateway::DispatcherAddress is unset; nothing to settle into");
+            }
+            return Ok(());
+        };
+        let records = asset_hub.account_names().await?;
+        let signer = self.signer_account.0;
+        let mut pending_accounts = 0usize;
+        let mut submitted = 0usize;
+        for record in records {
+            if self.settle.cache.is_settled(&record.account, &record.raw) {
+                continue;
+            }
+            let user = settle::to_h160(&record.account);
+            let count = match asset_hub
+                .revive_dry_run(
+                    &signer,
+                    &controller,
+                    settle::pending_claim_count_calldata(&user),
+                )
+                .await
+            {
+                Ok(run) => match run.result {
+                    Ok(data) => settle::decode_uint(&data)?,
+                    Err(reason) => {
+                        tracing::warn!(account = %hex_account(&record.account), %reason, "pendingClaimCountOf reverted");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(account = %hex_account(&record.account), error = %e, "pendingClaimCountOf dry run failed");
+                    continue;
+                }
+            };
+            if count == 0 {
+                self.settle.cache.mark(record.account, record.raw);
+                continue;
+            }
+            pending_accounts += 1;
+            if submitted >= self.config.dotns_settle_max_per_pass {
+                continue;
+            }
+            if !self.ensure_signer_mapped(guard, &asset_hub).await? {
+                break;
+            }
+            let calldata = settle::settle_calldata(&user, self.config.dotns_settle_claim_limit);
+            let run = match asset_hub
+                .revive_dry_run(&signer, &controller, calldata)
+                .await
+            {
+                Ok(run) => run,
+                Err(e) => {
+                    tracing::warn!(account = %hex_account(&record.account), error = %e, "settlePendingClaims dry run failed");
+                    continue;
+                }
+            };
+            if let Err(reason) = &run.result {
+                tracing::warn!(account = %hex_account(&record.account), %reason, "settlePendingClaims would revert; skipped");
+                metrics::counter!("dub_dotns_settle_total", "outcome" => "revert").increment(1);
+                continue;
+            }
+            let payload = settle::settle_tx(
+                &controller,
+                &user,
+                self.config.dotns_settle_claim_limit,
+                run.cost,
+            );
+            let nonce = self.nonce_ah(&asset_hub).await?;
+            let params = AssetHubExtrinsicParamsBuilder::new().nonce(nonce).build();
+            let signed = asset_hub
+                .online()
+                .tx()
+                .await?
+                .create_signed(&payload, &self.signer, params)
+                .await?;
+            let tx_hash = format!("{:?}", signed.hash());
+            tracing::info!(
+                account = %hex_account(&record.account),
+                user = %format!("0x{}", hex::encode(user)),
+                pending = count,
+                ref_time = run.cost.ref_time,
+                storage_deposit = run.cost.storage_deposit,
+                tx = %tx_hash,
+                "settling dotns pending claims"
+            );
+            match self
+                .finalize(guard, signed.submit_and_watch().await?, "dotns settle")
+                .await
+            {
+                Ok(_) => {
+                    self.next_nonce_ah = Some(nonce + 1);
+                    submitted += 1;
+                    metrics::counter!("dub_dotns_settle_total", "outcome" => "ok").increment(1);
+                    tracing::info!(account = %hex_account(&record.account), tx = %tx_hash, "dotns pending claims settled");
+                    // Verified on the next pass rather than assumed: the cache
+                    // is only written by a zero count.
+                }
+                Err(e) => {
+                    self.next_nonce_ah = None;
+                    metrics::counter!("dub_dotns_settle_total", "outcome" => "failed").increment(1);
+                    tracing::warn!(account = %hex_account(&record.account), error = %e, "dotns settlement failed");
+                }
+            }
+        }
+        metrics::gauge!("dub_dotns_pending_claim_accounts").set(pending_accounts as f64);
+        if submitted > 0 || pending_accounts > 0 {
+            tracing::info!(
+                pending_accounts,
+                submitted,
+                settled_cached = self.settle.cache.len(),
+                "dotns settlement pass"
+            );
+        }
+        Ok(())
+    }
+
+    /// A substrate signer must hold a revive address mapping before it can
+    /// call a contract. Checked once per process; mapped here if missing.
+    async fn ensure_signer_mapped(
+        &mut self,
+        guard: &Guard,
+        asset_hub: &AssetHub,
+    ) -> anyhow::Result<bool> {
+        if self.settle.signer_mapped == Some(true) {
+            return Ok(true);
+        }
+        if asset_hub.is_revive_mapped(&self.signer_account.0).await? {
+            self.settle.signer_mapped = Some(true);
+            return Ok(true);
+        }
+        let nonce = self.nonce_ah(asset_hub).await?;
+        let params = AssetHubExtrinsicParamsBuilder::new().nonce(nonce).build();
+        let signed = asset_hub
+            .online()
+            .tx()
+            .await?
+            .create_signed(&settle::map_account_tx(), &self.signer, params)
+            .await?;
+        tracing::info!(signer = %hex_account(&self.signer_account.0), tx = %format!("{:?}", signed.hash()), "mapping the writer's signer for revive (Revive.map_account)");
+        match self
+            .finalize(
+                guard,
+                signed.submit_and_watch().await?,
+                "revive map_account",
+            )
+            .await
+        {
+            Ok(_) => {
+                self.next_nonce_ah = Some(nonce + 1);
+                self.settle.signer_mapped = Some(true);
+                Ok(true)
+            }
+            Err(e) => {
+                self.next_nonce_ah = None;
+                tracing::warn!(error = %e, "Revive.map_account failed; settlement skipped this pass");
+                Ok(false)
+            }
+        }
     }
 
     async fn reconcile_dotns_submitting(&mut self, guard: &Guard) -> anyhow::Result<()> {
