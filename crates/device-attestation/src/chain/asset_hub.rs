@@ -183,10 +183,11 @@ impl AssetHub {
         let address = subxt::dynamic::storage::<(), Value>(PALLET, "DispatcherAddress");
         let value = at.storage().try_fetch(address, ()).await?;
         let Some(value) = value else { return Ok(None) };
-        let bytes = crate::chain::settle::composite_bytes(&value.decode()?);
-        let mut out = [0u8; 20];
-        anyhow::ensure!(bytes.len() == 20, "DispatcherAddress is not 20 bytes");
-        out.copy_from_slice(&bytes);
+        // `H160` is a newtype around `[u8; 20]`; decode it as the typed array so
+        // the wrapper is unwrapped for us rather than flattened by hand.
+        let out: [u8; 20] = value
+            .decode_as::<[u8; 20]>()
+            .context("decoding DotnsGateway::DispatcherAddress as H160")?;
         Ok(Some(out))
     }
 
