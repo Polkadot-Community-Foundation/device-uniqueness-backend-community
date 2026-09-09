@@ -161,15 +161,28 @@ pub fn decode_dry_run(value: &Value) -> anyhow::Result<DryRun> {
     })
 }
 
-/// A `Vec<u8>` decodes as a composite of byte primitives.
+/// Flattens a byte-like value: a `Vec<u8>` decodes as a composite of byte
+/// primitives, and newtypes such as `H160([u8; 20])` wrap that in one more
+/// composite, so nested composites are walked recursively.
 pub fn composite_bytes(value: &Value) -> Vec<u8> {
-    match &value.value {
-        ValueDef::Composite(composite) => composite
-            .values()
-            .filter_map(|v| v.as_u128().map(|b| b as u8))
-            .collect(),
-        _ => Vec::new(),
+    fn walk(value: &Value, out: &mut Vec<u8>) {
+        match &value.value {
+            ValueDef::Composite(composite) => {
+                for inner in composite.values() {
+                    walk(inner, out);
+                }
+            }
+            ValueDef::Primitive(_) => {
+                if let Some(b) = value.as_u128() {
+                    out.push(b as u8);
+                }
+            }
+            _ => {}
+        }
     }
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
 }
 
 /// The `Revive.call` extrinsic that settles `user`'s pending claims, sized from
@@ -305,6 +318,15 @@ mod tests {
             ])
         );
         assert_eq!(args[3], Value::u128(1_100));
+    }
+
+    #[test]
+    fn composite_bytes_flattens_newtype_wrappers() {
+        let flat = Value::from_bytes([1u8, 2, 3]);
+        assert_eq!(composite_bytes(&flat), vec![1, 2, 3]);
+        // H160([u8; 20]) decodes as a composite around the byte composite.
+        let wrapped = Value::unnamed_composite([Value::from_bytes([9u8; 20])]);
+        assert_eq!(composite_bytes(&wrapped), vec![9u8; 20]);
     }
 
     #[test]
