@@ -21,7 +21,7 @@ fn owner_key(
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReservationState {
-    /// The bare name is owned as a full-person username.
+    /// The bare name is owned as a personhood username.
     pub full_name_owned: bool,
     /// Accounts queued for the bare name.
     pub queue_len: u32,
@@ -44,7 +44,7 @@ impl ReservationState {
 pub struct BaseState {
     /// Discriminators `00..=99` already owned under this base.
     pub taken: BTreeSet<u8>,
-    /// The bare base is owned as a full-person username.
+    /// The bare base is owned as a personhood username.
     pub full_name_owned: bool,
     /// Accounts queued for the bare base.
     pub queue_len: u32,
@@ -229,7 +229,7 @@ impl PeopleChain {
         })
     }
 
-    /// The reservation state of one bare full-person name.
+    /// The reservation state of one bare personhood name.
     pub async fn reservation_state(&self, name: &str) -> anyhow::Result<ReservationState> {
         let at = self.client.at_current_block().await?;
         let block_hash = at.block_hash();

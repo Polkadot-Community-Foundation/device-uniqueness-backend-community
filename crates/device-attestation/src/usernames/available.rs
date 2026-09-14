@@ -69,7 +69,7 @@ pub(crate) struct NameAvailability {
         (status = 200, description = "Per-base availability read from People Chain UsernameOwnerOf \
             plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. \
             `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the \
-            bare full-person name is owned or its reservation queue is full — the last two would \
+            bare personhood name is owned or its reservation queue is full — the last two would \
             make a claim carrying `dotns.reservedUsername` fail on chain and take the lite \
             username with it.",
          body = AvailableV1Response,

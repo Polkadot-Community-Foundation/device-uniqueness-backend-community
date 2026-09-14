@@ -37,7 +37,7 @@ pub enum UsernamesError {
         /// The selected two-digit suffix.
         digits: String,
     },
-    /// The `dotns.reservedUsername` full-person name is owned, or its
+    /// The `dotns.reservedUsername` personhood name is owned, or its
     /// reservation queue is full (409).
     ///
     /// Carries the name the claim asked to *reserve*, which is what was

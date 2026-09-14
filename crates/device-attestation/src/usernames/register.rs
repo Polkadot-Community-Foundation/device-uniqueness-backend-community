@@ -97,7 +97,7 @@ pub struct RegisterRequest {
     dotns: Option<Dotns>,
 }
 
-/// Optional DotNS reservation, parking a base label for later full-person use.
+/// Optional DotNS reservation, parking a base label for later personhood use.
 #[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub(crate) struct Dotns {
@@ -108,7 +108,7 @@ pub(crate) struct Dotns {
     #[serde(rename = "signedAt")]
     #[schema(rename = "signedAt", example = 1780000000i64)]
     signed_at: i64,
-    /// The bare full-person name to reserve. Its own name on chain — it need
+    /// The bare personhood name to reserve. Its own name on chain — it need
     /// not be `username`, and availability is checked against *this* name, not
     /// against the base of the lite username in the same claim.
     #[serde(rename = "reservedUsername")]
@@ -217,7 +217,7 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
-            the claim carries `dotns.reservedUsername` for a full-person name that is already owned \
+            the claim carries `dotns.reservedUsername` for a personhood name that is already owned \
             or whose reservation queue is full — checked against the reserved name itself, which \
             `attest` takes as its own argument and which need not be `username`. The runtime checks \
             that leg *before* it writes the lite username, and the consumer signature covers it, so \
@@ -857,7 +857,7 @@ struct ParsedDotns {
     reserved_username: Option<String>,
 }
 
-/// The full-person name this claim asks to reserve, if it asks for one.
+/// The personhood name this claim asks to reserve, if it asks for one.
 fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
     parsed.dotns.as_ref()?.reserved_username.as_deref()
 }

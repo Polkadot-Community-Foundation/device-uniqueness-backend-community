@@ -41,7 +41,7 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   rule: **speculation may add rows and retract rows it added, and may never
   modify or delete finalized state.** That rule sets the scope: a *new*
   registration is admitted early, while a change to an account that already holds
-  a finalized row — a full-person upgrade, an identifier key rotation — still
+  a finalized row — a personhood upgrade, an identifier key rotation — still
   becomes visible only at finality.
 
   The window is re-derived from the finalized head on every pass rather than

@@ -495,7 +495,7 @@
             }
           },
           "409": {
-            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a full-person name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
+            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a personhood name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -573,7 +573,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
+            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1249,7 +1249,7 @@
       },
       "Dotns": {
         "type": "object",
-        "description": "Optional DotNS reservation, parking a base label for later full-person use.",
+        "description": "Optional DotNS reservation, parking a base label for later personhood use.",
         "required": [
           "signature",
           "signedAt"
@@ -1271,7 +1271,7 @@
               "string",
               "null"
             ],
-            "description": "The bare full-person name to reserve. Its own name on chain — it need\nnot be `username`, and availability is checked against *this* name, not\nagainst the base of the lite username in the same claim.",
+            "description": "The bare personhood name to reserve. Its own name on chain — it need\nnot be `username`, and availability is checked against *this* name, not\nagainst the base of the lite username in the same claim.",
             "example": "reservedname"
           }
         }

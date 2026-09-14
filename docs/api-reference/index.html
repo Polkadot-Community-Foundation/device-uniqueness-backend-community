@@ -1587,7 +1587,7 @@ device — the raw id never leaves it.</td></tr>
               <tbody>
                 <tr><td class="name">signature</td><td class="type">string</td><td class="req yes">yes</td><td class="desc"><code>0x</code>-hex 64-byte signature.</td></tr>
                 <tr><td class="name">signedAt</td><td class="type">number</td><td class="req yes">yes</td><td class="desc">Unix timestamp the reservation was signed at.</td></tr>
-                <tr><td class="name">reservedUsername</td><td class="type">string</td><td class="req">no</td><td class="desc">The bare full-person name to reserve. Its own name on chain — it need
+                <tr><td class="name">reservedUsername</td><td class="type">string</td><td class="req">no</td><td class="desc">The bare personhood name to reserve. Its own name on chain — it need
 not be <code>username</code>, and availability is checked against *this* name, not
 against the base of the lite username in the same claim.</td></tr>
               </tbody>
@@ -1745,7 +1745,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c409">409</span>
                 <span class="sc-label">Preferred digits 07 already taken for username tallesx</span>
               </div>
-              <div class="sc-desc">Preferred digits taken, no digits available, username taken, or the claim carries <code>dotns.reservedUsername</code> for a full-person name that is already owned or whose reservation queue is full — checked against the reserved name itself, which <code>attest</code> takes as its own argument and which need not be <code>username</code>. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another <code>dotns.reservedUsername</code>.</div>
+              <div class="sc-desc">Preferred digits taken, no digits available, username taken, or the claim carries <code>dotns.reservedUsername</code> for a personhood name that is already owned or whose reservation queue is full — checked against the reserved name itself, which <code>attest</code> takes as its own argument and which need not be <code>username</code>. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another <code>dotns.reservedUsername</code>.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1877,7 +1877,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare full-person name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
+              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
