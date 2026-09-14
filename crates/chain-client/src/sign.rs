@@ -67,9 +67,7 @@ where
     let call_info = metadata
         .extrinsic_call_info_by_name(call.pallet_name(), call.call_name())
         .map_err(info_error)?;
-    let signature_info = metadata
-        .extrinsic_signature_info()
-        .map_err(info_error)?;
+    let signature_info = metadata.extrinsic_signature_info().map_err(info_error)?;
     let extension_info = metadata
         .extrinsic_extension_info(Some(V4_EXTENSION_VERSION))
         .map_err(info_error)?;
