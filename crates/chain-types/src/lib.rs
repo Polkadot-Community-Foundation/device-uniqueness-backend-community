@@ -199,6 +199,7 @@ delegating_config! {
 pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
+    Noop<VerifyMultiSignature>,
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
@@ -213,6 +214,7 @@ pub type AssetHubTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    Noop<PrevalidateAttests>,
     tx_ext::CheckMetadataHash,
     Noop<EthSetOrigin>,
     Noop<StorageWeightReclaim>,
@@ -221,8 +223,8 @@ pub type AssetHubTransactionExtensions<T> = (
 extrinsic_params_builder! {
     AssetHubExtrinsicParamsBuilder<AssetHubConfig> => AssetHubTransactionExtensions,
     |mortality, nonce, tip| (
-        (), (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (), (), (),
+        (), (), (), (), (), (), (), (), (), (), (), (), (),
+        mortality, nonce, (), tip, (), (), (), (),
     )
 }
 
@@ -320,6 +322,10 @@ noop_names! {
     AsScarcity = &[0],
     AsDotnsGateway = &[0],
     EthSetOrigin,
+    // `VerifySignature::Disabled`: the Asset Hub lane signs the extrinsic
+    // itself, so this extension carries no signature of its own.
+    VerifyMultiSignature = &[0],
+    PrevalidateAttests,
 }
 
 #[cfg(test)]
@@ -357,6 +363,7 @@ mod tests {
     const ASSET_HUB_TUPLE_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "AuthorizeValueTransfer",
+        "VerifyMultiSignature",
         "AuthorizeCall",
         "AsPgas",
         "AsRingAlias",
@@ -371,6 +378,7 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "PrevalidateAttests",
         "CheckMetadataHash",
         "EthSetOrigin",
         "StorageWeightReclaim",
@@ -460,6 +468,30 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    /// What `statemint` 2005000 (the polkadot-test Asset Hub) declares, in
+    /// order (extension version 1). New against the Paseo Asset Hubs:
+    /// `VerifyMultiSignature` and `PrevalidateAttests`; `AsScarcity` is gone.
+    const ASSET_HUB_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
     /// Every runtime a deployment is known to have talked to. The tuples are
     /// the union of these sets, not a snapshot of the newest one: an entry
     /// stays here — and its gate stays in the tuple — so that a binary
@@ -471,6 +503,13 @@ mod tests {
             spec_version: 2_005_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test asset hub",
+            spec_name: "statemint",
+            spec_version: 2_005_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
         },
         KnownRuntime {
             env: "paseo-next-v2 / previewnet",

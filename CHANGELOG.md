@@ -21,7 +21,35 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   dashboard are all removed. `dub --list-roles` now lists six roles. A request to
   the claim path now gets the catch-all JSON 404.
 
+### Changed
+
+- **The default chain endpoints are polkadot-test.** `PEOPLE_RPC_URL` and
+  `ASSET_HUB_RPC_URL` now default to `wss://polkadot-test.substrate.dev/people`
+  and `wss://polkadot-test.substrate.dev/asset-hub` in `.env.example` and the
+  compose file, replacing PreviewNet. The two still move together: the dotNS
+  lane must claim labels on the same network it attests usernames on.
+
 ### Fixed
+
+- **The writer's transactions decode on polkadot-test.** subxt 0.50 signs a v4
+  extrinsic with the transaction extensions of the *highest* extension version
+  the metadata declares, but the runtime decodes a v4 signed extrinsic with
+  version 0 only. Both polkadot-test chains declare two versions (People: 11
+  and 19 extensions, Asset Hub: 13 and 18), so every registration and every
+  `reserve_name` was undecodable: the node aborts validation with `wasm trap:
+  wasm 'unreachable' instruction executed` instead of returning a verdict. Both
+  lanes now sign through `chain_client::create_signed_v4`, which is
+  `create_signed` with version 0. Verified against both live chains: the same
+  remark that trapped before now gets a normal validity verdict. On a runtime
+  that declares a single version (PreviewNet's Asset Hub), version 0 is that
+  version, so the extensions encoded are the same as before.
+- **The dotNS lane can sign against the polkadot-test Asset Hub.** That runtime
+  (`statemint` 2005000) declares `VerifyMultiSignature` and
+  `PrevalidateAttests`, neither of which `AssetHubTransactionExtensions` had,
+  and subxt resolves extensions by name, so every `reserve_name` submission
+  would have failed to encode. Both are now in the tuple (`VerifySignature` as
+  `Disabled`, since the extrinsic carries its own signature); the Paseo gates
+  stay, so older runtimes can still be signed for.
 
 - **A contested signer nonce no longer fails registrations terminally.** One
   writer signs from one account and the chain serves that account strictly in

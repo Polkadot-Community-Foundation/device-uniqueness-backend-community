@@ -56,7 +56,7 @@ services:
       # pointing at localhost for host-side `cargo run`. Interpolating that name
       # here would aim every container at its own loopback.
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://polkadot-test.substrate.dev/people}
       # Dev-only 32-byte Ed25519 seed (0x + 64 hex). Replace in prod.
       JWT_ED25519_SECRET: ${JWT_ED25519_SECRET:-0x0101010101010101010101010101010101010101010101010101010101010101}
       # Dev default = //Alice, matching the writer SURI below (signer ==
@@ -77,7 +77,7 @@ services:
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
       # The PEOPLE_RPC_URL and ASSET_HUB_RPC_URL
-      # defaults both name PreviewNet, and that pairing IS the safety property:
+      # defaults both name polkadot-test, and that pairing IS the safety property:
       # split across two networks, the writer would claim LiteLabelOwner on one
       # for usernames attested on another — a global claim, and unrecoverable,
       # because only the client can re-sign. An environment that overrides
@@ -127,7 +127,7 @@ services:
     # also contains service-owned signing secrets.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://polkadot-test.substrate.dev/people}
       # Dev signer. In prod the least-privilege proxy key; the writer proxies
       # whenever ATTESTER_ACCOUNT is not this key.
       CHAIN_WRITER_SIGNER_SURI: ${CHAIN_WRITER_SIGNER_SURI:-//Alice}
@@ -149,8 +149,8 @@ services:
       # signing origin by construction.
       # The URL below must name the Asset Hub of the same network PEOPLE_RPC_URL
       # points at, or the writer claims labels on the wrong chain. Both default
-      # to PreviewNet; an environment that moves one moves the other.
-      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
+      # to polkadot-test; an environment that moves one moves the other.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://polkadot-test.substrate.dev/asset-hub}
       # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
       # drained here (stranded-queue warning only); off = janitor drain.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
@@ -194,7 +194,7 @@ services:
     # balances and flips queue rows in the device-attestation DB.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://polkadot-test.substrate.dev/people}
       QUEUE_ADVANCE_INTERVAL_SECS: ${QUEUE_ADVANCE_INTERVAL_SECS:-6}
       QUEUE_LEASE_TTL_SECS: ${QUEUE_LEASE_TTL_SECS:-30}
       # Prometheus exporter, scraped on the private metrics network only.
@@ -245,7 +245,7 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://polkadot-test.substrate.dev/people}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
       SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}

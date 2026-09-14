@@ -334,8 +334,8 @@ async fn sign(
 > {
     let payload = Dotns::tx(rows, cx.proxy_for.as_ref());
     let params = AssetHubExtrinsicParamsBuilder::new().nonce(nonce).build();
-    let mut tx_client = chain.online().tx().await?;
-    Ok(tx_client.create_signed(&payload, cx.signer, params).await?)
+    let at = chain.online().at_current_block().await?;
+    Ok(chain_client::create_signed_v4(&at, &payload, cx.signer, params).await?)
 }
 
 async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str) -> Result<(), WriterError> {
