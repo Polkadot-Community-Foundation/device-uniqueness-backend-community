@@ -957,60 +957,6 @@
         }
       }
     },
-    "/api/v1/invitation-ticket/claim": {
-      "post": {
-        "tags": [
-          "Invitation Tickets"
-        ],
-        "summary": "Claim an invitation ticket for a DIM, returning a signature (JWT-gated).",
-        "operationId": "claim_ticket",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ClaimRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Ticket claimed: the oldest `available` ticket of the `(dim, network)` pool, atomically flipped to `claimed`, with an sr25519 signature by the ticket key over the claimant's decoded 32-byte account id.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ClaimResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Body validation failed (with per-field `fields`), or `Malformed JSON in request body` when the body is not JSON."
-          },
-          "401": {
-            "description": "Missing/malformed `Authorization` header or failed token verification."
-          },
-          "409": {
-            "description": "Ticket race lost — a concurrent request claimed the contended ticket."
-          },
-          "422": {
-            "description": "Pool exhausted — no `available` ticket in the `(dim, network)` pool."
-          },
-          "429": {
-            "description": "Per-subject rate limit exceeded (with `Retry-After`)."
-          },
-          "500": {
-            "description": "Unexpected internal failure (opaque)."
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
     "/api/v1/turn/issue": {
       "post": {
         "tags": [
@@ -1683,89 +1629,6 @@
           }
         }
       },
-      "ClaimRequest": {
-        "type": "object",
-        "description": "`{ who, dim }` — the claim command.",
-        "required": [
-          "who",
-          "dim"
-        ],
-        "properties": {
-          "who": {
-            "type": "string",
-            "description": "SS58 address to claim a ticket for (any valid SS58 prefix).",
-            "example": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-          },
-          "dim": {
-            "type": "string",
-            "description": "DIM to claim a ticket for: `Game` or `ProofOfInk`.",
-            "example": "Game"
-          }
-        }
-      },
-      "ClaimResponse": {
-        "type": "object",
-        "description": "The 200 claim body: the ticket keypair's public half plus the\nsr25519 signature over the claimant's decoded account id.",
-        "required": [
-          "publicKey",
-          "inviter",
-          "dim",
-          "network",
-          "claimedBy",
-          "createdAt",
-          "claimedAt",
-          "signature",
-          "remaining"
-        ],
-        "properties": {
-          "publicKey": {
-            "type": "string",
-            "description": "`0x`-hex 32-byte sr25519 public key of the claimed ticket.",
-            "example": "0xda8ab326da384dd49d5f12543b58acae730af7388b9348c51af6ee3a0962864d"
-          },
-          "inviter": {
-            "type": "string",
-            "description": "SS58 address of the inviter that registered the ticket on-chain.",
-            "example": "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM"
-          },
-          "dim": {
-            "type": "string",
-            "description": "DIM the ticket funds: `Game` or `ProofOfInk`.",
-            "example": "Game"
-          },
-          "network": {
-            "type": "string",
-            "description": "Network the ticket is registered on: `westend2`, `paseo`, or `polkadot`.",
-            "example": "paseo"
-          },
-          "claimedBy": {
-            "type": "string",
-            "description": "SS58 address the ticket was claimed for (echoes `who`).",
-            "example": "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-          },
-          "createdAt": {
-            "type": "string",
-            "description": "Ticket generation time (JS-style ISO, millisecond precision).",
-            "example": "2026-07-01T10:20:30.400Z"
-          },
-          "claimedAt": {
-            "type": "string",
-            "description": "Claim time (JS-style ISO, millisecond precision).",
-            "example": "2026-07-02T11:00:00.000Z"
-          },
-          "signature": {
-            "type": "string",
-            "description": "`0x`-hex 64-byte sr25519 signature by the ticket key over the raw\n32-byte account id decoded from `who`.",
-            "example": "0xa4a506e96aff250724590ef9527d8117ea2e9d633e813d22d32ad17e0b5c253c406cb22baf62283c6987f81b9bb55ea75f3bdff0259d84e5c282728043f77c88"
-          },
-          "remaining": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Tickets still `available` in this `(dim, network)` pool after the claim.",
-            "example": 41
-          }
-        }
-      },
       "IssueRequest": {
         "type": "object",
         "description": "`{ regionHint? }` — the issue command (the hint is reserved and ignored).",
@@ -2036,10 +1899,6 @@
     {
       "name": "Proof of compute",
       "description": "Puzzle issuance for callers that hold no bearer token. Mounted only when `POC_ENABLED=true`."
-    },
-    {
-      "name": "Invitation Tickets",
-      "description": "Synchronous invitation-credential claims from a pre-staged, on-chain-registered sr25519 keypair pool. The route the shipping iOS/Android apps call for Game / ProofOfInk credentials."
     },
     {
       "name": "TURN",

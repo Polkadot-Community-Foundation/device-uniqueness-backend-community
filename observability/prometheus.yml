@@ -23,8 +23,6 @@ scrape_configs:
           - device-attestation-chain-writer-paseo-next-v2:9090
           - registration-queue-paseo-next-v2:9090
           - username-indexer-paseo-next-v2:9090
-          - invite-tickets-api-paseo-next-v2:9090
-          - invite-tickets-pool-paseo-next-v2:9090
           - turn-api-paseo-next-v2:9090
           - notify-relay-paseo-next-v2:9090
         labels:
@@ -33,7 +31,7 @@ scrape_configs:
   # PreviewNet runs a deliberate subset — the six services listed in
   # docs/deploy.md ("Start only the services that environment needs"), of which
   # four export metrics. `registration-queue` is absent (QUEUE_ENABLED=false),
-  # the ticket services are not deployed there, and `notify-relay` is shared.
+  # and `notify-relay` is shared.
   # Listing an undeployed target here would only produce a permanent `down`.
   - job_name: previewnet
     metrics_path: /metrics

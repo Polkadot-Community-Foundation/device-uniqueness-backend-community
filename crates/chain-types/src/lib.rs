@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Refresh with:
-//! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Game,ProofOfInk,Members -f bytes -o crates/chain-types/metadata/people.scale`
+//! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members -f bytes -o crates/chain-types/metadata/people.scale`
 
 use subxt::config::transaction_extensions as tx_ext;
 
@@ -179,6 +179,7 @@ pub type PeopleTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    tx_ext::CheckMetadataHash,
     Noop<StorageWeightReclaim>,
 );
 
@@ -186,7 +187,7 @@ extrinsic_params_builder! {
     PeopleExtrinsicParamsBuilder<PeopleConfig> => PeopleTransactionExtensions,
     |mortality, nonce, tip| (
         (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (),
+        mortality, nonce, (), tip, (), (),
     )
 }
 
@@ -349,6 +350,7 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "CheckMetadataHash",
         "StorageWeightReclaim",
     ];
 
@@ -410,6 +412,31 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    /// What `people-polkadot` 2005000 declares, in order (extension version 1,
+    /// the one subxt encodes with). Game and ProofOfInk are gone, and with
+    /// them their gates; `CheckMetadataHash` is new.
+    const PEOPLE_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "RestrictOrigins",
+        "AuthorizeCall",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
     /// What `next-asset-hub-paseo` 3000000 declares, in order. `AsRingAlias`
     /// is gone and `AsScarcity` took its place; the tuple carries both,
     /// because the runtimes below are still in the list.
@@ -438,6 +465,13 @@ mod tests {
     /// stays here — and its gate stays in the tuple — so that a binary
     /// pointed at a node that has not upgraded yet can still sign.
     const KNOWN_RUNTIMES: &[KnownRuntime] = &[
+        KnownRuntime {
+            env: "polkadot-test",
+            spec_name: "people-polkadot",
+            spec_version: 2_005_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
         KnownRuntime {
             env: "paseo-next-v2 / previewnet",
             spec_name: "next-people-paseo",
@@ -604,7 +638,7 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            3_000_000,
+            2_005_000,
             "the blob's own System::Version is what chain-client logs the live \
              chain against, so refreshing the blob moves this number with it"
         );
@@ -643,29 +677,6 @@ mod tests {
         assert_eq!(call.call_name(), "register_lite_person");
     }
 
-    #[test]
-    fn builds_set_invite_ticket_calls() {
-        let ticket = subxt::utils::AccountId32([0u8; 32]);
-        let game = people::tx().game().set_invite_ticket(ticket);
-        assert_eq!(game.pallet_name(), "Game");
-        assert_eq!(game.call_name(), "set_invite_ticket");
-
-        let poi = people::tx().proof_of_ink().set_invite_ticket(ticket);
-        assert_eq!(poi.pallet_name(), "ProofOfInk");
-        assert_eq!(poi.call_name(), "set_invite_ticket");
-    }
-
-    #[test]
-    fn builds_available_invites_queries() {
-        let game = people::storage().game().available_invites();
-        assert_eq!(game.pallet_name(), "Game");
-        assert_eq!(game.entry_name(), "AvailableInvites");
-
-        let poi = people::storage().proof_of_ink().available_invites();
-        assert_eq!(poi.pallet_name(), "ProofOfInk");
-        assert_eq!(poi.entry_name(), "AvailableInvites");
-    }
-
     fn people_metadata() -> subxt::ArcMetadata {
         subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
             .expect("vendored metadata decodes")
@@ -675,8 +686,8 @@ mod tests {
     fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
-            spec_version: 3_000_000,
-            transaction_version: 5,
+            spec_version: 2_005_000,
+            transaction_version: 0,
             metadata: people_metadata(),
         }
     }
@@ -700,14 +711,14 @@ mod tests {
             out
         }
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [28],
             "nonce 7 must encode as Compact(7), 7 << 2"
         );
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [0],
@@ -723,7 +734,7 @@ mod tests {
         use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
         let state = offline_client_state();
-        let (.., mortality, _, _, tip, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., mortality, _, _, tip, _, _) = PeopleExtrinsicParamsBuilder::new().build();
 
         let mut era = Vec::new();
         CheckMortality::new(&state, mortality)
@@ -749,7 +760,7 @@ mod tests {
             PeopleExtrinsicParamsBuilder::new(),
             PeopleExtrinsicParamsBuilder::default(),
         ] {
-            let (.., mortality, nonce, _, tip, _) = builder.build();
+            let (.., mortality, nonce, _, tip, _, _) = builder.build();
             let mut out = Vec::new();
 
             tx_ext::CheckMortality::new(&state, mortality)

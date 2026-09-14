@@ -28,7 +28,6 @@ path = "src/main.rs"
 http-common.workspace = true
 device-attestation = { path = "../device-attestation" }
 username-indexer = { path = "../username-indexer" }
-invite-tickets = { path = "../invite-tickets" }
 turn = { path = "../turn" }
 notifications = { path = "../notifications" }
 

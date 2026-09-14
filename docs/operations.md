@@ -6,7 +6,7 @@ system *is* and why it is shaped this way, read
 
 Everything here is Docker Compose. There is no orchestrator-specific tooling in
 this repository — if you deploy to Kubernetes or anything else, the compose file
-is the configuration contract to port: the same image, the same eight `--role`
+is the configuration contract to port: the same image, the same six `--role`
 arguments, the same environment allowlists.
 
 **Two compose projects share a host.** The services live in an *environment*
@@ -42,10 +42,8 @@ Worth understanding before you write a `.env`, because the compose file enforces
 it and a "simplification" here is a real downgrade:
 
 - The JWT **signing** seed lives only in `device-attestation-api`.
-  `invite-tickets-api`, `turn-api`, `notify-relay` and `username-indexer` (for
+  `turn-api`, `notify-relay` and `username-indexer` (for
   the proof-of-compute bypass) get the **public** key (or JWKS) only.
-- Each chain-submitting worker holds only its own signing secret: the invite
-  inviter SURI lives only in `invite-tickets-pool`.
 - `turn-api` additionally holds `TURN_SECRET`, the HMAC key shared with the TURN
   relay (coturn `--use-auth-secret`). Relay and issuer rotate together, and no
   other service sees it.
@@ -57,9 +55,8 @@ key. `scripts/verify_compose_boundaries.sh` asserts this, and runs in CI.
 
 ### Nonce lanes
 
-`invite-tickets-pool` submits as "an inviter" and
-`device-attestation-chain-writer` as the attester authority. **No two submitters
-may sign as the same account** — two independent submitters on one account race
+`device-attestation-chain-writer` submits as the attester authority. **No two
+submitters may sign as the same account** — two independent submitters on one account race
 nonces. Give each its own account; separate proxy delegates of one cold primary
 works well.
 
@@ -91,8 +88,7 @@ cd ~/dub
 
 `ENV_ID` names this environment and is what the network aliases are suffixed
 with. It defaults to `paseo-next-v2`; a second environment on the same host sets
-its own. It is unrelated to `PEOPLE_NETWORK`, which is the wire literal the
-clients parse.
+its own.
 
 Copy the template and edit it — `.env.example` documents every variable, its
 default, and what breaks if it is wrong:
@@ -112,7 +108,6 @@ The values you must decide, at minimum:
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
 | `JWT_ED25519_PUBLIC_KEY` or `JWT_JWKS_JSON` | The verify-only half, for the other services. |
-| `INVITE_INVITER_SIGNER_SURI` | The invite pool's own account — **not** the writer's. |
 | `TURN_SECRET` | Shared with your coturn relay; must match it exactly. |
 
 The defaults in `.env.example` point at a public test network
@@ -199,8 +194,6 @@ network, re-check all of them:
 - The authority holds an **attestation allowance** (`dub_attester_allowance`).
 - The writer's signing account is **funded** on both chains it submits to
   (`dub_account_free_balance_planck{role="signer",chain=…}`).
-- The invite inviter account holds `AvailableInvites` quota, or claims return
-  `422 Pool exhausted`.
 
 None of these are things the software can provision. On a permissioned test
 network they are an ask of whoever operates it.
@@ -215,9 +208,9 @@ choosing, not after.
 
 | | standard | small |
 |---|---|---|
-| workloads | 8 | 4 |
+| workloads | 6 | 3 |
 | HTTP tier | one service per surface | one `all-in-one` process |
-| workers | three singletons | the same three |
+| workers | two singletons | the same two |
 | `JWT_ED25519_SECRET` reaches | `device-attestation-api` only | the process that also serves public search |
 | `/readyz` on a dead dependency | that service leaves rotation | reports `degraded`, stays in rotation |
 
@@ -560,12 +553,10 @@ you expect.
 | Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`, `Transaction is outdated`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |
 | Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the personhood name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
 | Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
-| Claims returning `422 Pool exhausted` | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
-| `invite-tickets-pool`: `another maintainer instance holds the pool lock` | A second replica or a stuck deploy overlap. Scale back to exactly one. |
 | Writer: `queue advancer is down with claims queued; holding the throttle` | The registration queue is enabled but `registration-queue` is dead, so free-lane claims park as `QUEUED` and nothing drains. This is deliberate: the queue is the free lane's throughput control and a dead queue never falls back to unthrottled registration. Restart it. To retire the queue instead, set `QUEUE_ENABLED=false` for **both** `device-attestation-api` and the writer (writer last). Treat a warning that survives one restart as a page. |
 | `QUEUED` rows draining with the advancer down, or stranded-queue warnings while intake goes direct | `QUEUE_ENABLED` is split between api and writer. Writer off + api on = the janitor silently drains a queue the api is still filling, and the throttle is gone. Writer on + api off = warnings about leftovers no new claim joins. The values must match; `scripts/verify_compose_boundaries.sh` pins both. |
 | Rows stuck in `RETRY_AFTER` with wasm-trap errors | Invalid payload for `PeopleLite.attest`, or attester/proxy authorization missing on-chain. |
-| At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write or a silent invite-ticket pool. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
+| At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
 | `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/people.scale` with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
 | Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0 | The chain was reset: the process still holds the old genesis hash, captured when its client connected. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
 | Writer exits at boot | Bad `CHAIN_WRITER_SIGNER_SURI`, or Postgres unreachable. |

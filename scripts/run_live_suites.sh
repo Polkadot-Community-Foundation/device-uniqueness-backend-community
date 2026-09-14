@@ -49,10 +49,8 @@ esac
 
 device_attestation_port="${DEVICE_ATTESTATION_TEST_POSTGRES_PORT:-56432}"
 indexer_port="${INDEXER_TEST_POSTGRES_PORT:-56433}"
-invite_port="${INVITE_TICKETS_TEST_POSTGRES_PORT:-56435}"
 export DEVICE_ATTESTATION_POSTGRES_PORT="$device_attestation_port"
 export INDEXER_POSTGRES_PORT="$indexer_port"
-export INVITE_POSTGRES_PORT="$invite_port"
 
 compose=(
   docker compose
@@ -63,7 +61,6 @@ compose=(
 databases=(
   postgres
   username-indexer-postgres
-  invite-tickets-postgres
 )
 
 cleanup() {
@@ -77,7 +74,6 @@ trap 'exit 143' TERM
 
 device_attestation_url="postgres://device_attestation:device_attestation@localhost:${device_attestation_port}/device_attestation"
 indexer_url="postgres://username_indexer:username_indexer@localhost:${indexer_port}/username_indexer"
-invite_url="postgres://invite_tickets:invite_tickets@localhost:${invite_port}/invite_tickets"
 
 if [ "$mode" = "chain" ]; then
   # These production-router suites also require PEOPLE_RPC_URL, or use their
@@ -95,7 +91,7 @@ if [ "$mode" = "chain" ]; then
   exit 0
 fi
 
-# Deterministic database-only gate: 13 suites / 28 ignored tests. Keep this
+# Deterministic database-only gate: 11 suites / 24 ignored tests. Keep this
 # list here so local tests, CI, and coverage all execute the same catalog.
 for suite in allocation_live auth_live outbox_live dotns_live queue_live voucher_live payment_live; do
   DEVICE_ATTESTATION_TEST_DATABASE_URL="$device_attestation_url" \
@@ -109,10 +105,4 @@ for suite in pagination_live poc_gate_live ingest_live chain_identity_live; do
   DATABASE_URL="$indexer_url" \
     "${cargo_cmd[@]}" -p username-indexer --test "$suite" -- --ignored
 done
-
-# This suite truncates its table per test, so Cargo test threads must not race.
-INVITE_TICKETS_TEST_DATABASE_URL="$invite_url" \
-  "${cargo_cmd[@]}" -p invite-tickets --test claim_live_pg -- --ignored --test-threads=1
-INVITE_TICKETS_TEST_DATABASE_URL="$invite_url" \
-  "${cargo_cmd[@]}" -p invite-tickets --test pool_live_pg -- --ignored
 

@@ -24,13 +24,11 @@ pub fn merged_doc() -> Value {
         .expect("device-attestation doc");
     let indexer =
         serde_json::to_value(username_indexer::openapi::ApiDoc::openapi()).expect("indexer doc");
-    let invites =
-        serde_json::to_value(invite_tickets::openapi::ApiDoc::openapi()).expect("invites doc");
     let turn = serde_json::to_value(turn::openapi::ApiDoc::openapi()).expect("turn doc");
     let notify =
         serde_json::to_value(notifications::openapi::ApiDoc::openapi()).expect("notify doc");
 
-    for other in [&indexer, &invites, &turn, &notify] {
+    for other in [&indexer, &turn, &notify] {
         merge_object(&mut base, other, "/paths");
         merge_object(&mut base, other, "/components/schemas");
         merge_array(&mut base, other, "/tags");
@@ -705,7 +703,6 @@ mod tests {
             "/api/v1/usernames",
             "/api/v1/usernames/available",
             "/api/v1/usernames/search",
-            "/api/v1/invitation-ticket/claim",
             "/api/v1/turn/issue",
             "/api/v1/notify",
         ] {

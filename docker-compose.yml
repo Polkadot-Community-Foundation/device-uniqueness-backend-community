@@ -39,7 +39,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-api"]
     restart: unless-stopped
@@ -114,7 +114,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-chain-writer"]
     restart: unless-stopped
@@ -183,7 +183,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "registration-queue"]
     restart: unless-stopped
@@ -233,7 +233,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "username-indexer"]
     restart: unless-stopped
@@ -284,115 +284,6 @@ services:
       # a health failure during it would restart the scan from the beginning.
       start_period: 300s
 
-  # invite-tickets owns its persistence independently: the ticket-pool table
-  # holds private keys and must share nothing with the device-attestation DB.
-  invite-tickets-postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: invite_tickets
-      POSTGRES_PASSWORD: invite_tickets
-      POSTGRES_DB: invite_tickets
-    volumes:
-      - invite_tickets_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U invite_tickets -d invite_tickets"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # N-replica claim API for the frozen /api/v1/invitation-ticket/claim route.
-  # DB-only (never touches the People Chain) and holds no signing secret —
-  # explicit environment, no .env pass-through.
-  invite-tickets-api:
-    build:
-      context: .
-      target: dub
-    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
-    # service. verify_role_split.sh checks it against `dub --list-roles`.
-    command: ["--role", "invite-tickets-api"]
-    restart: unless-stopped
-    depends_on:
-      invite-tickets-postgres:
-        condition: service_healthy
-    environment:
-      BIND_ADDR: 0.0.0.0:8080
-      INVITE_TICKETS_DATABASE_URL: postgres://invite_tickets:invite_tickets@invite-tickets-postgres:5432/invite_tickets
-      PEOPLE_NETWORK: ${PEOPLE_NETWORK:-paseo}
-      # Verifies device-attestation JWTs. Dev default = the public half of
-      # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
-      # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.
-      JWT_JWKS_JSON: ${JWT_JWKS_JSON:-}
-      JWT_ED25519_PUBLIC_KEY: ${JWT_ED25519_PUBLIC_KEY:-0x8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c}
-      INVITE_TICKETS_RATE_LIMIT: ${INVITE_TICKETS_RATE_LIMIT:-30}
-      INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS: ${INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS:-60}
-      # Prometheus exporter, scraped on the private metrics network only.
-      METRICS_ENABLED: ${METRICS_ENABLED:-true}
-      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
-      RUST_LOG: ${RUST_LOG:-info}
-      LOG_FORMAT: ${LOG_FORMAT:-json}
-    networks:
-      default: {}
-      edge:
-        aliases: ["invite-tickets-api-${ENV_ID:-paseo-next-v2}"]
-      metrics:
-        aliases: ["invite-tickets-api-${ENV_ID:-paseo-next-v2}"]
-    healthcheck:
-      test: ["CMD", "dub", "--healthcheck"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      # Covers migrations (no chain connect on this bin).
-      start_period: 20s
-
-  # Single-instance pool maintainer: registers generated keypairs on People
-  # Chain as the inviter. MUST stay at exactly one replica — one inviter = one
-  # nonce lane (a Postgres advisory lock guards deploy overlaps). The inviter
-  # secret lives only in this service's environment; NOTE it must NOT share a
-  # signing account with any other chain writer (nonce lane conflict — see
-  # docs/deploy.md). Do not `--scale` this.
-  invite-tickets-pool:
-    build:
-      context: .
-      target: dub
-    image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
-    # service. verify_role_split.sh checks it against `dub --list-roles`.
-    command: ["--role", "invite-tickets-pool"]
-    restart: unless-stopped
-    depends_on:
-      invite-tickets-postgres:
-        condition: service_healthy
-    environment:
-      INVITE_TICKETS_DATABASE_URL: postgres://invite_tickets:invite_tickets@invite-tickets-postgres:5432/invite_tickets
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
-      PEOPLE_NETWORK: ${PEOPLE_NETWORK:-paseo}
-      # Dev signer (unfunded: batches finalize with ItemFailed and no tickets
-      # insert). In prod: the hot invite-inviter key, or a delegate that
-      # proxies for …ADDRESS (the wrap is derived from the two).
-      # Interpolated from INVITE_INVITER_* so the invite pool keeps its own
-      # signing account, distinct from every other writer (nonce lanes — see
-      # docs/deploy.md). Dev default = //Bob.
-      INVITER_ADDRESS: ${INVITE_INVITER_ADDRESS:-5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty}
-      INVITER_SIGNER_SURI: ${INVITE_INVITER_SIGNER_SURI:-//Bob}
-      POOL_DIMS: ${POOL_DIMS:-Game,ProofOfInk}
-      POOL_TARGET_SIZE: ${POOL_TARGET_SIZE:-10000}
-      POOL_BATCH_MAX: ${POOL_BATCH_MAX:-100}
-      POOL_INTERVAL_SECS: ${POOL_INTERVAL_SECS:-6}
-      POOL_FINALIZE_SECS: ${POOL_FINALIZE_SECS:-60}
-      # Prometheus exporter, scraped on the private metrics network only.
-      METRICS_ENABLED: ${METRICS_ENABLED:-true}
-      METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
-      RUST_LOG: ${RUST_LOG:-info}
-      LOG_FORMAT: ${LOG_FORMAT:-json}
-    networks:
-      default: {}
-      metrics:
-        aliases: ["invite-tickets-pool-${ENV_ID:-paseo-next-v2}"]
-    deploy:
-      replicas: 1
-
   # TURN credential issuer: stateless (no DB; read-only People Chain root cache
   # when proof issuance is enabled). The only secret is the HMAC key shared
   # with the TURN relay (coturn `--use-auth-secret` mode must use the SAME
@@ -403,7 +294,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "turn-api"]
     restart: unless-stopped
@@ -460,7 +351,7 @@ services:
       context: .
       target: dub
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, six roles: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "notify-relay"]
     restart: unless-stopped
@@ -522,4 +413,3 @@ networks:
 volumes:
   pgdata:
   username_indexer_pgdata:
-  invite_tickets_pgdata:

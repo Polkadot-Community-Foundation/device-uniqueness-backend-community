@@ -102,7 +102,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Signing account balances (planck)",
-      "description": "Every account this deployment pays fees from: the device-attestation writer's signer on both chains, its proxied primary, and the invite pool's inviter. `role` and `chain` separate the budgets — a fee balance at zero stops that lane regardless of its on-chain quota.",
+      "description": "Every account this deployment pays fees from: the device-attestation writer's signer on both chains and its proxied primary. `role` and `chain` separate the budgets — a fee balance at zero stops that lane regardless of its on-chain quota.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
       "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "targets": [
@@ -216,60 +216,15 @@
       ],
       "fieldConfig": { "defaults": { "custom": { "fillOpacity": 10 } }, "overrides": [] }
     },
-    {
-      "id": 13,
-      "type": "timeseries",
-      "title": "Invite pool depth (unclaimed tickets)",
-      "description": "Pre-registered ticket keypairs waiting in invite-tickets' database, per DIM. This is what a claim consumes: at zero the shipping apps' Game / ProofOfInk claims fail synchronously, whatever the rest of the stack reports.",
-      "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
-      "targets": [
-        { "refId": "A", "expr": "dub_invite_pool_depth{env_id=\"$env\"}", "legendFormat": "{{dim}}" }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "fillOpacity": 10 },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 14,
-      "type": "stat",
-      "title": "Available invites (inviter quota)",
-      "description": "The inviter's remaining on-chain AvailableInvites per DIM — the budget every minted ticket spends. At zero the pool stops refilling, the stock drains, and claims start failing. Separate from the inviter's fee balance: either at zero stops minting.",
-      "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
-      "targets": [
-        { "refId": "A", "expr": "dub_inviter_available_invites{env_id=\"$env\"}", "legendFormat": "{{dim}}", "instant": true }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "colorMode": "value",
-        "textMode": "value_and_name"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "green", "value": 1000 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
+
+
     {
       "id": 10,
       "type": "table",
       "title": "Deployment — which accounts and chains is this?",
       "description": "Which accounts this deployment signs as and attests for, and whether the dotNS lane is configured. Endpoints are deliberately absent — a configured URL can carry a credential and this surface is read anonymously.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 18, "x": 0, "y": 29 },
+      "gridPos": { "h": 8, "w": 18, "x": 0, "y": 21 },
       "targets": [
         { "refId": "A", "expr": "dub_writer_info{env_id=\"$env\"}", "instant": true, "format": "table" }
       ],
@@ -296,7 +251,7 @@
       "title": "Runtime version",
       "description": "spec_version and transaction_version per chain, read from the live connection each resource pass. The value only matters when it changes: a runtime upgrade is the one event that can break a working submission path with no deploy of ours.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 29 },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 21 },
       "targets": [
         { "refId": "A", "expr": "dub_chain_spec_version{env_id=\"$env\"}", "legendFormat": "{{chain}} spec", "instant": true },
         { "refId": "B", "expr": "dub_chain_transaction_version{env_id=\"$env\"}", "legendFormat": "{{chain}} tx", "instant": true }
@@ -314,7 +269,7 @@
       "title": "Warnings and errors — all services",
       "description": "level is a Loki label because the services log JSON, so this needs no regex over message text. Non-JSON lines (Postgres, Caddy) fall through to the original line.",
       "datasource": { "type": "loki", "uid": "dub-loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 37 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 29 },
       "targets": [
         {
           "refId": "A",
@@ -335,7 +290,7 @@
       "type": "logs",
       "title": "All logs — selected services",
       "datasource": { "type": "loki", "uid": "dub-loki" },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 47 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 39 },
       "targets": [
         {
           "refId": "A",

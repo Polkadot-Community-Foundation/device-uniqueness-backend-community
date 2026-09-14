@@ -85,7 +85,6 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "device-attestation",
- "invite-tickets",
  "notifications",
  "serde_json",
  "turn",
@@ -1368,7 +1367,6 @@ dependencies = [
  "axum",
  "device-attestation",
  "http-common",
- "invite-tickets",
  "notifications",
  "reqwest",
  "secrecy",
@@ -2391,36 +2389,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "invite-tickets"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "chain-client",
- "chain-types",
- "ed25519-dalek",
- "hex",
- "http-body-util",
- "http-common",
- "jwt-verify",
- "metrics",
- "rand 0.8.6",
- "schnorrkel",
- "serde",
- "serde_json",
- "sqlx",
- "subxt",
- "subxt-signer",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tower 0.5.3",
- "tracing",
- "utoipa",
 ]
 
 [[package]]

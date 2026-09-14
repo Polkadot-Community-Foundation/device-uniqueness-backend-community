@@ -19,7 +19,7 @@ point it at whichever network you want, deploy it under whatever name you want.
 
 ## What it does
 
-Eight services, each of which owns its Postgres database where it has one, and
+Six services, each of which owns its Postgres database where it has one, and
 each of which deploys independently behind a single-URL
 [gateway](gateway/Caddyfile):
 
@@ -36,8 +36,6 @@ each of which deploys independently behind a single-URL
   plus an optional proof-of-compute gate on that search. Finalized state is
   authoritative; the unfinalized window is indexed speculatively on top of it so
   a new registration is searchable a finality trail sooner.
-- **`invite-tickets-api`** / **`invite-tickets-pool`** — synchronous
-  invitation-ticket claim, and the keypair pool that keeps it stocked.
 - **`turn-api`** — a stateless TURN credential issuer (coturn REST API).
 - **`notify-relay`** — a stateless APNs / FCM push relay.
 
@@ -59,13 +57,13 @@ independent state machine alongside the People Chain registration.
 - **It does not ship a Kubernetes chart or any deployment automation.** Docker
   Compose is the configuration contract; port it wherever you like.
 
-## One binary, eight roles
+## One binary, six roles
 
 Every service and worker is a `--role` of the single `dub` binary. What makes a
 container a given service is its role, not a different image:
 
 ```
-dub --list-roles                       # the eight
+dub --list-roles                       # the six
 dub --role device-attestation-api
 ```
 
@@ -89,7 +87,7 @@ loopback-only debug overlay:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 #   device-attestation 127.0.0.1:8080 · indexer :8081
-#   invite-tickets :8083 · turn :8084 · notify :8085
+#   turn :8084 · notify :8085
 
 curl -fsS http://127.0.0.1:8080/readyz
 ```
@@ -107,8 +105,7 @@ re-spawned routinely, and uses the well-known development keys `//Alice` and
 For anything past that you need, on whichever network you target:
 
 - an **attester account** with an attestation allowance,
-- a **funded signing key** authorized as that account's `Any`/delay-0 proxy,
-- for invites, an inviter account holding `AvailableInvites` quota.
+- a **funded signing key** authorized as that account's `Any`/delay-0 proxy.
 
 Paseo's People Chain is
 `wss://paseo-people-next-system-rpc.polkadot.io` — point `ASSET_HUB_RPC_URL` at

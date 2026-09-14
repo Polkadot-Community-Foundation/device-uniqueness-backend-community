@@ -7,7 +7,7 @@
 ## Design goals
 
 **One Rust Cargo workspace of small, independently-deployable services.** Boundaries exist to
-isolate secrets, persistence, deployment lifecycle, and failures: a notification, TURN, invite, or
+isolate secrets, persistence, deployment lifecycle, and failures: a notification, TURN, or
 indexing fault must never disrupt login, attestation, or username registration.
 
 Principles that drive every boundary decision:
@@ -30,7 +30,7 @@ Principles that drive every boundary decision:
 - A name says what the thing **is/does** in plain English — a new engineer guesses the role in <1s.
 - **No workspace prefix** (`id-`, `shared-`, `svc-`, `lib-`). The repo is already the namespace;
   `Cargo.toml` and `docker ps` show the plain name. The non-attestation services (`notifications`,
-  `turn`, `invites`) are *not* device attestation — don't imply otherwise.
+  `turn`) are *not* device attestation — don't imply otherwise.
 - Lowercase kebab-case, short, greppable. Boring is good.
 - **No themed/metaphorical names** (no `mint`/`citadel`/`signet`/nautical/etc.) and **no invented
   `-ity` brands** (the `-ity` policy is public-facing only and exempts crate/CLI names; also avoids
@@ -45,13 +45,13 @@ create now. See "How the workspace grows" below.
 
 | Concept | Name | Where it lives |
 |---|---|---|
-| generated People Chain (subxt) typed surface | `chain-types` | crate; consumed by device-attestation, username-indexer, invite-tickets |
+| generated People Chain (subxt) typed surface | `chain-types` | crate; consumed by device-attestation, username-indexer |
 | chain connection / RPC transport + writer signing key | `chain-client` | crate (reconnecting connect + `WriterSigner` + `proxy_target`) |
 | Postgres connection + bootstrap | `postgres` | still a module inside device-attestation / username-indexer |
 | config loading + fail-fast validation | `config` | still a module per service |
 | telemetry (logs / metrics / tracing) | `telemetry` | `http-common` (`telemetry::init` installs the log subscriber, `metrics::spawn` the Prometheus exporter); every process calls both. Logs go to stdout only — labelling, shipping, storage, and retention belong to the host's monitoring project, not to a service |
-| JWT issuance + JWKS verification | `jwt-verify` | crate; the cross-service auth contract. Holds both the issuer and the verifier, but constructing the issuer needs the signing key, which only `device-attestation` is given — so the sole-issuer property is a deployment boundary, not a code one. device-attestation delegates its own signing and verification here; invite-tickets, turn, notifications, and username-indexer (for the proof-of-compute bypass) build verifiers only |
-| the shared JSON error envelope + axum scaffolding (`{error}` / `fields`, JWT extractor, rate limiter, health, middleware stack, env helpers) | `http-common` | crate; consumed by invite-tickets, turn, notifications |
+| JWT issuance + JWKS verification | `jwt-verify` | crate; the cross-service auth contract. Holds both the issuer and the verifier, but constructing the issuer needs the signing key, which only `device-attestation` is given — so the sole-issuer property is a deployment boundary, not a code one. device-attestation delegates its own signing and verification here; turn, notifications, and username-indexer (for the proof-of-compute bypass) build verifiers only |
+| the shared JSON error envelope + axum scaffolding (`{error}` / `fields`, JWT extractor, rate limiter, health, middleware stack, env helpers) | `http-common` | crate; consumed by turn, notifications |
 
 ### Deployable services (plain domain word)
 
@@ -61,8 +61,7 @@ create now. See "How the workspace grows" below.
 | `username-indexer` | Username **indexer + public reads** (finalized state, plus the unfinalized window indexed speculatively on top of it): prefix search (`GET /api/v1/usernames/search`, paginated, per-IP rate limited) plus the optional proof-of-compute gate and its `POST /api/v1/poc/issue` puzzle issuance. The single-username lookup (`GET /api/v1/usernames/{username}`) is retired in favour of `search` and serves the JSON 404, like the removed list endpoint. Read-only projection; can be down without affecting registration. | `username-indexer` (+ own Postgres) |
 | `notifications` | Thin `/api/v1/notify` relay. Verify-only Ed25519 JWT, stateless, DB-free, per-subject rate limited. No `depends_on`. iOS APNs (token auth, HTTP/2) + Android FCM (v1, OAuth2) providers, each optional. `APNS_ENVIRONMENT` picks the APNs host tried first; a `BadDeviceToken` rejection is retried once against the sibling host, so one relay serves both production and sandbox device tokens. | `notify-relay` |
 | `turn` | Stateless coturn REST-API credential issuer (username = expiry:id, password = HMAC over the username, secret shared with the relay; the relay itself = SRE infra). Two authorization paths: JWT-gated `POST /api/v1/turn/issue`, and — behind `TURN_PROOF_ENABLED` — proof-authorized `POST /api/v1/turn/issue-with-proof`, where a device proven under devicehood or a person redeems a ring-VRF membership proof instead of presenting a JWT. Redemption is a single request with no challenge round trip: the client supplies a timestamp, the server derives the proved message itself as `blake2b256(label ‖ timestamp)` and accepts it only inside a bounded clock skew, so nothing about the request is minted or stored. There is deliberately no client-chosen nonce and no genesis in the digest: the product builds this message and only needs a clock; chain identity is the ring root the server verifies against. Ring-VRF proofs are deterministic, so a person's proof for one second is one fixed value. The request repeats the collection id from TrUAPI's `ringLocation`; the server accepts only the canonical `pop:polkadot.network/people-lite` and `pop:polkadot.network/people` ids, selects that collection's independently refreshed root cache, and never falls through to the other. Required `ringIndex` and `ringRevision` name the single server-held root verification runs against, so every request costs at most one ring verification and a pair the server no longer holds is refused before admission. Proof bytes are the host's raw ring-VRF signature, with no SCALE length prefix. Each request names the `productId` it proves for, and the server verifies under the context it derives itself for that product (`blake2b256("product/" ‖ productId ‖ "/" ‖ indexBytes(suffix))`, the derivation the hosts use); an unlisted product is refused before verification. One context per product rather than one shared context is what keeps hosts from prompting the user — they prompt only when the proof context is not the calling product's own — at the cost of a per-person budget that is also per product. Requests never read the chain, verification concurrency defaults to available CPUs minus one (floor one), up to 64 saturated requests wait 50ms before returning 503, and a dead RPC never blocks boot or `/turn/issue`. The contextual alias recovered from a proof remains private: it is an in-memory throttle key and an input to a domain-separated, `TURN_SECRET`-keyed HMAC that yields one opaque 16-byte credential id per person and product, expiring `TURN_TTL_SECS` after issuance. The response reports the configured TTL. The JWT route retains a random id and fresh configured TTL. `/turn/issue-with-proof` is the browser-callable route: `OPTIONS` answers the preflight (echoing the requested headers) and every response the route produces carries `access-control-allow-origin: *`. It is not origin-authorized — the proof is the authorization — so the wildcard gives a browser only what a non-browser client already had. `/turn/issue` carries no CORS headers; it is a JWT route called by the apps. No DB; N replicas need no coordination for credentials (rate limits and root caches remain per replica). Each environment runs its own process because one process pins exactly one People Chain RPC and genesis for its root cache. | `turn-api` |
-| `invite-tickets` | JWT-gated `POST /api/v1/invitation-ticket/claim` — synchronous invitation-credential claims from a pre-staged, on-chain-registered sr25519 keypair pool (its own Postgres). This is the route the shipping apps call for Game / ProofOfInk DIM claims. | `invite-tickets-api` (N replicas, DB-only, no signing secret) + `invite-tickets-pool` (single-instance keypair generator + on-chain registrar) |
-| `gateway` (edge) | Public-URL routing via **Caddy**, one site block per environment. The route table is the committed `gateway/Caddyfile`: the `(routes)` snippet is imported once per environment with that environment's upstreams — username GET reads + `/api/v1/poc*` → its `username-indexer`, invitation tickets → its `invite-tickets-api`, TURN → its chain-pinned `turn-api`, notify → the shared `notify-relay`, everything else (attestation-owned writes/availability/root preflight, JWKS, health) → its `device-attestation-api`. Upstreams are container aliases suffixed with `ENV_ID` (`device-attestation-api-paseo-next-v2`), resolved over the shared external `dub-edge` network; an environment that does not run a service points that route at its own `device-attestation-api` so it 404s. Only notify is shared and verifies every environment's tokens from a merged JWKS. This is the **only** container publishing host ports (80/443, plus 443/udp); holds no secrets (both enforced by the compose boundary script). | `caddy` in its own compose project (`-p edge`) |
+| `gateway` (edge) | Public-URL routing via **Caddy**, one site block per environment. The route table is the committed `gateway/Caddyfile`: the `(routes)` snippet is imported once per environment with that environment's upstreams — username GET reads + `/api/v1/poc*` → its `username-indexer`, TURN → its chain-pinned `turn-api`, notify → the shared `notify-relay`, everything else (attestation-owned writes/availability/root preflight, JWKS, health) → its `device-attestation-api`. Upstreams are container aliases suffixed with `ENV_ID` (`device-attestation-api-paseo-next-v2`), resolved over the shared external `dub-edge` network; an environment that does not run a service points that route at its own `device-attestation-api` so it 404s. Only notify is shared and verifies every environment's tokens from a merged JWKS. This is the **only** container publishing host ports (80/443, plus 443/udp); holds no secrets (both enforced by the compose boundary script). | `caddy` in its own compose project (`-p edge`) |
 
 
 ## How the workspace grows (lazy extraction)
@@ -93,11 +92,8 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 - **proof of compute** → `username-indexer` (the gate protects its public read; issuance lives with it).
 - **free-reg eligibility/queue** → `device-attestation` product logic.
 - **chain-writer** → worker (`device-attestation-chain-writer`) *inside* the `device-attestation` boundary.
-- **notifications / turn / invites** → independent thin services, each outside the device-attestation
+- **notifications / turn** → independent thin services, each outside the device-attestation
   boundary.
-- **DIM tickets (game/personhood)** → game/personhood **claims** go through
-  `/api/v1/invitation-ticket/claim`, which is the `invite-tickets` service. There is deliberately no
-  separate request/status pair: the claim is synchronous.
 - **gateway** → Caddy path routing (infra).
 
 ### Guardrails — do NOT create these as separate crates/services
@@ -110,10 +106,10 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 Two things are deliberately not fixed by this design, because the right answer depends on the
 deployment:
 
-1. **Database topology.** "No shared tables" is decided; whether the three logical databases are
+1. **Database topology.** "No shared tables" is decided; whether the two logical databases are
    separate instances, separate databases on one instance, or separate schemas is not. The compose
-   file here runs three Postgres containers, which is the shape that makes the boundaries hardest
-   to violate by accident, and the most expensive to operate. A single instance with three databases
+   file here runs two Postgres containers, which is the shape that makes the boundaries hardest
+   to violate by accident, and the most expensive to operate. A single instance with two databases
    preserves every invariant the code relies on.
 2. **Where the attester authority lives.** The design assumes the writer signs as a delay-0 `Any`
    proxy of a cold authority account, so the hot key can be rotated without touching the identity
@@ -125,28 +121,27 @@ deployment:
 The system runs in one of **two** shapes. They serve an identical public API — a client cannot tell
 them apart — and differ only in how many processes hold how many secrets.
 
-### Standard: eight workloads (the default)
+### Standard: six workloads (the default)
 
-Five HTTP services and three single-instance workers, each its own process with its own environment.
+Four HTTP services and two single-instance workers, each its own process with its own environment.
 This is what the committed `docker-compose.yml` runs, and it is the recommended shape.
 
 Its defining property is **secret compartmentalisation**, enforced rather than intended:
 `device-attestation-api` is the one process holding `JWT_ED25519_SECRET`, so it is the one process that can
-mint a token; the other four hold only `JWT_ED25519_PUBLIC_KEY` and can verify. `POC_HMAC_SECRET`
-reaches `username-indexer` and nothing else. The inviter signing key lives only on
-`invite-tickets-pool`. Each of the three databases is reachable by only the services that own it.
+mint a token; the other three hold only `JWT_ED25519_PUBLIC_KEY` and can verify. `POC_HMAC_SECRET`
+reaches `username-indexer` and nothing else. Each of the two databases is reachable by only the services that own it.
 `scripts/verify_compose_boundaries.sh` asserts every one of those against the rendered compose
 configuration, and a change that widens them fails CI. A deployment that renders these workloads
 some other way is responsible for reproducing the same boundaries — they are the design, not an
 artifact of Compose.
 
-### Small: four workloads (`--role all-in-one` + the three workers)
+### Small: three workloads (`--role all-in-one` + the two workers)
 
-One process serves all five HTTP surfaces on one port, with the route table compiled in; the three
+One process serves all four HTTP surfaces on one port, with the route table compiled in; the two
 single-instance workers stay separate, because each owns a Postgres lease and a nonce lane and can
 never be collapsed into anything.
 
-This exists for deployments where operating eight workloads is not worth it. **It is a deliberate
+This exists for deployments where operating six workloads is not worth it. **It is a deliberate
 trade, not a simplification**, and the thing being traded is the compartmentalisation above.
 
 #### What the small topology gives up
@@ -157,31 +152,31 @@ In `all-in-one`, a single process holds, simultaneously:
 |---|---|
 | `JWT_ED25519_SECRET` | mint an access token for **any** subject |
 | `POC_HMAC_SECRET` | forge proof-of-compute solutions, defeating the anti-scraping gate |
-| three `*_DATABASE_URL`s | full read/write on device attestation, the username projection, and the ticket pool |
+| two `*_DATABASE_URL`s | full read/write on device attestation and the username projection |
 | `TURN_SECRET` | mint TURN relay credentials |
 
 and it reaches them from the same address space that serves `GET /api/v1/usernames/search` — an
 **unauthenticated, public, internet-facing** endpoint.
 
 So the difference is concrete: a memory-disclosure or RCE bug reachable from the search path reaches
-a read-only username projection and a verify-only public key in the eight-workload topology, and
+a read-only username projection and a verify-only public key in the six-workload topology, and
 reaches token minting for the entire system in the small one. Nothing else about the two topologies
 differs in this respect — same code, same handlers, same dependencies. The boundary is the process.
 
-Secondary consequences, all of which follow from one process rather than five:
+Secondary consequences, all of which follow from one process rather than four:
 
-- **Blast radius.** Five surfaces share one Tokio runtime, one `standard_layers` timeout, and three
+- **Blast radius.** Four surfaces share one Tokio runtime, one `standard_layers` timeout, and two
   connection-pool budgets. `standard_layers` has a timeout but no bulkhead, so a saturated search
   path and the auth handshake compete for the same resources.
-- **Boot coupling.** Three migration sets run against three databases before anything serves, and
+- **Boot coupling.** Two migration sets run against two databases before anything serves, and
   `device-attestation-api`'s blocking People Chain connect gates the whole API — so with no reachable RPC
-  there is no TURN, no notifications and no ticket claims either, where today there would be.
+  there is no TURN and no notifications either, where today there would be.
 - **Deploy coupling.** Every deploy of any surface restarts all of them.
 
 #### The rules that make it reviewable
 
-- **Topologies are mutually exclusive.** A deployment runs eight per-service workloads *or*
-  `all-in-one` plus the three workers — never a mix, which would pay the cost of the union while
+- **Topologies are mutually exclusive.** A deployment runs six per-service workloads *or*
+  `all-in-one` plus the two workers — never a mix, which would pay the cost of the union while
   still running the compartmentalised services.
 - **It cannot be reached by accident.** `all-in-one` is accepted by `--role` but is deliberately
   **absent from `dub --list-roles`**, so `scripts/verify_role_split.sh` rejects it in any manifest
@@ -198,8 +193,8 @@ Secondary consequences, all of which follow from one process rather than five:
 with `"status": "degraded"` while some are down, rather than `503`.
 
 That is the opposite of the per-service behaviour, and deliberately so. Readiness controls whether
-the instance receives traffic at all. With five surfaces behind one probe, a strict aggregate would
-convert *"the ticket service's database is down"* into *"the whole API is out of rotation, auth
+the instance receives traffic at all. With four surfaces behind one probe, a strict aggregate would
+convert *"the username index's database is down"* into *"the whole API is out of rotation, auth
 included"* — turning a partial outage into a total one, and with a single workload there is no
 healthy replica for the traffic to move to, so nothing is gained by refusing it. A surface whose
 dependency is down fails its own requests; that is where the failure belongs.
@@ -386,21 +381,6 @@ Operational invariants an agent must respect when touching the code.
   stack, but its `/readyz` also reports index freshness and it never publishes JWKS — it holds
   **verify-only** key material (`JWT_JWKS_JSON` / `JWT_ED25519_PUBLIC_KEY`), and only when
   `POC_ENABLED=true`, so authenticated callers can bypass the proof-of-compute gate.
-- **invite-tickets: the pool has two states and the claim is one transaction.** A ticket row is
-  `available` (generated, registered on-chain) or `claimed` — nothing else; failed registrations
-  are never inserted. The claim is: pre-check count (`0` → 422 `Pool exhausted`) → one transaction
-  `SELECT … FOR UPDATE SKIP LOCKED ORDER BY created_at LIMIT 1` + flip to `claimed` (no row →
-  409 `Ticket race lost`) → sign → post-claim count as `remaining`. The signature is sr25519 by the
-  **ticket** key over the **decoded 32-byte account id** of `who` (substrate signing context), not
-  the address string. Pools are keyed `(dim, network)`; FIFO by `created_at`. The api bin never
-  touches the People Chain and holds no signing secret besides the pool rows it serves — chain
-  RPC and the inviter secret belong only to the single-instance `invite-tickets-pool` bin.
-  **`invite-tickets-pool` must not share a signing account with any other submitter** — two
-  independent submitters on one account race nonces; give each its own inviter (e.g. separate
-  proxy delegates of one cold primary). As for the attester, proxying is
-  **derived, not configured**: `INVITER_ADDRESS` names the account holding the invites, and a
-  signing key whose own account differs from it wraps the batch in
-  `Proxy.proxy(real = INVITER_ADDRESS, force_proxy_type = Any)`.
 - **`username-indexer` serializes projection writes on one Postgres advisory lock.** Bootstrap and
   the incremental sync loop share one lock id; a full snapshot bootstrap runs **only when there is no
   usable `sync_state` checkpoint**, and each sync pass takes the lock with `pg_try_advisory_lock`

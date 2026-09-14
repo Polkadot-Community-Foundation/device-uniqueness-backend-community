@@ -8,6 +8,17 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Removed
+
+- **The `invite-tickets` service is gone (breaking).** The People runtime this
+  line targets (`people-polkadot` 2005000) no longer has the `Game` or
+  `ProofOfInk` pallets, so there is nothing left to register invite tickets
+  against. The `invite-tickets-api` and `invite-tickets-pool` roles, their
+  Postgres, `POST /api/v1/invitation-ticket/claim` and its gateway route, the
+  `INVITE_*` / `INVITER_*` / `POOL_*` configuration, and the pool panels on the
+  dashboard are all removed. `dub --list-roles` now lists six roles. A request to
+  the claim path now gets the catch-all JSON 404.
+
 ### Fixed
 
 - **A contested signer nonce no longer fails registrations terminally.** One
@@ -28,6 +39,13 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   deferred without spending an attempt`. Genuine row-level rejections are
   unaffected and still spend their budget.
 ### Changed
+
+- **Vendored People metadata refreshed to `people-polkadot` 2005000.** The
+  People transaction extensions now include `CheckMetadataHash`, which this
+  runtime declares. Gates for extensions the runtime dropped
+  (`AuthorizeValueTransfer`, `AsProofOfInkParticipant`, `ScoreAsParticipant`,
+  `GameAsInvited`, `HonourAuth`) stay in the tuple, so older runtimes can still
+  be signed for.
 
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync
   loop now subscribes to **best** block headers rather than finalized ones, and

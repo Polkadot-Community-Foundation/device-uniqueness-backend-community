@@ -29,8 +29,7 @@
 # the ownership map.
 #
 # Arguments, in order (Caddy snippet args are positional):
-#   0 device-attestation  1 indexer  2 invite-tickets  3 turn
-#   4 notify
+#   0 device-attestation  1 indexer  2 turn  3 notify
 (routes) {
 	# generated:route-table
 	# The committed API reference. Caddy file-serves it; a deployment that serves it from a
@@ -56,22 +55,17 @@
 		reverse_proxy {args[1]}
 	}
 
-	# The synchronous invitation-credential claim route.
-	handle /api/v1/invitation-ticket/* {
-		reverse_proxy {args[2]}
-	}
-
 	# Each environment runs its own issuer because proof verification pins one People Chain
 	# RPC and genesis hash; routing to another environment would verify against the wrong ring.
 	handle /api/v1/turn/* {
-		reverse_proxy {args[3]}
+		reverse_proxy {args[2]}
 	}
 
 	# Shared across environments. NOTE: this service answers an EMPTY 404 for an unmatched path and
 	# 405 for a wrong method, where every sibling answers the JSON 404 body. The
 	# whole prefix is routed here, so that is the live contract — see routes::fallback.
 	handle /api/v1/notify* {
-		reverse_proxy {args[4]}
+		reverse_proxy {args[3]}
 	}
 
 	# Proof-of-compute gates the indexer's own public search, so it is the indexer's route.
@@ -93,7 +87,6 @@
 	import routes \
  {$DEVICE_ATTESTATION_UPSTREAM:device-attestation-api-paseo-next-v2:8080} \
  {$USERNAME_INDEXER_UPSTREAM:username-indexer-paseo-next-v2:8080} \
- {$INVITE_TICKETS_UPSTREAM:invite-tickets-api-paseo-next-v2:8080} \
  {$TURN_UPSTREAM:turn-api-paseo-next-v2:8080} \
  {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
 }
@@ -101,9 +94,7 @@
 # --- PreviewNet ----------------------------------------------------------
 # Same routes, this environment's upstreams. TURN is local because proof
 # verification pins one People Chain RPC and genesis; notify remains shared and
-# verifies both environments' tokens from a merged JWKS. invite-tickets is not
-# deployed here, so its route points at this environment's device-attestation-api
-# and answers its 404 rather than a 502.
+# verifies both environments' tokens from a merged JWKS.
 #
 # This environment's own upstreams are literals: they follow from ENV_ID, and
 # nothing sets a per-environment override — only the hostname is a variable.
@@ -111,7 +102,6 @@
 	import routes \
  device-attestation-api-previewnet:8080 \
  username-indexer-previewnet:8080 \
- device-attestation-api-previewnet:8080 \
  turn-api-previewnet:8080 \
  {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
 }

@@ -34,15 +34,13 @@ pub struct Surfaces {
     pub attestation: Router,
     /// Username reads (`/search`) and proof-of-compute issuance.
     pub indexer: Router,
-    /// `/api/v1/invitation-ticket/*`.
-    pub invite_tickets: Router,
     /// `/api/v1/turn/*`.
     pub turn: Router,
     /// `/api/v1/notify*` — see the module docs for its distinct 404 dialect.
     pub notifications: Router,
 }
 
-/// Merge the five surfaces into the public route table.
+/// Merge the four surfaces into the public route table.
 ///
 /// The caller adds health, `/docs` and the middleware stack; this function owns
 /// only who-answers-what.
@@ -50,7 +48,6 @@ pub fn merge(surfaces: Surfaces) -> Router {
     Router::new()
         .merge(surfaces.attestation)
         .merge(surfaces.indexer)
-        .merge(surfaces.invite_tickets)
         .merge(surfaces.turn)
         .merge(surfaces.notifications)
         .fallback(fallback)

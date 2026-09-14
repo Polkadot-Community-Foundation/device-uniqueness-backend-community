@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One image, eight roles — checked statically.
+# One image, six roles — checked statically.
 #
 # This replaces verify_image_split.sh. That gate existed because a service whose
 # build target pointed at another service's stage "still starts, still passes
@@ -57,8 +57,8 @@ grep -qE '^ENTRYPOINT \["dub"\]$' Dockerfile ||
 #    artifact so this stays offline and needs no prior `docker build`.
 mapfile -t roles < <(cargo run --quiet -p dub -- --list-roles | sort) ||
   fail "dub --list-roles failed"
-[ "${#roles[@]}" -eq 8 ] ||
-  fail "dub accepts ${#roles[@]} roles, expected 8"
+[ "${#roles[@]}" -eq 6 ] ||
+  fail "dub accepts ${#roles[@]} roles, expected 6"
 
 # 4. Compose: every service that runs the image names a role, exactly once, and
 #    its service name IS that role.
@@ -105,7 +105,7 @@ mapfile -t refs < <(jq -r '.services | to_entries[]
 
 # 6. The two topologies are disjoint sets of roles.
 #
-#    The binary offers a standard shape (the eight per-service roles) and a
+#    The binary offers a standard shape (the six per-service roles) and a
 #    merged `all-in-one`. A deployment enables one set or the other, never a
 #    mix — which only means anything if no role belongs to both.
 mapfile -t merged_roles < <(cargo run --quiet -p dub -- --list-merged-roles | sort) ||

@@ -194,15 +194,15 @@ jobs:
               echo '::error::the bundled docker-compose.yml still has unresolved image variables'
               exit 1
             fi
-            test "$(grep -cE "^    image: .*:$TAG\$" bundle/docker-compose.yml)" -eq 8 ||
-              { echo "::error::expected eight services pinned to the release image"; exit 1; }
+            test "$(grep -cE "^    image: .*:$TAG\$" bundle/docker-compose.yml)" -eq 6 ||
+              { echo "::error::expected six services pinned to the release image"; exit 1; }
           else
             # No pullable image: ship the file as-is. It builds from a source
             # tree, which the notes then tell the reader to clone.
             cp docker-compose.yml bundle/docker-compose.yml
           fi
 
-          test "$(grep -cE '^    command: \["--role", ' bundle/docker-compose.yml)" -eq 8 ||
+          test "$(grep -cE '^    command: \["--role", ' bundle/docker-compose.yml)" -eq 6 ||
             { echo "::error::the bundle lost a service's --role; every service would start the same way"; exit 1; }
           # The edits above are textual; this proves the result is still a valid
           # compose file rather than something the substitutions mangled.
