@@ -81,7 +81,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "apidoc-gen"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "device-attestation",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "chain-client"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "chain-types",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "chain-types"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "subxt",
 ]
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "device-attestation"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "aes-gcm",
  "aes-kw",
@@ -1361,7 +1361,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "dub"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "axum",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "http-common"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "axum",
@@ -2634,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "jwt-verify"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -3013,7 +3013,7 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
 name = "notifications"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "axum",
@@ -3835,7 +3835,7 @@ checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
 
 [[package]]
 name = "routegen"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "dub",
@@ -5523,7 +5523,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turn"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "axum",
@@ -5669,7 +5669,7 @@ dependencies = [
 
 [[package]]
 name = "username-indexer"
-version = "0.5.0"
+version = "0.6.0-fork"
 dependencies = [
  "anyhow",
  "axum",

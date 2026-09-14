@@ -8,6 +8,8 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.6.0-fork] - 2026-09-14
+
 ### Removed
 
 - **The `invite-tickets` service is gone (breaking).** The People runtime this
@@ -298,9 +300,10 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.6.0-fork...HEAD
 
-[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/rel
-eases/tag/v0.5.0
+[0.6.0-fork]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.6.0-fork
+
+[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.5.0
 
 [0.4.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.4.0
