@@ -27,6 +27,16 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   count on `dub_chain_submit_total{outcome="deferred"}` and log `submission
   deferred without spending an attempt`. Genuine row-level rejections are
   unaffected and still spend their budget.
+- **The writer reads its signer nonce the way the node validates it.** Both
+  lanes used subxt's `account_nonce`, which reads at the *finalized* block, so
+  any transaction of ours in a best block but not yet finalized left the read one
+  behind and the next submission was refused as `Transaction is outdated`. That
+  refusal was then logged as a pool jam and held for 30s, then re-read from the
+  same lagging state. The nonce now comes from `system_accountNextIndex` (best
+  block plus our own pool transactions). An `outdated` refusal that still occurs
+  is logged as its own case (`the signer's nonce was already consumed on chain`)
+  and deferred for 6s instead of 30s, still without spending an attempt.
+
 ### Changed
 
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync

@@ -175,7 +175,7 @@ impl Lane for Dotns {
     }
 
     async fn account_nonce(chain: &AssetHub, signer: &AccountId32) -> Result<u64> {
-        Ok(chain.online().tx().await?.account_nonce(signer).await?)
+        chain.next_nonce(signer).await
     }
 
     async fn submit_one(

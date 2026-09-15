@@ -8,7 +8,10 @@ use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
 use time::OffsetDateTime;
 
 use super::{
-    engine::{Cx, SIGNER_CONTENTION_BACKOFF_SECS, UNFUNDED_PARK_BACKOFF_SECS},
+    engine::{
+        Cx, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE, STALE_NONCE_BACKOFF_SECS,
+        UNFUNDED_PARK_BACKOFF_SECS,
+    },
     error::WriterError,
     link::Link as ChainLink,
     observe::record_submit_outcome,
@@ -49,6 +52,10 @@ pub(super) enum Defer {
     /// gets the same refusal until it is included, so spending an attempt here
     /// bills a queue to whoever happened to be standing in it.
     Signer,
+    /// The node refused the nonce as already consumed. Also the signer's
+    /// condition rather than the row's, but nothing is queued ahead of it: the
+    /// next pass re-reads the nonce and goes again.
+    StaleNonce,
     /// DotNS signature future-dated, doesn't count as attempt since we just need to wait.
     NotYet,
 }
@@ -134,10 +141,19 @@ impl Gate {
 /// to the row. Spends no attempt, so a pool jam that outlives the whole retry
 /// budget cannot turn a perfectly valid registration terminal.
 pub(super) fn signer_defer(reason: &str) -> Outcome<'_> {
+    let (backoff, cause) = signer_defer_cause(reason);
     Outcome::Defer {
-        until: OffsetDateTime::now_utc() + time::Duration::seconds(SIGNER_CONTENTION_BACKOFF_SECS),
+        until: OffsetDateTime::now_utc() + time::Duration::seconds(backoff),
         reason,
-        cause: Defer::Signer,
+        cause,
+    }
+}
+
+fn signer_defer_cause(reason: &str) -> (i64, Defer) {
+    if reason.contains(STALE_NONCE) {
+        (STALE_NONCE_BACKOFF_SECS, Defer::StaleNonce)
+    } else {
+        (SIGNER_CONTENTION_BACKOFF_SECS, Defer::Signer)
     }
 }
 
@@ -162,6 +178,18 @@ pub(super) fn observe_defer(
                 reason,
                 "submission deferred without spending an attempt; the signer's nonce is \
                  held by an earlier transaction still in the node's pool"
+            );
+        }
+        Defer::StaleNonce => {
+            record_submit_outcome(lane, "deferred");
+            tracing::warn!(
+                lane,
+                id = r.id,
+                username = %r.full_username,
+                until = %until,
+                reason,
+                "submission deferred without spending an attempt; the signer's nonce was \
+                 already consumed on chain, re-reading it next pass"
             );
         }
         Defer::NotYet => tracing::warn!(
@@ -250,6 +278,24 @@ impl BatchLane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stale_nonce_is_told_apart_from_a_pool_jam() {
+        let outdated = "Error during transaction progress: The transaction is not valid: \
+                        Invalid transaction: Transaction is outdated";
+        assert_eq!(
+            signer_defer_cause(outdated),
+            (STALE_NONCE_BACKOFF_SECS, Defer::StaleNonce)
+        );
+        assert_eq!(
+            signer_defer_cause("Priority is too low: (278 vs 278)"),
+            (SIGNER_CONTENTION_BACKOFF_SECS, Defer::Signer)
+        );
+        assert_eq!(
+            signer_defer_cause("finalization timed out"),
+            (SIGNER_CONTENTION_BACKOFF_SECS, Defer::Signer)
+        );
+    }
 
     #[test]
     fn a_failing_lane_halves_its_batch_and_backs_off_once_per_failure() {

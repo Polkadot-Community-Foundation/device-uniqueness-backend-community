@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use anyhow::Context as _;
 use chain_client::storage;
 use chain_types::{people, PeopleConfig};
-use subxt::{config::RpcConfigFor, OnlineClient};
+use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
 const DISCRIMINATORS: u8 = 100;
@@ -291,6 +291,13 @@ impl PeopleChain {
             .await
             .context("reading username owners")?;
         Ok(storage::owners_by_name(&unique, values)?)
+    }
+
+    pub async fn next_nonce(&self, account: &AccountId32) -> anyhow::Result<u64> {
+        self.rpc
+            .system_account_next_index(account)
+            .await
+            .context("system_accountNextIndex on People Chain")
     }
 }
 
