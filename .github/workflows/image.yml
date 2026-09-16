@@ -1,0 +1,125 @@
+name: Image
+
+# Builds THE service image (one image, every service a `--role`) for
+# production from a release tag on the `production` branch, and pushes it to
+# the production registry tagged with that release tag.
+#
+# Gated by the `production` GitHub environment. Credentials are keyless
+# (GitHub OIDC -> Workload Identity Federation) and only issued to jobs in
+# that environment. Registry and identity come from production environment
+# variables, so a missing value fails the run instead of falling back to the
+# repository-level devnet secrets. Registry tags are immutable: a tag is built
+# once.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag on the production branch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-production-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: tag
+        name: Require a tag on the production branch
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
+            echo "::error::${TAG} is not a tag in this repository"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/${TAG}^{commit}" origin/production; then
+            echo "::error::${TAG} is not on the production branch"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: release-tag
+    uses: ./.github/workflows/check.yml
+
+  push:
+    needs: [release-tag, check]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE_REPO: ${{ vars.IMAGE_REGISTRY }}/device-uniqueness-backend
+      IMAGE_TAG: ${{ needs.release-tag.outputs.tag }}
+    steps:
+      - name: Require production configuration
+        env:
+          IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          missing=0
+          for name in IMAGE_REGISTRY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not set in the production environment"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.release-tag.outputs.tag }}
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker "${IMAGE_REPO%%/*}" --quiet
+
+      # Registry tags are immutable, so the build cache lives in GitHub Actions, not the registry.
+      - name: Build and push
+        run: >-
+          docker buildx bake --push all
+          --set '*.cache-from=type=gha,scope=production'
+          --set '*.cache-to=type=gha,scope=production,mode=max'
+
+      - name: Summary
+        run: |
+          digest=$(docker buildx imagetools inspect "${IMAGE_REPO}:${IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          {
+            echo "## Pushed"
+            echo
+            echo '```'
+            echo "${IMAGE_REPO}:${IMAGE_TAG}"
+            echo "${IMAGE_REPO}@${digest}"
+            echo '```'
+            echo "Roll it: pin this tag in the production deployment."
+          } >> "$GITHUB_STEP_SUMMARY"
