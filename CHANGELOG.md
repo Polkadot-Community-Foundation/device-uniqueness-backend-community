@@ -8,6 +8,8 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-16
+
 ### Added
 
 - **One tree for every network: `DUB_NETWORK`.** The `fork` line and `main`
@@ -27,10 +29,39 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
   | build | People runtime | spec_version |
   | --- | --- | --- |
-  | `testnet` | `next-people-paseo` | 3000000 |
+  | `testnet` | `next-people-paseo-v2` | 3000000 |
   | `polkadot` | `people-polkadot` | 2005000 |
 
+- **Widevine device dedup for Android username claims.**
+  `POST /api/v1/usernames` accepts three optional evidence fields,
+  `attestationChain`, `deviceChallenge` and `deviceId`, sent together or not at
+  all. The leaf key of the chain must attest
+  `SHA-256(domain ‖ deviceChallenge ‖ accountKey ‖ deviceId)`. The raw device id
+  never leaves the device, and the server stores only an HMAC of the hashed id
+  (migration `0009`, `widevine_devices`), so a database dump cannot be tested
+  against candidate ids. One free registration per physical device: the device
+  record is reserved in the same transaction as the username, consumed when the
+  registration lands on chain and deleted on terminal failure so the device can
+  claim again. Off by default. `WIDEVINE_DEDUP_ENABLED=true` verifies and logs
+  the would-be outcome without changing routing (soft mode), and requires
+  `WIDEVINE_DEDUP_HMAC_KEY` (32 bytes, hex or base64). Adding
+  `WIDEVINE_DEDUP_ENFORCE=true` gates the claim: a seen device or an Android
+  claim without evidence gets the ineligible outcome, malformed evidence a `400
+  DEVICE_EVIDENCE_MALFORMED`, evidence that fails verification a `403
+  DEVICE_EVIDENCE_INVALID`, and an unreachable attestation revocation list a
+  retryable `503 DEVICE_EVIDENCE_UNAVAILABLE`. Enforcing without `AUTH_ENABLED`
+  and `ENFORCE_AUTH` logs a warning at boot, because the gate is then advisory.
+
 ### Removed
+
+- **`DOTNS_GATEWAY_ENABLED` is gone; the dotNS lane is always on.**
+  `device-attestation-api` always accepts the `dotns` block, and
+  `device-attestation-chain-writer` requires `ASSET_HUB_RPC_URL`, refusing to
+  start without it. The variable is no longer read, so an environment that set
+  it to `false` now claims labels: before upgrading, make sure
+  `ASSET_HUB_RPC_URL` names the Asset Hub of the same network as
+  `PEOPLE_RPC_URL`. An Asset Hub whose `reserve_name` this backend does not
+  encode (Paseo next's) parks the lane rather than stopping the writer.
 
 - **The paid registration lane is retired.** It never quoted in any
   deployment. A claim the device gate turns away (a DeviceCheck slot already
@@ -65,6 +96,21 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   `CheckMetadataHash`; Asset Hub gains `VerifyMultiSignature` (as `Disabled`)
   and `PrevalidateAttests`. The Paseo gates stay, so every network signs from
   one tuple.
+- **A full-name reservation that would sink the claim is refused at intake.**
+  `attest` checks the `dotns.reservedUsername` leg *before* it writes the lite
+  username, and the consumer signature covers it, so a reserved name that is
+  already owned or whose reservation queue is full used to cost the whole
+  registration, with no retry able to drop the leg. Intake now reads that
+  name's reservation state (not the base's, as the two need not match) and
+  answers `409` before a row or a fee exists. Availability reports `EXHAUSTED`
+  for a base whose bare name is owned or queue-full, read in the same batched
+  request as the discriminators. The writer treats
+  `Resources::UsernameReservationTaken`, `QueueFull` and
+  `AlreadyHasReservation` as deterministic rejections, so a claim that races
+  the check costs one fee instead of `CHAIN_WRITER_MAX_ATTEMPTS`.
+- **`turn-api`'s proof-root refresher no longer leaks connections.** It dialled
+  a fresh People Chain client every time a refresh failed and never closed the
+  old one. It now holds one connection for the life of the process.
 
 - **A contested signer nonce no longer fails registrations terminally.** One
   writer signs from one account and the chain serves that account strictly in
@@ -141,6 +187,17 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   Nothing to change in an environment. Two new metrics: `dub_indexer_subscribed`
   (1 while the best-header subscription is live) and
   `dub_indexer_resubscribes_total`.
+
+- **Rate limits refill continuously instead of resetting per window.** Every
+  limiter (`device-attestation-api` auth routes, username search,
+  invite-tickets, `turn-api`, `notify-relay`) keeps its existing
+  limit-per-window settings, now read as a burst that refills at
+  `limit / window`. A client can no longer spend a full window at its end and
+  another at the start of the next. Per-IP keys now come from the **rightmost**
+  `X-Forwarded-For` entry (then `CF-Connecting-IP`, then `True-Client-IP`)
+  instead of the leftmost, which the client controls. Idle keys are evicted
+  after an hour, and at most 8192 are held. invite-tickets' `Retry-After` is
+  now the actual wait rather than the whole window.
 
 ## [0.5.0] - 2026-09-02
 
@@ -346,9 +403,10 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.6.0...HEAD
 
-[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/rel
-eases/tag/v0.5.0
+[0.6.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.6.0
+
+[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.5.0
 
 [0.4.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.4.0
