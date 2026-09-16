@@ -102,7 +102,7 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 
 ### Guardrails — do NOT create these as separate crates/services
 
-`attestation`, `availability`, `eligibility`, `queue`, `payment`, `writer` all live **inside**
+`attestation`, `availability`, `eligibility`, `queue`, `writer` all live **inside**
 `device-attestation`. Splitting any out contradicts the design (single device-attestation failure/secret boundary).
 
 ## Design decisions left open
@@ -445,5 +445,8 @@ Operational invariants an agent must respect when touching the code.
   eligibility): the authoritative "New JWT / Integrity / PoUD / Username Claim Logic" spec — covers
   Android TEE attestation (`POST /auth/android/attestation`), PoUD (Android `{androidId, widevineId}`
   / iOS DeviceCheck), the INSTANT / PAYMENT_REQUIRED / QUEUED decision flow, the balance-priority
-  queue (G1<10 … G4≥1000), QR-voucher bypass, and `/usernames/payment-status` +
-  `/registration/queue`. Digest it fully before implementing the attestation/eligibility plan.
+  queue (G1<10 … G4≥1000), QR-voucher bypass, and `/registration/queue`. Digest it fully before
+  implementing the attestation/eligibility plan. **Divergence:** the spec's paid lane (deposit
+  quotes, `/usernames/payment-status`) is deliberately not part of this design. `PAYMENT_REQUIRED`
+  is a terminal "device not eligible" outcome that keeps the spec's wire value for client
+  compatibility.

@@ -430,14 +430,12 @@
         },
         "responses": {
           "200": {
-            "description": "The device must pay to register (hard-mode DeviceCheck: free slot already used, or — with the payment lane on — a missing device token). Not an error — a 200 outcome. With `PAYMENT_LANE_ENABLED` the body carries the deposit instructions (`paymentAddress`, `amountRequired` in planck as a string) and the claim is stored; registration proceeds automatically on the confirmed deposit (poll `GET /api/v1/usernames/payment-status`). Lane off: the bare outcome, no payment path.",
+            "description": "The device is not eligible for a free registration: hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value `PAYMENT_REQUIRED` is historical (the retired paid lane) and kept for client compatibility.",
             "content": {
               "application/json": {
                 "schema": {},
                 "example": {
-                  "registrationOutcome": "PAYMENT_REQUIRED",
-                  "paymentAddress": "5F...",
-                  "amountRequired": "10000000000"
+                  "registrationOutcome": "PAYMENT_REQUIRED"
                 }
               }
             }
@@ -475,7 +473,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present (payment lane off — with `PAYMENT_LANE_ENABLED` a missing token resolves to the 200 PAYMENT_REQUIRED outcome instead).",
+            "description": "Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.",
             "content": {
               "application/json": {
                 "schema": {}
@@ -483,7 +481,7 @@
             }
           },
           "403": {
-            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.",
+            "description": "Device evidence failed verification under `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; a claim retried without evidence gets the 200 ineligible outcome.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -642,63 +640,6 @@
                 "example": {
                   "error": "Internal server error. Please try again."
                 }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
-    "/api/v1/usernames/payment-status": {
-      "get": {
-        "tags": [
-          "Usernames"
-        ],
-        "summary": "Payment status for the authenticated account's most recent request.",
-        "description": "Whether the deposit for the caller's PAYMENT_REQUIRED claim has been detected on-chain. Poll after receiving `registrationOutcome: \"PAYMENT_REQUIRED\"`. This route exists only on deployments with the payment lane enabled (`PAYMENT_LANE_ENABLED`); disabled, the path serves the standard plain-text 404. An expired quote answers 404 — re-claim for fresh deposit instructions.",
-        "operationId": "status",
-        "responses": {
-          "200": {
-            "description": "`PENDING`: not yet detected, keep polling. `CONFIRMED`: deposit detected, username registration is in progress (~15s).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PaymentStatusResponse"
-                },
-                "example": {
-                  "status": "PENDING"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token.",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "No active payment request for this account (JSON body), or the deployment runs payment-disabled (plain-text body).",
-            "content": {
-              "application/json": {
-                "schema": {},
-                "example": {
-                  "error": "No active payment request"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Subject rate limit exceeded (with `Retry-After`).",
-            "content": {
-              "application/json": {
-                "schema": {}
               }
             }
           }
@@ -1327,20 +1268,6 @@
           }
         }
       },
-      "PaymentStatusResponse": {
-        "type": "object",
-        "description": "The spec-exact payment-status body: two states, nothing else.",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "status": {
-            "type": "string",
-            "description": "`\"PENDING\"` — keep polling; `\"CONFIRMED\"` — payment detected,\nregistration in progress.",
-            "example": "PENDING"
-          }
-        }
-      },
       "QueueStatusResponse": {
         "type": "object",
         "description": "Queue standing for one claim, as served by `GET /api/v1/registration/queue`\nand embedded in the claim response's `queue` field.",
@@ -1523,7 +1450,7 @@
               "boolean",
               "null"
             ],
-            "description": "Present only when the DeviceCheck free-slot gate ran and produced an\nadvisory availability (`Register`/`Proceed`); omitted when DeviceCheck\nis disabled or the outcome short-circuited (payment/token/unavailable)."
+            "description": "Present only when the DeviceCheck free-slot gate ran and produced an\nadvisory availability (`Register`/`Proceed`); omitted when DeviceCheck\nis disabled or the outcome short-circuited (ineligible/token/unavailable)."
           },
           "registrationOutcome": {
             "type": [

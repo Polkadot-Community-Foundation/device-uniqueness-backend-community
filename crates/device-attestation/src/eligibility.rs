@@ -45,8 +45,7 @@ pub enum VoucherError {
 /// The Phase-1 eligibility decision table: voucher precedence over every
 /// other signal. `None` = no voucher submitted → the standard path; a
 /// submitted voucher either redeems (`Instant`) or rejects the claim —
-/// never falls through. (Phase 2 grows this with the device-gate and
-/// payment-lane inputs.)
+/// never falls through.
 pub fn decide(voucher: Option<VoucherState>) -> Result<Lane, VoucherError> {
     match voucher {
         None => Ok(Lane::Standard),

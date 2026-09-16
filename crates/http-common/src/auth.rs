@@ -22,8 +22,7 @@ pub struct AuthSubject {
     /// platform-specific gates such as iOS DeviceCheck.
     pub platform: Option<String>,
     /// The attestation-time official-store verdict
-    /// (`appFromOfficialStore` claim), when the issuer set it. Tamper-proof;
-    /// `Some(false)` routes username claims to the payment lane (spec FR-005).
+    /// (`appFromOfficialStore` claim), when the issuer set it. Tamper-proof.
     pub app_from_official_store: Option<bool>,
 }
 

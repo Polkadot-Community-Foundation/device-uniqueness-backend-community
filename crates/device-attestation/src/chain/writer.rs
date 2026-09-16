@@ -75,10 +75,6 @@ pub struct WriterConfig {
     /// lets a live advancer finish a fair drain during the retire sequence.
     /// Doubles as the warning cadence while the queue is enabled.
     pub queue_fallback_after: Duration,
-    /// Cadence of the payment watch pass (deposit detection + expiry over
-    /// `payment_requests`). Read-only on chain; a no-op while the payment
-    /// lane has never quoted anything.
-    pub payment_poll_interval: Duration,
     /// Cadence of the attester-resources pass: read the attestation allowance
     /// and the account balances that registration silently dies without.
     pub resource_poll_interval: Duration,
@@ -122,7 +118,6 @@ impl WriterConfig {
             max_attempts: env_u64("CHAIN_WRITER_MAX_ATTEMPTS", 8) as i32,
             queue_enabled: crate::config::env_bool("QUEUE_ENABLED", false)?,
             queue_fallback_after: Duration::from_secs(strict("QUEUE_FALLBACK_AFTER_SECS", 60)?),
-            payment_poll_interval: Duration::from_secs(strict("PAYMENT_POLL_INTERVAL_SECS", 30)?),
             resource_poll_interval: Duration::from_secs(strict("ATTESTER_RESOURCE_POLL_SECS", 60)?),
             allowance_floor: u32::try_from(strict("ATTESTER_ALLOWANCE_FLOOR", 100)?).map_err(
                 |_| ConfigError::Invalid {
@@ -402,7 +397,6 @@ mod tests {
         "CHAIN_WRITER_MAX_ATTEMPTS",
         "QUEUE_ENABLED",
         "QUEUE_FALLBACK_AFTER_SECS",
-        "PAYMENT_POLL_INTERVAL_SECS",
         "ATTESTER_RESOURCE_POLL_SECS",
         "ATTESTER_ALLOWANCE_FLOOR",
         "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
@@ -457,7 +451,6 @@ mod tests {
             ("CHAIN_WRITER_MAX_ATTEMPTS", "4"),
             ("QUEUE_ENABLED", "yes"),
             ("QUEUE_FALLBACK_AFTER_SECS", " 90 "),
-            ("PAYMENT_POLL_INTERVAL_SECS", "15"),
             ("ATTESTER_RESOURCE_POLL_SECS", "120"),
             ("ATTESTER_ALLOWANCE_FLOOR", "250"),
             ("ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK", "123456789012"),
@@ -482,7 +475,6 @@ mod tests {
         assert_eq!(config.max_attempts, 4);
         assert!(config.queue_enabled);
         assert_eq!(config.queue_fallback_after, Duration::from_secs(90));
-        assert_eq!(config.payment_poll_interval, Duration::from_secs(15));
         assert_eq!(config.resource_poll_interval, Duration::from_secs(120));
         assert_eq!(config.allowance_floor, 250);
         assert_eq!(config.signer_balance_floor_planck, 123_456_789_012);
@@ -507,7 +499,6 @@ mod tests {
         assert_eq!(config.max_attempts, 8);
         assert!(!config.queue_enabled);
         assert_eq!(config.queue_fallback_after, Duration::from_secs(60));
-        assert_eq!(config.payment_poll_interval, Duration::from_secs(30));
         assert_eq!(config.resource_poll_interval, Duration::from_secs(60));
         assert_eq!(config.allowance_floor, 100);
         assert_eq!(config.signer_balance_floor_planck, 10_000_000_000);
@@ -547,7 +538,6 @@ mod tests {
 
         for key in [
             "QUEUE_FALLBACK_AFTER_SECS",
-            "PAYMENT_POLL_INTERVAL_SECS",
             "ATTESTER_RESOURCE_POLL_SECS",
             "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
         ] {

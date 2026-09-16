@@ -24,8 +24,8 @@ each of which deploys independently behind a single-URL
 [gateway](gateway/Caddyfile):
 
 - **`device-attestation-api`** — the auth handshake (challenge → hardware
-  attestation → JWT + refresh), username registration with free and paid lanes
-  (`POST /api/v1/usernames`, availability, payment status, queue status), the
+  attestation → JWT + refresh), username registration gated on device uniqueness
+  (`POST /api/v1/usernames`, availability, queue status), the
   attester key, JWKS, health. Verifies Apple App Attest and Android Play
   Integrity / key attestation.
 - **`device-attestation-chain-writer`** — a single-instance worker that drains

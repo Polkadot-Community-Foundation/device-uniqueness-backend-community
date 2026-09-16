@@ -812,7 +812,6 @@ table.params td.desc code{
       <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-registration-queue"><span class="method-mini">GET</span><span class="path">/registration/queue</span></a>
       <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames"><span class="method-mini">POST</span><span class="path">/usernames</span></a>
       <a class="nav-item m-post" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-available"><span class="method-mini">POST</span><span class="path">/usernames/available</span></a>
-      <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-payment-status"><span class="method-mini">GET</span><span class="path">/usernames/payment-status</span></a>
       <a class="nav-item m-get" href="javascript:void(0)" data-scroll-to="ep-api-v1-usernames-search"><span class="method-mini">GET</span><span class="path">/usernames/search</span></a>
     </div>
 
@@ -1627,9 +1626,7 @@ against the base of the lite username in the same claim.</td></tr>
               <div class="code-head-right"><span class="code-lang-tag">json</span></div>
             </div>
 <pre><span class="p">{</span>
-  <span class="s">"registrationOutcome"</span><span class="p">:</span> <span class="s">"PAYMENT_REQUIRED"</span><span class="p">,</span>
-  <span class="s">"paymentAddress"</span><span class="p">:</span> <span class="s">"5F..."</span><span class="p">,</span>
-  <span class="s">"amountRequired"</span><span class="p">:</span> <span class="s">"10000000000"</span>
+  <span class="s">"registrationOutcome"</span><span class="p">:</span> <span class="s">"PAYMENT_REQUIRED"</span>
 <span class="p">}</span></pre>
           </div>
           <div class="code-block">
@@ -1710,7 +1707,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">The device must pay to register (hard-mode DeviceCheck: free slot already used, or — with the payment lane on — a missing device token). Not an error — a 200 outcome. With <code>PAYMENT_LANE_ENABLED</code> the body carries the deposit instructions (<code>paymentAddress</code>, <code>amountRequired</code> in planck as a string) and the claim is stored; registration proceeds automatically on the confirmed deposit (poll <code>GET /api/v1/usernames/payment-status</code>). Lane off: the bare outcome, no payment path.</div>
+              <div class="sc-desc">The device is not eligible for a free registration: hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found the device already recorded or the Android claim carried no evidence, or a concurrent claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no claim is stored and there is no paid alternative. The value <code>PAYMENT_REQUIRED</code> is historical (the retired paid lane) and kept for client compatibility.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1731,14 +1728,14 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c401">401</span>
                 <span class="sc-label">UNAUTHORIZED</span>
               </div>
-              <div class="sc-desc">Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present (payment lane off — with <code>PAYMENT_LANE_ENABLED</code> a missing token resolves to the 200 PAYMENT_REQUIRED outcome instead).</div>
+              <div class="sc-desc">Missing or invalid bearer token, or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
                 <span class="sc-code c403">403</span>
                 <span class="sc-label">DEVICE_EVIDENCE_INVALID</span>
               </div>
-              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; repeated failure surfaces as the paid lane.</div>
+              <div class="sc-desc">Device evidence failed verification under <code>WIDEVINE_DEDUP_ENFORCE</code>: chain policy, the cert-bound evidence hash (challenge / account / deviceId), or a spent challenge. The specific reason is logged server-side, never returned. Retryable once with a fresh challenge; a claim retried without evidence gets the 200 ineligible outcome.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1906,77 +1903,6 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-label">Internal server error. Please try again.</span>
               </div>
               <div class="sc-desc">People Chain failure or reservation-outbox failure.</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="endpoint" id="ep-api-v1-usernames-payment-status">
-        <div class="endpoint-head">
-          <div class="endpoint-title">
-            <span class="method-badge m-get">GET</span>
-            <span class="endpoint-path">/api/v1/usernames/payment-status</span>
-          </div>
-          <div class="endpoint-meta">
-            <span class="chip green">200</span>
-            <span class="chip red">401</span>
-            <span class="chip red">404</span>
-            <span class="chip yellow">429</span>
-            <span class="chip blue">bearer JWT</span>
-          </div>
-        </div>
-        <div class="endpoint-body">
-          <p class="endpoint-desc">Whether the deposit for the caller's PAYMENT_REQUIRED claim has been detected on-chain. Poll after receiving <code>registrationOutcome: &quot;PAYMENT_REQUIRED&quot;</code>. This route exists only on deployments with the payment lane enabled (<code>PAYMENT_LANE_ENABLED</code>); disabled, the path serves the standard plain-text 404. An expired quote answers 404 — re-claim for fresh deposit instructions.</p>
-          <div class="auth-note">
-            <span class="auth-label">Auth</span>
-            <span class="auth-text">Bearer JWT required in the <code>Authorization</code> header.</span>
-          </div>
-          <div class="code-block">
-            <div class="code-head">
-              <span class="code-head-label">Response · 200 · application/json</span>
-              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
-            </div>
-<pre><span class="p">{</span>
-  <span class="s">"status"</span><span class="p">:</span> <span class="s">"PENDING"</span>
-<span class="p">}</span></pre>
-          </div>
-          <div class="code-block">
-            <div class="code-head">
-              <span class="code-head-label">Response · 404 · application/json</span>
-              <div class="code-head-right"><span class="code-lang-tag">json</span></div>
-            </div>
-<pre><span class="p">{</span>
-  <span class="s">"error"</span><span class="p">:</span> <span class="s">"No active payment request"</span>
-<span class="p">}</span></pre>
-          </div>
-          <div class="status-grid">
-            <div class="status-card">
-              <div class="sc-head">
-                <span class="sc-code c200">200</span>
-                <span class="sc-label">OK</span>
-              </div>
-              <div class="sc-desc"><code>PENDING</code>: not yet detected, keep polling. <code>CONFIRMED</code>: deposit detected, username registration is in progress (~15s).</div>
-            </div>
-            <div class="status-card">
-              <div class="sc-head">
-                <span class="sc-code c401">401</span>
-                <span class="sc-label">UNAUTHORIZED</span>
-              </div>
-              <div class="sc-desc">Missing or invalid bearer token.</div>
-            </div>
-            <div class="status-card">
-              <div class="sc-head">
-                <span class="sc-code c404">404</span>
-                <span class="sc-label">No active payment request</span>
-              </div>
-              <div class="sc-desc">No active payment request for this account (JSON body), or the deployment runs payment-disabled (plain-text body).</div>
-            </div>
-            <div class="status-card">
-              <div class="sc-head">
-                <span class="sc-code c429">429</span>
-                <span class="sc-label">RATE_LIMITED</span>
-              </div>
-              <div class="sc-desc">Subject rate limit exceeded (with <code>Retry-After</code>).</div>
             </div>
           </div>
         </div>

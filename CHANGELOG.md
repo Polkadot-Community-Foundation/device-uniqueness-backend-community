@@ -8,6 +8,27 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Removed
+
+- **The paid registration lane is retired.** It never quoted in any
+  deployment. A claim the device gate turns away (a DeviceCheck slot already
+  used, a Widevine device already recorded or an enforced Android claim without
+  evidence, a lost device race) gets the terminal
+  `200 {"registrationOutcome":"PAYMENT_REQUIRED"}` with nothing stored, as it
+  already did with the lane's default `PAYMENT_LANE_ENABLED=false`; the wire
+  value is kept because shipped Android clients match on it. Removed:
+  `GET /api/v1/usernames/payment-status`, the chain writer's deposit watcher,
+  the non-store-install routing (FR-005) that only ran with the lane on, the
+  `payment_requests` table (migration `0010`, which refuses to drop a non-empty
+  table), and the `PAYMENT_LANE_ENABLED`, `PAYMENT_MASTER_ACCOUNT`,
+  `PAYMENT_AMOUNT_PLANCK`, `PAYMENT_REQUEST_TTL_SECS` and
+  `PAYMENT_POLL_INTERVAL_SECS` settings, which are no longer read. The edge
+  now routes only `/api/v1/usernames/search` to `username-indexer` (the
+  GET-reads carve-out existed for `payment-status`); every other path under
+  `/api/v1/usernames` reaches `device-attestation-api`, whose 404 body is the
+  same shared envelope. Regenerate or redeploy `gateway/Caddyfile`. DeviceCheck,
+  Widevine dedup, the registration queue and vouchers are unchanged.
+
 ### Fixed
 
 - **A contested signer nonce no longer fails registrations terminally.** One

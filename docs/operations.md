@@ -455,7 +455,7 @@ keys; clearing them makes every tester reinstall) and `registration_vouchers`.
 # report only; deletes nothing, stops nothing
 scripts/reset_env_state.sh --project <compose-project> --confirm <compose-project> --dry-run
 
-# stop the writers, clear the outbox + payment quotes + lease, restart
+# stop the writers, clear the outbox + lease, restart
 scripts/reset_env_state.sh --project <compose-project> --confirm <compose-project>
 ```
 
@@ -582,6 +582,8 @@ you expect.
 | Public search suddenly returning `402` | The proof-of-compute gate is on. Expected for anonymous callers; if *authenticated* clients see it, the indexer's verify-only JWT material is wrong — compare it against `device-attestation-api`'s `/.well-known/jwks.json`. |
 | `402 puzzle has already been used` on a first attempt | The client is reusing a puzzle (one solve = one request), or a proxy is retrying. Each request needs a fresh `POST /api/v1/poc/issue`. |
 | `spent_puzzles` growing without bound | The pruner is failing (`pruning expired spent puzzles failed`). Rows are harmless but unbounded until it recovers. |
+| Every device-attestation role fails at boot: `payment_requests is not empty; export it before dropping` | Migration `0010` drops the retired paid lane's table and refuses while it holds rows, which would mean a quote was issued somewhere. Nothing is applied and every process that connects to the database stops at startup. Export the rows (`CONFIRMED` and `FAILED_CONFLICT` ones record money received) and settle them with support, then `DELETE FROM payment_requests` and restart. |
+| An image older than migration `0010` fails at boot after the upgrade | sqlx refuses to start against a database holding a migration the binary does not know, and `0010` does not restore `payment_requests`. Roll forward instead; returning to an older image means restoring a backup taken before the upgrade. |
 | `migration N was previously applied but has been modified` | The volume holds an older schema. Back up first, then `docker compose down && docker volume rm <project>_pgdata && docker compose up -d`. **This destroys database state.** |
 | No TLS certificate | DNS not propagated, 80/443 blocked, or another process holding the ports. `dig +short <domain>`, `sudo ss -ltnp '( sport = :443 )'`, and the edge project's logs. |
 | Edge answers 502 | The upstream alias does not resolve: the environment project is down, or its `ENV_ID` does not match the Caddyfile's upstream suffix. `sudo docker network inspect dub-edge`. |
