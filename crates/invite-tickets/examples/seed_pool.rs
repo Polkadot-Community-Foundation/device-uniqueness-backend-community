@@ -1,14 +1,26 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
+// Only on networks whose People runtime has Game and ProofOfInk
+#[cfg(not(invite_tickets))]
+fn main() {
+    eprintln!("seed_pool: this build's DUB_NETWORK has no invite tickets");
+    std::process::exit(2);
+}
+
+#[cfg(invite_tickets)]
 use std::str::FromStr as _;
 
+#[cfg(invite_tickets)]
 use invite_tickets::sign::{self, TicketKeypair};
+#[cfg(invite_tickets)]
 use invite_tickets::tickets::{self, Dim, Network};
 
 /// Dev placeholder inviter (Alice), stamped into seeded rows.
+#[cfg(invite_tickets)]
 const DEV_INVITER: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 
+#[cfg(invite_tickets)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);

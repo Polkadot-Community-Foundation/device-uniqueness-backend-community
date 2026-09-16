@@ -14,11 +14,13 @@ DB_URL_KEYS=(
   DATABASE_URL
 )
 
-rendered="$(docker compose config)"
+# `--profile '*'`: the boundaries hold for every service the file can start,
+# including the ones behind a profile (invite-tickets) that .env may leave off.
+rendered="$(docker compose --profile '*' config)"
 # Cleared so a shell still holding the local-run overrides (see the header of
 # gateway/docker-compose.yml) checks the committed defaults, not its own ports.
 rendered_gateway="$(EDGE_HTTP_PORT= EDGE_HTTPS_PORT= docker compose -f gateway/docker-compose.yml config)"
-rendered_debug="$(docker compose -f docker-compose.yml -f docker-compose.debug.yml config)"
+rendered_debug="$(docker compose --profile '*' -f docker-compose.yml -f docker-compose.debug.yml config)"
 # Same treatment as the gateway: cleared so a shell that republished a UI port
 # for itself is checked against the committed loopback defaults.
 rendered_observability="$(PROMETHEUS_PORT= GRAFANA_PORT= ALLOY_PORT= \

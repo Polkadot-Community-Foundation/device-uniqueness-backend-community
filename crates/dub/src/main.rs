@@ -65,8 +65,11 @@ fn parse_args() -> anyhow::Result<Command> {
 
 fn usage() -> String {
     format!(
-        "usage: dub --role <ROLE>\n       dub --list-roles | --list-merged-roles\n       dub --healthcheck [--url URL]\n\nstandard topology (eight workloads):\n  {}\n\nsmall topology (this, plus the three workers above; holds every secret in one\nprocess — see docs/architecture.md, Deployment topologies):\n  {}",
+        "usage: dub --role <ROLE>\n       dub --list-roles | --list-merged-roles\n       dub --healthcheck [--url URL]\n\nnetwork: {} (fixed at build time by DUB_NETWORK)\n\nstandard topology ({} workloads):\n  {}\n\nsmall topology (this, plus the {} workers above; holds every secret in one\nprocess — see docs/architecture.md, Deployment topologies):\n  {}",
+        env!("DUB_NETWORK"),
+        roles::ROLES.len(),
         roles::ROLES.join("\n  "),
+        roles::WORKER_ROLES.len(),
         roles::MERGED_ROLES.join("\n  ")
     )
 }

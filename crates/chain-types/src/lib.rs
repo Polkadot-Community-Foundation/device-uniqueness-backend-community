@@ -1,22 +1,53 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Refresh with:
-//! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Game,ProofOfInk,Members -f bytes -o crates/chain-types/metadata/people.scale`
+//! Generated People Chain types for the network this build targets.
+//!
+//! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
+//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `polkadot` (polkadot-test). Each has its own vendored blob,
+//! `metadata/metadata.<network>.scale`. Refresh one with:
+//! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
+//! where `<pallets>` is `System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members`,
+//! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
 
 #[allow(clippy::all, missing_docs, rustdoc::all)]
-#[subxt::subxt(runtime_metadata_path = "metadata/people.scale")]
+#[cfg_attr(
+    dub_network = "testnet",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.testnet.scale")
+)]
+#[cfg_attr(
+    dub_network = "polkadot",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
+)]
 pub mod people {}
 
 pub use subxt;
+
+/// The network this build targets.
+pub const NETWORK: &str = env!("DUB_NETWORK");
+
+/// The vendored blob [`people`] is generated from, relative to the workspace root.
+pub const METADATA_FILE: &str = concat!(
+    "crates/chain-types/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+);
+
+static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+));
 
 /// The vendored metadata [`people`] is generated from, decoded once.
 static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
     std::sync::LazyLock::new(|| {
         std::sync::Arc::new(
-            subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+            subxt::Metadata::decode_from(METADATA_BYTES)
                 .expect("vendored People Chain metadata decodes"),
         )
     });
@@ -179,6 +210,7 @@ pub type PeopleTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    tx_ext::CheckMetadataHash,
     Noop<StorageWeightReclaim>,
 );
 
@@ -186,7 +218,7 @@ extrinsic_params_builder! {
     PeopleExtrinsicParamsBuilder<PeopleConfig> => PeopleTransactionExtensions,
     |mortality, nonce, tip| (
         (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (),
+        mortality, nonce, (), tip, (), (),
     )
 }
 
@@ -198,6 +230,7 @@ delegating_config! {
 pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
+    Noop<VerifyMultiSignature>,
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
@@ -212,6 +245,7 @@ pub type AssetHubTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
+    Noop<PrevalidateAttests>,
     tx_ext::CheckMetadataHash,
     Noop<EthSetOrigin>,
     Noop<StorageWeightReclaim>,
@@ -220,8 +254,8 @@ pub type AssetHubTransactionExtensions<T> = (
 extrinsic_params_builder! {
     AssetHubExtrinsicParamsBuilder<AssetHubConfig> => AssetHubTransactionExtensions,
     |mortality, nonce, tip| (
-        (), (), (), (), (), (), (), (), (), (), (), (),
-        mortality, nonce, (), tip, (), (), (),
+        (), (), (), (), (), (), (), (), (), (), (), (), (),
+        mortality, nonce, (), tip, (), (), (), (),
     )
 }
 
@@ -319,6 +353,8 @@ noop_names! {
     AsScarcity = &[0],
     AsDotnsGateway = &[0],
     EthSetOrigin,
+    VerifyMultiSignature = &[0],
+    PrevalidateAttests,
 }
 
 #[cfg(test)]
@@ -349,12 +385,14 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "CheckMetadataHash",
         "StorageWeightReclaim",
     ];
 
     const ASSET_HUB_TUPLE_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "AuthorizeValueTransfer",
+        "VerifyMultiSignature",
         "AuthorizeCall",
         "AsPgas",
         "AsRingAlias",
@@ -369,6 +407,7 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "PrevalidateAttests",
         "CheckMetadataHash",
         "EthSetOrigin",
         "StorageWeightReclaim",
@@ -410,6 +449,31 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    /// What `people-polkadot` 2005000 declares, in order (extension version 1,
+    /// the one subxt encodes with). Game and ProofOfInk are gone, and with
+    /// them their gates; `CheckMetadataHash` is new.
+    const PEOPLE_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "RestrictOrigins",
+        "AuthorizeCall",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
     /// What `next-asset-hub-paseo` 3000000 declares, in order. `AsRingAlias`
     /// is gone and `AsScarcity` took its place; the tuple carries both,
     /// because the runtimes below are still in the list.
@@ -433,11 +497,49 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    /// What `statemint` 2005000 (the polkadot-test Asset Hub) declares, in
+    /// order (extension version 1). New against the Paseo Asset Hubs:
+    /// `VerifyMultiSignature` and `PrevalidateAttests`; `AsScarcity` is gone.
+    const ASSET_HUB_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
     /// Every runtime a deployment is known to have talked to. The tuples are
     /// the union of these sets, not a snapshot of the newest one: an entry
     /// stays here — and its gate stays in the tuple — so that a binary
     /// pointed at a node that has not upgraded yet can still sign.
     const KNOWN_RUNTIMES: &[KnownRuntime] = &[
+        KnownRuntime {
+            env: "polkadot-test",
+            spec_name: "people-polkadot",
+            spec_version: 2_005_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test asset hub",
+            spec_name: "statemint",
+            spec_version: 2_005_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
+        },
         KnownRuntime {
             env: "paseo-next-v2 / previewnet",
             spec_name: "next-people-paseo",
@@ -604,7 +706,7 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            3_000_000,
+            VENDORED_VERSION.0,
             "the blob's own System::Version is what chain-client logs the live \
              chain against, so refreshing the blob moves this number with it"
         );
@@ -643,6 +745,7 @@ mod tests {
         assert_eq!(call.call_name(), "register_lite_person");
     }
 
+    #[cfg(invite_tickets)]
     #[test]
     fn builds_set_invite_ticket_calls() {
         let ticket = subxt::utils::AccountId32([0u8; 32]);
@@ -655,6 +758,7 @@ mod tests {
         assert_eq!(poi.call_name(), "set_invite_ticket");
     }
 
+    #[cfg(invite_tickets)]
     #[test]
     fn builds_available_invites_queries() {
         let game = people::storage().game().available_invites();
@@ -666,8 +770,13 @@ mod tests {
         assert_eq!(poi.entry_name(), "AvailableInvites");
     }
 
+    #[cfg(dub_network = "polkadot")]
+    const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
+    #[cfg(not(dub_network = "polkadot"))]
+    const VENDORED_VERSION: (u32, u32) = (3_000_000, 5);
+
     fn people_metadata() -> subxt::ArcMetadata {
-        subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+        subxt::Metadata::decode_from(METADATA_BYTES)
             .expect("vendored metadata decodes")
             .arc()
     }
@@ -675,8 +784,8 @@ mod tests {
     fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
-            spec_version: 3_000_000,
-            transaction_version: 5,
+            spec_version: VENDORED_VERSION.0,
+            transaction_version: VENDORED_VERSION.1,
             metadata: people_metadata(),
         }
     }
@@ -700,14 +809,14 @@ mod tests {
             out
         }
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().nonce(7).build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [28],
             "nonce 7 must encode as Compact(7), 7 << 2"
         );
 
-        let (.., nonce, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., nonce, _, _, _, _) = PeopleExtrinsicParamsBuilder::new().build();
         assert_eq!(
             encode_nonce(&state, nonce),
             [0],
@@ -723,7 +832,7 @@ mod tests {
         use subxt::ext::frame_decode::extrinsics::TransactionExtension as _;
 
         let state = offline_client_state();
-        let (.., mortality, _, _, tip, _) = PeopleExtrinsicParamsBuilder::new().build();
+        let (.., mortality, _, _, tip, _, _) = PeopleExtrinsicParamsBuilder::new().build();
 
         let mut era = Vec::new();
         CheckMortality::new(&state, mortality)
@@ -749,7 +858,7 @@ mod tests {
             PeopleExtrinsicParamsBuilder::new(),
             PeopleExtrinsicParamsBuilder::default(),
         ] {
-            let (.., mortality, nonce, _, tip, _) = builder.build();
+            let (.., mortality, nonce, _, tip, _, _) = builder.build();
             let mut out = Vec::new();
 
             tx_ext::CheckMortality::new(&state, mortality)

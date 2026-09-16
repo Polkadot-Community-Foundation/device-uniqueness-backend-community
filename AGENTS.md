@@ -33,7 +33,8 @@ If a change makes a doc wrong, fix the doc (or flag the drift) in the same chang
 Twelve crates today (plans may add more independently-deployable service crates):
 
 - `dub` — **the single deployable binary**. Every service and worker is a *role* of this one
-  process (`dub --role device-attestation-api`; `dub --list-roles` prints the eight, `--list-merged-roles` the
+  process (`dub --role device-attestation-api`; `dub --list-roles` prints them — eight on a `testnet`
+  build, six on `polkadot` — and `--list-merged-roles` the
   small topology's `all-in-one`). Process wiring only, no
   domain logic: each role module holds that service's former `main` body and enters the service
   crate through its library `routes()` / `run()`. Also serves `--healthcheck` (a GET on this
@@ -42,11 +43,17 @@ Twelve crates today (plans may add more independently-deployable service crates)
   `gateway/Caddyfile` proxies, in Rust, which `--role all-in-one` serves so a consumer can run the
   whole API with no edge. `all-in-one` is accepted by `--role` but deliberately **absent from
   `--list-roles`** (it holds every secret in one process), so the gate rejects it in any manifest.
-  **Two topologies**: standard (eight workloads) and small (`all-in-one` + the three workers). They
+  **Two topologies**: standard (eight workloads, six on `polkadot`) and small (`all-in-one` + the
+  three workers, two on `polkadot`). They
   are mutually exclusive and the compose file here runs the standard one —
   `docs/architecture.md` "Deployment topologies" has the threat model,
   `docs/operations.md` "Choosing a topology" the operator view.
-- `chain-types` — generated People Chain type surface (subxt codegen).
+- `chain-types` — generated People Chain type surface (subxt codegen), from the vendored
+  `metadata/metadata.<network>.scale` that `DUB_NETWORK` selects. Its `build.rs` is **the** network
+  switch: `invite-tickets`, `dub` and `apidoc-gen` name it as their own `build =` script, and it
+  emits `cfg(dub_network = "…")` plus `cfg(invite_tickets)` (`testnet`, not `polkadot`). Two values,
+  because two People runtimes — previewnet and paseo-next-v2 share one, so they share one build. Gate
+  network-specific code on those cfgs; never read `DUB_NETWORK` at runtime.
 - `chain-client` — reconnecting People Chain connection + the chain-writer signing key (`WriterSigner`); product-agnostic transport shared by the services.
 - `jwt-verify` — the cross-service auth contract: JWKS parsing, Ed25519 signing and verification, claims. It holds **both** halves, but only `device-attestation` is given `JWT_ED25519_SECRET`, so it is the only process that can construct the issuer; every other service builds a verifier from public key material alone. (The crate name predates the issuer moving in.)
 - `http-common` — shared axum primitives: the one JSON error envelope every service renders (`{error}`, plus a `fields` array of `{field, message}` on per-field validation failures), the JWT extractor, rate limiter, health, middleware stack, and fail-fast env helpers; consumed by invite-tickets. Also holds the two things **every** process installs: the metrics exporter (`metrics::spawn`) and the log subscriber (`telemetry::init`).
@@ -63,6 +70,9 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 ## Commands
 
 - `just check` — the fast offline gate: fmt `--check` + `clippy -D warnings` + `cargo test --workspace`.
+  It checks **one** network build (`DUB_NETWORK`, default `testnet`). CI runs it for both, so
+  run `DUB_NETWORK=polkadot just check` too when touching anything invite-tickets or
+  chain-types.
 - `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 12 suites / 30 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
 - `just test-live-chain` — optional Postgres + live People Chain suites; external RPC availability keeps it outside the merge/release gate.
 - `just test-live-providers` — optional credentialed APNs/FCM smokes; runs only the providers configured in the environment and fails if neither is configured.
@@ -87,6 +97,12 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 - Releasing: bump `[workspace.package] version` in `Cargo.toml`, add the matching `## [X.Y.Z]`
   section to `CHANGELOG.md`, merge, tag `vX.Y.Z`, then dispatch `release.yml` manually. The workflow
   refuses a tag that disagrees with either the manifest or the changelog.
+  **Record the runtime versions in that changelog section** — one row per network
+  (`testnet` → `next-people-paseo`, `polkadot` → `people-polkadot`, with each blob's
+  `spec_version`) — because a release ships a build per network and the notes are generated from
+  that section, so this is the only place they are written. The current values are the
+  `KNOWN_RUNTIMES` / `VENDORED_VERSION` entries in `crates/chain-types/src/lib.rs`, which move when
+  a metadata blob is refreshed.
 - Local stack: `docker network create dub-edge` once, then `docker compose up`
   (Postgres + `device-attestation-api` + `device-attestation-chain-writer` + `username-indexer` + its own Postgres).
   All env vars in `.env.example`. Nothing publishes a host port: add

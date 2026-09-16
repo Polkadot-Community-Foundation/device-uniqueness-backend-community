@@ -8,6 +8,28 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- **One tree for every network: `DUB_NETWORK`.** The `fork` line and `main`
+  are merged. The People runtime is chosen at build time — `testnet` (default,
+  covering previewnet and paseo-next-v2) or `polkadot` — and selects the
+  vendored metadata (`crates/chain-types/metadata/metadata.<network>.scale`,
+  replacing `people.scale`) and whether invite-tickets is built. On `polkadot`
+  (no `Game` / `ProofOfInk`) `dub --list-roles` lists six roles and the claim
+  path answers the catch-all 404; on `testnet` nothing changes. Compose passes
+  it as a build arg and keeps the invite-tickets services behind the
+  `invite-tickets` profile (`COMPOSE_PROFILES`). CI checks both builds, and a
+  release ships every asset for both networks under one tag: binaries are
+  `dub-<version>-<network>-<target>.tar.gz`, with a compose bundle per network
+  whose `.env.example` already names it.
+
+  Runtime versions this release targets:
+
+  | build | People runtime | spec_version |
+  | --- | --- | --- |
+  | `testnet` | `next-people-paseo` | 3000000 |
+  | `polkadot` | `people-polkadot` | 2005000 |
+
 ### Removed
 
 - **The paid registration lane is retired.** It never quoted in any
@@ -30,6 +52,19 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   Widevine dedup, the registration queue and vouchers are unchanged.
 
 ### Fixed
+
+- **The writer's transactions decode on runtimes that declare several
+  transaction-extension versions.** subxt 0.50 signs a v4 extrinsic with the
+  extensions of the *highest* version the metadata declares, but the runtime
+  decodes v4 with version 0 only. Both polkadot-test chains declare two, so
+  every registration and `reserve_name` failed with `wasm trap: wasm
+  'unreachable' instruction executed`. Both lanes now sign through
+  `chain_client::create_signed_v4`. On a single-version runtime (PreviewNet's
+  Asset Hub) version 0 is that version, so the encoding is unchanged.
+- **Signing covers the polkadot-test runtimes' extensions.** People gains
+  `CheckMetadataHash`; Asset Hub gains `VerifyMultiSignature` (as `Disabled`)
+  and `PrevalidateAttests`. The Paseo gates stay, so every network signs from
+  one tuple.
 
 - **A contested signer nonce no longer fails registrations terminally.** One
   writer signs from one account and the chain serves that account strictly in

@@ -127,6 +127,10 @@ them apart — and differ only in how many processes hold how many secrets.
 
 ### Standard: eight workloads (the default)
 
+> Counts here are a `testnet` build. A `polkadot` build has no invite-tickets,
+> so it runs six workloads and two singleton workers; everything else is
+> identical. See [Choosing a network](operations.md#choosing-a-network).
+
 Five HTTP services and three single-instance workers, each its own process with its own environment.
 This is what the committed `docker-compose.yml` runs, and it is the recommended shape.
 
@@ -370,8 +374,16 @@ Operational invariants an agent must respect when touching the code.
   configures it separately. Both pallets see that same account as the attester — under
   `Proxy.proxy(real = P)`, `P` is what `GET /api/v1/attester` returns, on People and Asset Hub
   alike.
+- **The target runtime is a build input.** `DUB_NETWORK` (`testnet` — the default, covering
+  previewnet and paseo-next-v2, which run one runtime — or `polkadot`) is read by
+  `crates/chain-types/build.rs`, which every crate that compiles differently per network shares. It
+  picks the vendored blob the People types are generated from, and it decides whether invite-tickets
+  exists: the `polkadot` runtime has no `Game` or
+  `ProofOfInk`, so there the crate compiles to nothing and `dub` has no invite-tickets roles. The
+  signing path, the transaction-extension tuples and the edge route table are the same on every
+  network (the tuples are the union of every known runtime's extensions).
 - **`chain-types` is the only place chain types live.** Static codegen from vendored metadata at
-  `crates/chain-types/metadata/people.scale`; online transport + signing live in
+  `crates/chain-types/metadata/metadata.<network>.scale`; online transport + signing live in
   `device-attestation::chain`, never in `chain-types`. Regenerate with the `subxt metadata …` command
   at the top of `crates/chain-types/src/lib.rs`. It holds one subxt config per chain family,
   `PeopleConfig` and `AssetHubConfig`. Their transaction-extension sets differ, and a merged

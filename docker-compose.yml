@@ -38,8 +38,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-api"]
     restart: unless-stopped
@@ -113,8 +115,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-chain-writer"]
     restart: unless-stopped
@@ -182,8 +186,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "registration-queue"]
     restart: unless-stopped
@@ -232,8 +238,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "username-indexer"]
     restart: unless-stopped
@@ -284,10 +292,16 @@ services:
       # a health failure during it would restart the scan from the beginning.
       start_period: 300s
 
+  # The invite-tickets services run under the `invite-tickets` profile
+  # (COMPOSE_PROFILES=invite-tickets): only networks whose People runtime still
+  # has Game and ProofOfInk have them, and an image built for any other
+  # DUB_NETWORK rejects both roles. See .env.example, "network".
+  #
   # invite-tickets owns its persistence independently: the ticket-pool table
   # holds private keys and must share nothing with the device-attestation DB.
   invite-tickets-postgres:
     image: postgres:16-alpine
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: invite_tickets
@@ -308,10 +322,13 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "invite-tickets-api"]
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     depends_on:
       invite-tickets-postgres:
@@ -356,10 +373,13 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "invite-tickets-pool"]
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     depends_on:
       invite-tickets-postgres:
@@ -402,8 +422,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "turn-api"]
     restart: unless-stopped
@@ -459,8 +481,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "notify-relay"]
     restart: unless-stopped

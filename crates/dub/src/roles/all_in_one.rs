@@ -25,6 +25,7 @@ const DEFAULT_DOCS_ROOT: &str = "/srv/docs";
 struct Health {
     attestation: (sqlx::PgPool, device_attestation::PeopleChain),
     indexer: (sqlx::PgPool, username_indexer::PeopleChain),
+    #[cfg(invite_tickets)]
     invite_tickets: invite_tickets::AppState,
     turn: turn::AppState,
     notifications: notifications::AppState,
@@ -42,19 +43,26 @@ pub async fn run() -> anyhow::Result<()> {
     let attestation_config =
         device_attestation::Config::from_env().context("device-attestation-api config")?;
     let indexer_config = username_indexer::Config::from_env().context("username-indexer config")?;
+    #[cfg(invite_tickets)]
     let invite_config = invite_tickets::Config::from_env().context("invite-tickets-api config")?;
     let turn_config = turn::Config::from_env().context("turn-api config")?;
     let notify_config = notifications::Config::from_env().context("notify-relay config")?;
 
     let bind_addr = attestation_config.bind_addr;
-    tracing::info!(bind = %bind_addr, "starting all-in-one: five surfaces, one port");
+    tracing::info!(
+        bind = %bind_addr,
+        network = env!("DUB_NETWORK"),
+        "starting all-in-one: every surface, one port"
+    );
 
-    // Three migration sets against three databases, before anything serves. One
-    // bad migration blocks the whole API here, where in the eight-workload
-    // topology it blocks one service — the demo asserts it fails loudly.
+    // One migration set per database (three, or two without invite-tickets),
+    // before anything serves. One bad migration blocks the whole API here, where
+    // in the standard topology it blocks one service — the demo asserts it fails
+    // loudly.
     let attestation_pool =
         device_attestation::db::connect(attestation_config.database_url.expose_secret()).await?;
     let indexer_pool = username_indexer::db::connect(&indexer_config.database_url).await?;
+    #[cfg(invite_tickets)]
     let invite_pool = invite_tickets::db::connect(&invite_config.database_url).await?;
 
     let attestation_chain =
@@ -86,6 +94,7 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .await?;
 
+    #[cfg(invite_tickets)]
     let invite_state = invite_tickets::AppState::new(invite_pool, invite_config);
     let turn_state = turn::AppState::new(turn_config);
     let notify_state = crate::roles::notify_relay::build_state(notify_config)?;
@@ -93,6 +102,7 @@ pub async fn run() -> anyhow::Result<()> {
     let health = Health {
         attestation: (attestation_pool, attestation_chain),
         indexer: (indexer_pool, indexer_chain),
+        #[cfg(invite_tickets)]
         invite_tickets: invite_state.clone(),
         turn: turn_state.clone(),
         notifications: notify_state.clone(),
@@ -101,6 +111,7 @@ pub async fn run() -> anyhow::Result<()> {
     let app = routes::merge(Surfaces {
         attestation: device_attestation::http::router(attestation_state),
         indexer: username_indexer::http::router(indexer_state),
+        #[cfg(invite_tickets)]
         invite_tickets: invite_tickets::http::router(invite_state),
         turn: turn::http::router(turn_state),
         notifications: notifications::http::router(notify_state),
@@ -161,7 +172,7 @@ async fn readyz(State(health): State<Health>) -> Response {
     let (attestation_pool, attestation_chain) = &health.attestation;
     let (indexer_pool, indexer_chain) = &health.indexer;
 
-    let results: [(&str, http_common::health::Readiness); 5] = [
+    let results = [
         (
             "device-attestation-api",
             device_attestation::http::health::probe(
@@ -175,6 +186,7 @@ async fn readyz(State(health): State<Health>) -> Response {
             username_indexer::http::health::probe(indexer_pool.clone(), indexer_chain.clone())
                 .await,
         ),
+        #[cfg(invite_tickets)]
         (
             "invite-tickets-api",
             invite_tickets::http::readiness(health.invite_tickets.clone()).await,
