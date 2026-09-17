@@ -120,7 +120,7 @@
       "title": "Outbox depth by status",
       "description": "Work waiting on the chain writer. A rising RESERVED/QUEUED line with a flat ASSIGNED line is the writer not making progress. Absent entirely = no writer holds the lease.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 6 },
       "targets": [
         { "refId": "A", "expr": "dub_outbox_depth{env_id=\"$env\"}", "legendFormat": "{{status}}" }
       ],
@@ -132,7 +132,7 @@
       "title": "Indexer lag (blocks behind)",
       "description": "dub_indexer_checkpoint_lag_blocks: how many finalized blocks the username projection is behind. Zero is caught up; a climb means search is serving stale data. On its own axis on purpose — it shares no unit with block throughput.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 6 },
       "targets": [
         { "refId": "A", "expr": "dub_indexer_checkpoint_lag_blocks{env_id=\"$env\"}", "legendFormat": "blocks behind" }
       ],
@@ -150,11 +150,24 @@
       "title": "Chain liveness (finalized blocks / 5m)",
       "description": "The head the indexer sees moving. Flat at zero means the chain connection is dead while every other panel still looks healthy.",
       "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 },
       "targets": [
         { "refId": "A", "expr": "increase(dub_chain_finalized_head_block{env_id=\"$env\"}[5m])", "legendFormat": "blocks / 5m" }
       ],
       "fieldConfig": { "defaults": { "custom": { "fillOpacity": 5 } }, "overrides": [] }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Indexer subscription",
+      "description": "dub_indexer_subscribed: 1 while the best-block header subscription (chain_subscribeNewHeads) is live, 0 while the indexer is resubscribing. Zero does not mean search is stale — the SYNC_INTERVAL_SECS fallback still forces a pass — it means the projection is advancing at poll speed instead of block speed, so a newly registered username takes tens of seconds to appear. Resubscribes are plotted beside it: a flapping subscription is an RPC endpoint accepting and closing it.",
+      "datasource": { "type": "prometheus", "uid": "dub-prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "dub_indexer_subscribed{env_id=\"$env\"}", "legendFormat": "subscribed" },
+        { "refId": "B", "expr": "increase(dub_indexer_resubscribes_total{env_id=\"$env\"}[5m])", "legendFormat": "resubscribes / 5m" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 5 }, "min": 0 }, "overrides": [] }
     },
     {
       "id": 8,

@@ -25,6 +25,9 @@ thiserror.workspace = true
 anyhow.workspace = true
 ed25519-dalek = "2"
 hex = "0.4"
+moka = { workspace = true, features = ["sync", "quanta"] }
+governor = { workspace = true, features = ["quanta", "jitter", "std"] }
+client-ip = { workspace = true }
 
 [lints]
 workspace = true

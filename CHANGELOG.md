@@ -8,6 +8,197 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-16
+
+### Added
+
+- **One tree for every network: `DUB_NETWORK`.** The `fork` line and `main`
+  are merged. The People runtime is chosen at build time — `testnet` (default,
+  covering previewnet and paseo-next-v2) or `polkadot` — and selects the
+  vendored metadata (`crates/chain-types/metadata/metadata.<network>.scale`,
+  replacing `people.scale`) and whether invite-tickets is built. On `polkadot`
+  (no `Game` / `ProofOfInk`) `dub --list-roles` lists six roles and the claim
+  path answers the catch-all 404; on `testnet` nothing changes. Compose passes
+  it as a build arg and keeps the invite-tickets services behind the
+  `invite-tickets` profile (`COMPOSE_PROFILES`). CI checks both builds, and a
+  release ships every asset for both networks under one tag: binaries are
+  `dub-<version>-<network>-<target>.tar.gz`, with a compose bundle per network
+  whose `.env.example` already names it.
+
+  Runtime versions this release targets:
+
+  | build | People runtime | spec_version |
+  | --- | --- | --- |
+  | `testnet` | `next-people-paseo-v2` | 3000000 |
+  | `polkadot` | `people-polkadot` | 2005000 |
+
+- **Widevine device dedup for Android username claims.**
+  `POST /api/v1/usernames` accepts three optional evidence fields,
+  `attestationChain`, `deviceChallenge` and `deviceId`, sent together or not at
+  all. The leaf key of the chain must attest
+  `SHA-256(domain ‖ deviceChallenge ‖ accountKey ‖ deviceId)`. The raw device id
+  never leaves the device, and the server stores only an HMAC of the hashed id
+  (migration `0009`, `widevine_devices`), so a database dump cannot be tested
+  against candidate ids. One free registration per physical device: the device
+  record is reserved in the same transaction as the username, consumed when the
+  registration lands on chain and deleted on terminal failure so the device can
+  claim again. Off by default. `WIDEVINE_DEDUP_ENABLED=true` verifies and logs
+  the would-be outcome without changing routing (soft mode), and requires
+  `WIDEVINE_DEDUP_HMAC_KEY` (32 bytes, hex or base64). Adding
+  `WIDEVINE_DEDUP_ENFORCE=true` gates the claim: a seen device or an Android
+  claim without evidence gets the ineligible outcome, malformed evidence a `400
+  DEVICE_EVIDENCE_MALFORMED`, evidence that fails verification a `403
+  DEVICE_EVIDENCE_INVALID`, and an unreachable attestation revocation list a
+  retryable `503 DEVICE_EVIDENCE_UNAVAILABLE`. Enforcing without `AUTH_ENABLED`
+  and `ENFORCE_AUTH` logs a warning at boot, because the gate is then advisory.
+
+### Removed
+
+- **`DOTNS_GATEWAY_ENABLED` is gone; the dotNS lane is always on.**
+  `device-attestation-api` always accepts the `dotns` block, and
+  `device-attestation-chain-writer` requires `ASSET_HUB_RPC_URL`, refusing to
+  start without it. The variable is no longer read, so an environment that set
+  it to `false` now claims labels: before upgrading, make sure
+  `ASSET_HUB_RPC_URL` names the Asset Hub of the same network as
+  `PEOPLE_RPC_URL`. An Asset Hub whose `reserve_name` this backend does not
+  encode (Paseo next's) parks the lane rather than stopping the writer.
+
+- **The paid registration lane is retired.** It never quoted in any
+  deployment. A claim the device gate turns away (a DeviceCheck slot already
+  used, a Widevine device already recorded or an enforced Android claim without
+  evidence, a lost device race) gets the terminal
+  `200 {"registrationOutcome":"PAYMENT_REQUIRED"}` with nothing stored, as it
+  already did with the lane's default `PAYMENT_LANE_ENABLED=false`; the wire
+  value is kept because shipped Android clients match on it. Removed:
+  `GET /api/v1/usernames/payment-status`, the chain writer's deposit watcher,
+  the non-store-install routing (FR-005) that only ran with the lane on, the
+  `payment_requests` table (migration `0010`, which refuses to drop a non-empty
+  table), and the `PAYMENT_LANE_ENABLED`, `PAYMENT_MASTER_ACCOUNT`,
+  `PAYMENT_AMOUNT_PLANCK`, `PAYMENT_REQUEST_TTL_SECS` and
+  `PAYMENT_POLL_INTERVAL_SECS` settings, which are no longer read. The edge
+  now routes only `/api/v1/usernames/search` to `username-indexer` (the
+  GET-reads carve-out existed for `payment-status`); every other path under
+  `/api/v1/usernames` reaches `device-attestation-api`, whose 404 body is the
+  same shared envelope. Regenerate or redeploy `gateway/Caddyfile`. DeviceCheck,
+  Widevine dedup, the registration queue and vouchers are unchanged.
+
+### Fixed
+
+- **The writer's transactions decode on runtimes that declare several
+  transaction-extension versions.** subxt 0.50 signs a v4 extrinsic with the
+  extensions of the *highest* version the metadata declares, but the runtime
+  decodes v4 with version 0 only. Both polkadot-test chains declare two, so
+  every registration and `reserve_name` failed with `wasm trap: wasm
+  'unreachable' instruction executed`. Both lanes now sign through
+  `chain_client::create_signed_v4`. On a single-version runtime (PreviewNet's
+  Asset Hub) version 0 is that version, so the encoding is unchanged.
+- **Signing covers the polkadot-test runtimes' extensions.** People gains
+  `CheckMetadataHash`; Asset Hub gains `VerifyMultiSignature` (as `Disabled`)
+  and `PrevalidateAttests`. The Paseo gates stay, so every network signs from
+  one tuple.
+- **A full-name reservation that would sink the claim is refused at intake.**
+  `attest` checks the `dotns.reservedUsername` leg *before* it writes the lite
+  username, and the consumer signature covers it, so a reserved name that is
+  already owned or whose reservation queue is full used to cost the whole
+  registration, with no retry able to drop the leg. Intake now reads that
+  name's reservation state (not the base's, as the two need not match) and
+  answers `409` before a row or a fee exists. Availability reports `EXHAUSTED`
+  for a base whose bare name is owned or queue-full, read in the same batched
+  request as the discriminators. The writer treats
+  `Resources::UsernameReservationTaken`, `QueueFull` and
+  `AlreadyHasReservation` as deterministic rejections, so a claim that races
+  the check costs one fee instead of `CHAIN_WRITER_MAX_ATTEMPTS`.
+- **`turn-api`'s proof-root refresher no longer leaks connections.** It dialled
+  a fresh People Chain client every time a refresh failed and never closed the
+  old one. It now holds one connection for the life of the process.
+
+- **A contested signer nonce no longer fails registrations terminally.** One
+  writer signs from one account and the chain serves that account strictly in
+  nonce order, so while one of our transactions waits in a node's pool it owns
+  that nonce: a replacement may only displace it by bidding strictly higher
+  priority, and the writer attaches no tip, so every copy ties and every copy is
+  refused. The single-row submit path charged each of those refusals to the row
+  that happened to be next, which burned all 8 attempts in about three minutes —
+  far less than a transaction may legitimately sit in a pool — and sent valid
+  registrations to `FAILED_TERMINAL` against a healthy chain. A submit the
+  writer stops watching at `CHAIN_WRITER_FINALIZE_SECS` did the same, and could
+  additionally mark a row failed that was included moments later. Both are now
+  recognised as signer-wide conditions and deferred on a fixed 30s backoff at an
+  unchanged `attempt`, matching what the whole-batch path already did: a row
+  waits out the jam and is re-read against chain state on its next pass. They
+  count on `dub_chain_submit_total{outcome="deferred"}` and log `submission
+  deferred without spending an attempt`. Genuine row-level rejections are
+  unaffected and still spend their budget.
+- **The writer reads its signer nonce the way the node validates it.** Both
+  lanes used subxt's `account_nonce`, which reads at the *finalized* block, so
+  any transaction of ours in a best block but not yet finalized left the read one
+  behind and the next submission was refused as `Transaction is outdated`. That
+  refusal was then logged as a pool jam and held for 30s, then re-read from the
+  same lagging state. The nonce now comes from `system_accountNextIndex` (best
+  block plus our own pool transactions). An `outdated` refusal that still occurs
+  is logged as its own case (`the signer's nonce was already consumed on chain`)
+  and deferred for 6s instead of 30s, still without spending an attempt.
+
+### Changed
+
+- **`username-indexer` indexes the unfinalized window speculatively.** The sync
+  loop now subscribes to **best** block headers rather than finalized ones, and
+  each pass reconciles the finalized range first (unchanged, authoritative) and
+  then the unfinalized window `(finalized, best]` against the best head. A new
+  registration therefore reaches search about a block after it is *authored*
+  instead of after it is finalized — a gap measured at 2-5 blocks on the People
+  chain. New `SPECULATIVE_INDEXING_ENABLED` (default `true`) turns it off.
+
+  Speculative rows carry `assigned_usernames.speculative_from_block` and obey one
+  rule: **speculation may add rows and retract rows it added, and may never
+  modify or delete finalized state.** That rule sets the scope: a *new*
+  registration is admitted early, while a change to an account that already holds
+  a finalized row — a personhood upgrade, an identifier key rotation — still
+  becomes visible only at finality.
+
+  The window is re-derived from the finalized head on every pass rather than
+  checkpointed, so a block discarded at the tip — on PreviewNet's People chain,
+  structurally about one height in eight — is retracted on the next pass instead
+  of stranding a row the finalized pass would never revisit. Because
+  `Resources::Consumers` is append-only on chain, that re-check is the only thing
+  that ever retracts a row, so it runs on every pass: when a wake carries no
+  header the best head is read over RPC instead, and when the window is too wide
+  to scan the loop stops admitting but keeps re-checking what it already holds.
+  Failure there is contained — the finalized pass is never failed or backed off
+  by it. The checkpoint, `/readyz` freshness and the lag gauges keep their
+  existing finalized-only meaning. Startup drops any speculative rows a previous
+  run left behind, under the projection lock so a booting replica cannot clear
+  rows a live one is serving. New metrics: `dub_chain_best_head_block`,
+  `dub_chain_finality_trail_blocks`, `dub_indexer_speculative_window_blocks`,
+  `dub_indexer_speculative_admitted_total`,
+  `dub_indexer_speculative_retracted_total`,
+  `dub_indexer_speculative_stood_down_total`,
+  `dub_indexer_speculative_failed_total`.
+
+- **`username-indexer` syncs on block headers instead of a timer.** The
+  resync loop now subscribes to the People Chain's block stream and indexes on
+  each header, so a newly registered username reaches
+  `GET /api/v1/usernames/search` about a block after it is authored rather than
+  up to `SYNC_INTERVAL_SECS` (default 30s) later. Headers are only a signal —
+  every pass still re-reads the checkpoint and indexes up to the head — so a
+  dropped or coalesced header costs nothing, and a burst is drained into one
+  pass. `SYNC_INTERVAL_SECS` keeps its name and default but is now the fallback:
+  the longest the loop sits without a header before forcing a pass anyway.
+  Nothing to change in an environment. Two new metrics: `dub_indexer_subscribed`
+  (1 while the best-header subscription is live) and
+  `dub_indexer_resubscribes_total`.
+
+- **Rate limits refill continuously instead of resetting per window.** Every
+  limiter (`device-attestation-api` auth routes, username search,
+  invite-tickets, `turn-api`, `notify-relay`) keeps its existing
+  limit-per-window settings, now read as a burst that refills at
+  `limit / window`. A client can no longer spend a full window at its end and
+  another at the start of the next. Per-IP keys now come from the **rightmost**
+  `X-Forwarded-For` entry (then `CF-Connecting-IP`, then `True-Client-IP`)
+  instead of the leftmost, which the client controls. Idle keys are evicted
+  after an hour, and at most 8192 are held. invite-tickets' `Retry-After` is
+  now the actual wait rather than the whole window.
+
 ## [0.5.0] - 2026-09-02
 
 ### Fixed
@@ -212,9 +403,10 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.6.0...HEAD
 
-[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/rel
-eases/tag/v0.5.0
+[0.6.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.6.0
+
+[0.5.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.5.0
 
 [0.4.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.4.0

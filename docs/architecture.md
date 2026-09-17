@@ -58,9 +58,9 @@ create now. See "How the workspace grows" below.
 | Service | Responsibility | Processes |
 |---|---|---|
 | `device-attestation` | Device **attestation** + auth handshake + **sole JWT issuer** + username **write** path + **eligibility/queue** + reservation **outbox**. | `device-attestation-api` (N replicas) + `device-attestation-chain-writer` (single-instance outbox→chain worker) + `registration-queue` (single-instance queue advancer; with `QUEUE_ENABLED` on its promotion is the only queue exit — down, claims park as `QUEUED` behind the free lane's throttle and the writer raises the stranded-queue warning) |
-| `username-indexer` | Finalized-chain username **indexer + public reads**: prefix search (`GET /api/v1/usernames/search`, paginated, per-IP rate limited) plus the optional proof-of-compute gate and its `POST /api/v1/poc/issue` puzzle issuance. The single-username lookup (`GET /api/v1/usernames/{username}`) is retired in favour of `search` and serves the JSON 404, like the removed list endpoint. Read-only projection; can be down without affecting registration. | `username-indexer` (+ own Postgres) |
+| `username-indexer` | Username **indexer + public reads** (finalized state, plus the unfinalized window indexed speculatively on top of it): prefix search (`GET /api/v1/usernames/search`, paginated, per-IP rate limited) plus the optional proof-of-compute gate and its `POST /api/v1/poc/issue` puzzle issuance. The single-username lookup (`GET /api/v1/usernames/{username}`) is retired in favour of `search` and serves the JSON 404, like the removed list endpoint. Read-only projection; can be down without affecting registration. | `username-indexer` (+ own Postgres) |
 | `notifications` | Thin `/api/v1/notify` relay. Verify-only Ed25519 JWT, stateless, DB-free, per-subject rate limited. No `depends_on`. iOS APNs (token auth, HTTP/2) + Android FCM (v1, OAuth2) providers, each optional. `APNS_ENVIRONMENT` picks the APNs host tried first; a `BadDeviceToken` rejection is retried once against the sibling host, so one relay serves both production and sandbox device tokens. | `notify-relay` |
-| `turn` | Stateless coturn REST-API credential issuer (username = expiry:id, password = HMAC over the username, secret shared with the relay; the relay itself = SRE infra). Two authorization paths: JWT-gated `POST /api/v1/turn/issue`, and — behind `TURN_PROOF_ENABLED` — proof-authorized `POST /api/v1/turn/issue-with-proof`, where a proven Lite/Full person redeems a ring-VRF membership proof instead of presenting a JWT. Redemption is a single request with no challenge round trip: the client supplies a timestamp, the server derives the proved message itself as `blake2b256(label ‖ timestamp)` and accepts it only inside a bounded clock skew, so nothing about the request is minted or stored. There is deliberately no client-chosen nonce and no genesis in the digest: the product builds this message and only needs a clock; chain identity is the ring root the server verifies against. Ring-VRF proofs are deterministic, so a person's proof for one second is one fixed value. The request repeats the collection id from TrUAPI's `ringLocation`; the server accepts only the canonical `pop:polkadot.network/people-lite` and `pop:polkadot.network/people` ids, selects that collection's independently refreshed root cache, and never falls through to the other. Required `ringIndex` and `ringRevision` name the single server-held root verification runs against, so every request costs at most one ring verification and a pair the server no longer holds is refused before admission. Proof bytes are the host's raw ring-VRF signature, with no SCALE length prefix. Each request names the `productId` it proves for, and the server verifies under the context it derives itself for that product (`blake2b256("product/" ‖ productId ‖ "/" ‖ indexBytes(suffix))`, the derivation the hosts use); an unlisted product is refused before verification. One context per product rather than one shared context is what keeps hosts from prompting the user — they prompt only when the proof context is not the calling product's own — at the cost of a per-person budget that is also per product. Requests never read the chain, verification concurrency defaults to available CPUs minus one (floor one), up to 64 saturated requests wait 50ms before returning 503, and a dead RPC never blocks boot or `/turn/issue`. The contextual alias recovered from a proof remains private: it is an in-memory throttle key and an input to a domain-separated, `TURN_SECRET`-keyed HMAC that yields one opaque 16-byte credential id per person and product, expiring `TURN_TTL_SECS` after issuance. The response reports the configured TTL. The JWT route retains a random id and fresh configured TTL. `/turn/issue-with-proof` is the browser-callable route: `OPTIONS` answers the preflight (echoing the requested headers) and every response the route produces carries `access-control-allow-origin: *`. It is not origin-authorized — the proof is the authorization — so the wildcard gives a browser only what a non-browser client already had. `/turn/issue` carries no CORS headers; it is a JWT route called by the apps. No DB; N replicas need no coordination for credentials (rate limits and root caches remain per replica). Each environment runs its own process because one process pins exactly one People Chain RPC and genesis for its root cache. | `turn-api` |
+| `turn` | Stateless coturn REST-API credential issuer (username = expiry:id, password = HMAC over the username, secret shared with the relay; the relay itself = SRE infra). Two authorization paths: JWT-gated `POST /api/v1/turn/issue`, and — behind `TURN_PROOF_ENABLED` — proof-authorized `POST /api/v1/turn/issue-with-proof`, where a device proven under devicehood or a person redeems a ring-VRF membership proof instead of presenting a JWT. Redemption is a single request with no challenge round trip: the client supplies a timestamp, the server derives the proved message itself as `blake2b256(label ‖ timestamp)` and accepts it only inside a bounded clock skew, so nothing about the request is minted or stored. There is deliberately no client-chosen nonce and no genesis in the digest: the product builds this message and only needs a clock; chain identity is the ring root the server verifies against. Ring-VRF proofs are deterministic, so a person's proof for one second is one fixed value. The request repeats the collection id from TrUAPI's `ringLocation`; the server accepts only the canonical `pop:polkadot.network/people-lite` and `pop:polkadot.network/people` ids, selects that collection's independently refreshed root cache, and never falls through to the other. Required `ringIndex` and `ringRevision` name the single server-held root verification runs against, so every request costs at most one ring verification and a pair the server no longer holds is refused before admission. Proof bytes are the host's raw ring-VRF signature, with no SCALE length prefix. Each request names the `productId` it proves for, and the server verifies under the context it derives itself for that product (`blake2b256("product/" ‖ productId ‖ "/" ‖ indexBytes(suffix))`, the derivation the hosts use); an unlisted product is refused before verification. One context per product rather than one shared context is what keeps hosts from prompting the user — they prompt only when the proof context is not the calling product's own — at the cost of a per-person budget that is also per product. Requests never read the chain, verification concurrency defaults to available CPUs minus one (floor one), up to 64 saturated requests wait 50ms before returning 503, and a dead RPC never blocks boot or `/turn/issue`. The contextual alias recovered from a proof remains private: it is an in-memory throttle key and an input to a domain-separated, `TURN_SECRET`-keyed HMAC that yields one opaque 16-byte credential id per person and product, expiring `TURN_TTL_SECS` after issuance. The response reports the configured TTL. The JWT route retains a random id and fresh configured TTL. `/turn/issue-with-proof` is the browser-callable route: `OPTIONS` answers the preflight (echoing the requested headers) and every response the route produces carries `access-control-allow-origin: *`. It is not origin-authorized — the proof is the authorization — so the wildcard gives a browser only what a non-browser client already had. `/turn/issue` carries no CORS headers; it is a JWT route called by the apps. No DB; N replicas need no coordination for credentials (rate limits and root caches remain per replica). Each environment runs its own process because one process pins exactly one People Chain RPC and genesis for its root cache. | `turn-api` |
 | `invite-tickets` | JWT-gated `POST /api/v1/invitation-ticket/claim` — synchronous invitation-credential claims from a pre-staged, on-chain-registered sr25519 keypair pool (its own Postgres). This is the route the shipping apps call for Game / ProofOfInk DIM claims. | `invite-tickets-api` (N replicas, DB-only, no signing secret) + `invite-tickets-pool` (single-instance keypair generator + on-chain registrar) |
 | `gateway` (edge) | Public-URL routing via **Caddy**, one site block per environment. The route table is the committed `gateway/Caddyfile`: the `(routes)` snippet is imported once per environment with that environment's upstreams — username GET reads + `/api/v1/poc*` → its `username-indexer`, invitation tickets → its `invite-tickets-api`, TURN → its chain-pinned `turn-api`, notify → the shared `notify-relay`, everything else (attestation-owned writes/availability/root preflight, JWKS, health) → its `device-attestation-api`. Upstreams are container aliases suffixed with `ENV_ID` (`device-attestation-api-paseo-next-v2`), resolved over the shared external `dub-edge` network; an environment that does not run a service points that route at its own `device-attestation-api` so it 404s. Only notify is shared and verifies every environment's tokens from a merged JWKS. This is the **only** container publishing host ports (80/443, plus 443/udp); holds no secrets (both enforced by the compose boundary script). | `caddy` in its own compose project (`-p edge`) |
 
@@ -102,7 +102,7 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 
 ### Guardrails — do NOT create these as separate crates/services
 
-`attestation`, `availability`, `eligibility`, `queue`, `payment`, `writer` all live **inside**
+`attestation`, `availability`, `eligibility`, `queue`, `writer` all live **inside**
 `device-attestation`. Splitting any out contradicts the design (single device-attestation failure/secret boundary).
 
 ## Design decisions left open
@@ -126,6 +126,10 @@ The system runs in one of **two** shapes. They serve an identical public API —
 them apart — and differ only in how many processes hold how many secrets.
 
 ### Standard: eight workloads (the default)
+
+> Counts here are a `testnet` build. A `polkadot` build has no invite-tickets,
+> so it runs six workloads and two singleton workers; everything else is
+> identical. See [Choosing a network](operations.md#choosing-a-network).
 
 Five HTTP services and three single-instance workers, each its own process with its own environment.
 This is what the committed `docker-compose.yml` runs, and it is the recommended shape.
@@ -218,7 +222,7 @@ Operational invariants an agent must respect when touching the code.
   chain is reconciled to it. No service reads another service's tables.
 - **A claim's optional full-name reservation is checked before it is accepted, because it cannot be
   dropped afterwards.** `dotns.reservedUsername` is relayed into `attest`'s `reserved_username` — the
-  bare, undiscriminated *full-person* name. It is **its own name**: `attest` takes it as a separate
+  bare, undiscriminated *personhood* name. It is **its own name**: `attest` takes it as a separate
   argument from the lite username, and nothing requires it to be that username's base, so the
   preflight reads the reservation state of the reserved name — not of the base being claimed under —
   and only skips the extra read when the two are equal. The runtime validates that leg **before** it
@@ -344,7 +348,7 @@ Operational invariants an agent must respect when touching the code.
   out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
   rather than paying its fee eight times over.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
-  a startup abort: `DOTNS_GATEWAY_ENABLED` on with no `ASSET_HUB_RPC_URL`, a config error knowable
+  a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the
   first pass, not at boot, so an unreachable endpoint — an RPC bounce, a DNS blip, maintenance —
   leaves rows in `PENDING` and keeps People attesting, instead of crash-looping the process. The
@@ -370,8 +374,16 @@ Operational invariants an agent must respect when touching the code.
   configures it separately. Both pallets see that same account as the attester — under
   `Proxy.proxy(real = P)`, `P` is what `GET /api/v1/attester` returns, on People and Asset Hub
   alike.
+- **The target runtime is a build input.** `DUB_NETWORK` (`testnet` — the default, covering
+  previewnet and paseo-next-v2, which run one runtime — or `polkadot`) is read by
+  `crates/chain-types/build.rs`, which every crate that compiles differently per network shares. It
+  picks the vendored blob the People types are generated from, and it decides whether invite-tickets
+  exists: the `polkadot` runtime has no `Game` or
+  `ProofOfInk`, so there the crate compiles to nothing and `dub` has no invite-tickets roles. The
+  signing path, the transaction-extension tuples and the edge route table are the same on every
+  network (the tuples are the union of every known runtime's extensions).
 - **`chain-types` is the only place chain types live.** Static codegen from vendored metadata at
-  `crates/chain-types/metadata/people.scale`; online transport + signing live in
+  `crates/chain-types/metadata/metadata.<network>.scale`; online transport + signing live in
   `device-attestation::chain`, never in `chain-types`. Regenerate with the `subxt metadata …` command
   at the top of `crates/chain-types/src/lib.rs`. It holds one subxt config per chain family,
   `PeopleConfig` and `AssetHubConfig`. Their transaction-extension sets differ, and a merged
@@ -445,5 +457,8 @@ Operational invariants an agent must respect when touching the code.
   eligibility): the authoritative "New JWT / Integrity / PoUD / Username Claim Logic" spec — covers
   Android TEE attestation (`POST /auth/android/attestation`), PoUD (Android `{androidId, widevineId}`
   / iOS DeviceCheck), the INSTANT / PAYMENT_REQUIRED / QUEUED decision flow, the balance-priority
-  queue (G1<10 … G4≥1000), QR-voucher bypass, and `/usernames/payment-status` +
-  `/registration/queue`. Digest it fully before implementing the attestation/eligibility plan.
+  queue (G1<10 … G4≥1000), QR-voucher bypass, and `/registration/queue`. Digest it fully before
+  implementing the attestation/eligibility plan. **Divergence:** the spec's paid lane (deposit
+  quotes, `/usernames/payment-status`) is deliberately not part of this design. `PAYMENT_REQUIRED`
+  is a terminal "device not eligible" outcome that keeps the spec's wire value for client
+  compatibility.

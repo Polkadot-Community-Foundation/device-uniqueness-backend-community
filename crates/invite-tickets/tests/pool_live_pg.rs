@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
+#![cfg(invite_tickets)]
+
 use std::time::Duration;
 
 use invite_tickets::pool::{acquire_tick_lock, POOL_LOCK_KEY};

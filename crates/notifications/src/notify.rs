@@ -126,11 +126,13 @@ pub async fn handle(
 
     // Abuse control keyed on the authenticated subject + route (never raw IP).
     let rate_key = format!("{NOTIFY_ROUTE}:{}", auth.subject);
-    if !state.limiter.allow(&rate_key) {
-        return Err(AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
-        });
-    }
+    let () = state
+        .limiter
+        .allow(rate_key)
+        .await
+        .map_err(|err| AppError::RateLimited {
+            retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
+        })?;
 
     let platform = platform::detect(&request.device_token, request.platform);
     let push = PushRequest {

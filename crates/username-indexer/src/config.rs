@@ -22,7 +22,9 @@ pub struct Config {
     pub people_rpc_url: String,
     /// Maximum number of storage entries requested and written per page.
     pub storage_page_size: u32,
-    /// Poll interval, in seconds, for new finalized blocks.
+    /// Longest the sync loop waits without a best-block header, in seconds,
+    /// before forcing a pass anyway. Not a poll interval — the timer resets on
+    /// every header, so on a healthy subscription it never fires.
     pub sync_interval_secs: u32,
     /// Requests per window per client IP on the public search route.
     pub search_rate_limit: u32,
@@ -30,6 +32,7 @@ pub struct Config {
     pub search_rate_limit_window_secs: u32,
     /// Required leading zero bits in a puzzle solution (1–32).
     pub poc_difficulty_bits: u8,
+    pub speculative_indexing: bool,
     /// Input keying material for the puzzle HMAC.
     ///
     /// `Some` exactly when `POC_ENABLED=true`, which is what mounts the gate and
@@ -105,6 +108,8 @@ impl Config {
             });
         }
 
+        let speculative_indexing = parse_bool(&get, "SPECULATIVE_INDEXING_ENABLED", true)?;
+
         let poc_enabled = parse_bool(&get, "POC_ENABLED", false)?;
         let poc_difficulty_bits = parse(
             "POC_DIFFICULTY_BITS",
@@ -147,6 +152,7 @@ impl Config {
             sync_interval_secs,
             search_rate_limit,
             search_rate_limit_window_secs,
+            speculative_indexing,
             poc_difficulty_bits,
             poc_hmac_secret,
         })

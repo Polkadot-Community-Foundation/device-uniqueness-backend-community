@@ -22,6 +22,7 @@ subxt-rpcs.workspace = true
 
 tokio.workspace = true
 axum.workspace = true
+futures = "0.3"
 tower-http = { version = "0.6", features = ["trace", "timeout", "request-id"] }
 tracing.workspace = true
 serde.workspace = true

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use http_common::RateLimiter;
+use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 
 use crate::config::{Config, ProofConfig};
 use crate::credentials::Issuer;
@@ -52,11 +52,17 @@ impl ProofState {
         alias_limit: u32,
         rate_window: std::time::Duration,
     ) -> Self {
+        let alias_limiter: RateLimiter = RateLimiter::new(
+            RateLimiterConfig::default()
+                .set_window_secs(rate_window.as_secs())
+                .set_max_burst(alias_limit),
+        )
+        .expect("rate limiter config validated during startup");
         Self {
             freshness: crate::proof::message::Freshness::new(crate::config::PROOF_MAX_SKEW_SECS),
             contexts: config.contexts.clone(),
             roots,
-            alias_limiter: RateLimiter::new(alias_limit, rate_window),
+            alias_limiter,
             permits: Arc::new(tokio::sync::Semaphore::new(config.concurrency)),
             waiters: Arc::new(tokio::sync::Semaphore::new(MAX_PERMIT_WAITERS)),
         }
@@ -65,20 +71,28 @@ impl ProofState {
 
 impl AppState {
     pub fn new(config: Config) -> Self {
-        let limiter = RateLimiter::new(config.rate_limit, config.rate_window);
+        let limiter: RateLimiter = RateLimiter::new(
+            RateLimiterConfig::default()
+                .set_window_secs(config.rate_window.as_secs())
+                .set_max_burst(config.rate_limit),
+        )
+        .expect("rate limiter config validated during startup");
+
         let issuer = Issuer::new(
             config.turn_secret.clone(),
             config.algorithm,
             config.ttl_secs,
         );
-        let proof = config.proof.as_ref().map(|proof_config| {
-            Arc::new(ProofState::new(
+        let proof = if let Some(ref proof_config) = config.proof {
+            Some(Arc::new(ProofState::new(
                 proof_config,
                 RootCaches::empty(),
                 config.rate_limit,
                 config.rate_window,
-            ))
-        });
+            )))
+        } else {
+            None
+        };
         Self {
             issuer: Arc::new(issuer),
             verifier: Arc::new(config.jwt_verifier.clone()),

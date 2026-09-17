@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
+use http_common::rate_limiter;
 use serde_json::{json, Value};
 
 use notifications::{
@@ -44,7 +44,8 @@ async fn spawn_limited(
     limit: u32,
 ) -> String {
     let verifier = Verifier::from_public_key(None, signing_key().verifying_key().as_bytes());
-    let limiter = RateLimiter::new(limit, Duration::from_secs(60));
+    let limiter = RateLimiter::new(rate_limiter::Config::default().set_max_burst(limit))
+        .expect("rate limiter config validated during startup");
     let state = AppState::new(verifier, apns, fcm, limiter);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

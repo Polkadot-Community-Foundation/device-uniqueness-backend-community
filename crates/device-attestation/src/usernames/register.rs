@@ -22,7 +22,7 @@ use crate::{
     device_check::{self, Decision},
     eligibility,
     http::state::AppState,
-    payment, queue,
+    queue,
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
@@ -97,7 +97,7 @@ pub struct RegisterRequest {
     dotns: Option<Dotns>,
 }
 
-/// Optional DotNS reservation, parking a base label for later full-person use.
+/// Optional DotNS reservation, parking a base label for later personhood use.
 #[derive(Deserialize, ToSchema)]
 #[allow(dead_code)]
 pub(crate) struct Dotns {
@@ -108,7 +108,7 @@ pub(crate) struct Dotns {
     #[serde(rename = "signedAt")]
     #[schema(rename = "signedAt", example = 1780000000i64)]
     signed_at: i64,
-    /// The bare full-person name to reserve. Its own name on chain — it need
+    /// The bare personhood name to reserve. Its own name on chain — it need
     /// not be `username`, and availability is checked against *this* name, not
     /// against the base of the lite username in the same claim.
     #[serde(rename = "reservedUsername")]
@@ -130,7 +130,7 @@ pub struct RegisterResponse {
     pub username: String,
     /// Present only when the DeviceCheck free-slot gate ran and produced an
     /// advisory availability (`Register`/`Proceed`); omitted when DeviceCheck
-    /// is disabled or the outcome short-circuited (payment/token/unavailable).
+    /// is disabled or the outcome short-circuited (ineligible/token/unavailable).
     #[serde(
         rename = "device_check_available",
         skip_serializing_if = "Option::is_none"
@@ -160,7 +160,6 @@ const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
 const MSG_DIGITS: &str = "Digits must be between 01-99";
 const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
 const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
-const MSG_DOTNS_DISABLED: &str = "dotNS gateway is not enabled in this environment.";
 /// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
 const MAX_DOTNS_LABEL_LEN: usize = 32;
 const PATTERN_BASE: &str = "^([a-z]{6,})$";
@@ -185,15 +184,14 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
           to the writer and the body carries `registrationOutcome: \"INSTANT\"`.",
          body = RegisterResponse,
          example = json!({ "base_username": "tallesx", "digits": "07", "username": "tallesx.07" })),
-        (status = 200, description = "The device must pay to register (hard-mode DeviceCheck: free \
-            slot already used, or — with the payment lane on — a missing device token). Not an \
-            error — a 200 outcome. With `PAYMENT_LANE_ENABLED` the body carries the deposit \
-            instructions (`paymentAddress`, `amountRequired` in planck as a string) and the claim \
-            is stored; registration proceeds automatically on the confirmed deposit (poll \
-            `GET /api/v1/usernames/payment-status`). Lane off: the bare outcome, no payment path.",
+        (status = 200, description = "The device is not eligible for a free registration: \
+            hard-mode DeviceCheck found its free slot already used, enforced Widevine dedup found \
+            the device already recorded or the Android claim carried no evidence, or a concurrent \
+            claim won the device's slot. Not an error — a 200 outcome, and a terminal one: no \
+            claim is stored and there is no paid alternative. The value `PAYMENT_REQUIRED` is \
+            historical (the retired paid lane) and kept for client compatibility.",
          body = serde_json::Value,
-         example = json!({ "registrationOutcome": "PAYMENT_REQUIRED",
-                           "paymentAddress": "5F...", "amountRequired": "10000000000" })),
+         example = json!({ "registrationOutcome": "PAYMENT_REQUIRED" })),
         (status = 400, description = "Validation failed (with per-field `fields`), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
@@ -206,19 +204,18 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
              "fields": [{ "field": "candidateSignature", "message": "Invalid signature." }]
          })),
         (status = 401, description = "Missing or invalid bearer token, \
-            or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present (payment \
-            lane off — with `PAYMENT_LANE_ENABLED` a missing token resolves to the 200 \
-            PAYMENT_REQUIRED outcome instead).",
+            or hard-mode DeviceCheck required a usable Device-Token-iOS and none was present.",
          body = serde_json::Value),
         (status = 403, description = "Device evidence failed verification under \
             `WIDEVINE_DEDUP_ENFORCE`: chain policy, the cert-bound evidence hash (challenge / \
             account / deviceId), or a spent challenge. The specific reason is logged \
             server-side, never returned. Retryable once \
-            with a fresh challenge; repeated failure surfaces as the paid lane.",
+            with a fresh challenge; a claim retried without evidence gets the 200 ineligible \
+            outcome.",
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
         (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
-            the claim carries `dotns.reservedUsername` for a full-person name that is already owned \
+            the claim carries `dotns.reservedUsername` for a personhood name that is already owned \
             or whose reservation queue is full — checked against the reserved name itself, which \
             `attest` takes as its own argument and which need not be `username`. The runtime checks \
             that leg *before* it writes the lite username, and the consumer signature covers it, so \
@@ -247,7 +244,7 @@ pub async fn register(
     headers: HeaderMap,
     body: Bytes,
 ) -> UsernamesResult<Response> {
-    super::check_rate_limit(&state, &auth.subject)?;
+    let () = super::check_rate_limit(&state, &auth.subject).await?;
     validate_device_token_header(&headers)?;
 
     let value = super::parse_json_body(&body)?;
@@ -274,7 +271,6 @@ pub async fn register(
     let digits = format!("{digit:02}");
     let full_username = format!("{}.{digits}", parsed.username);
     let voucher = parsed.voucher.take();
-    let preferred_digits = parsed.preferred_digits.clone();
     let new = build_reservation(&auth, parsed, &digits, &full_username);
 
     // Voucher precedence (spec order): a submitted
@@ -328,28 +324,15 @@ pub async fn register(
             .into_response());
     }
 
-    // Spec FR-005: a non-store install routes straight to the payment
-    // outcome, without any device-identity check. Only consulted when the
-    // payment lane is on — the outcome must be payable, never a dead end —
-    // and only a definite `false` verdict routes: `None` (old token, no-op
-    // posture) passes while attestation soft mode lasts. Revisit that
-    // default together with the `ENFORCE_AUTH` hard flip (attestation plan
-    // Phase 5).
-    if state.config.payment.is_some() && auth.app_from_official_store == Some(false) {
-        return payment_required(&state, &auth, &new, preferred_digits.as_deref()).await;
-    }
-
     // The Android twin of the iOS DeviceCheck gate below.
     let widevine_device = match widevine_gate(&state, &auth, &value).await? {
         WidevineGate::Proceed(device) => device,
-        WidevineGate::PaymentRequired => {
-            return payment_required(&state, &auth, &new, preferred_digits.as_deref()).await;
-        }
+        WidevineGate::Ineligible => return Ok(device_ineligible()),
     };
 
     // DeviceCheck is Apple iOS uniqueness, so it gates only iOS requests —
-    // identified by the tamper-proof `plt` claim. A "seen device" resolves to a
-    // 200 PAYMENT_REQUIRED, never an error. This query only shapes the fast path:
+    // identified by the tamper-proof `plt` claim. A "seen device" resolves to
+    // the 200 ineligible outcome, never an error. This query only shapes the fast path:
     // the free slot is claimed under a serialized, re-checked advisory lock in
     // `reserve`, so concurrent requests cannot double-spend it.
     let is_ios = auth.platform.as_deref() == Some("ios");
@@ -359,21 +342,9 @@ pub async fn register(
                 let device_token = device_token_bytes(&headers);
                 let verdict = device_check::evaluate(client, device_token.as_deref()).await;
                 match device_check::decide_gate(verdict, state.config.enforce_auth) {
-                    // "Seen device" is the payment outcome, never an error.
-                    Decision::Blocked => {
-                        return payment_required(&state, &auth, &new, preferred_digits.as_deref())
-                            .await;
-                    }
-                    // Payment lane on: the spec's "no error codes for
-                    // unrecognized device tokens — these simply resolve to
-                    // PAYMENT_REQUIRED". Lane off: a 401.
-                    Decision::TokenRequired => {
-                        return if state.config.payment.is_some() {
-                            payment_required(&state, &auth, &new, preferred_digits.as_deref()).await
-                        } else {
-                            Err(UsernamesError::DeviceTokenRequired)
-                        };
-                    }
+                    // "Seen device" is the ineligible outcome, never an error.
+                    Decision::Blocked => return Ok(device_ineligible()),
+                    Decision::TokenRequired => return Err(UsernamesError::DeviceTokenRequired),
                     Decision::Unavailable(cause) => {
                         tracing::warn!(cause, "DeviceCheck unavailable (hard mode)");
                         return Err(UsernamesError::DeviceCheckUnavailable);
@@ -448,55 +419,22 @@ pub async fn register(
         }
         // Lost the claim race: a concurrent request took this device's free
         // slot. Same outcome as `Blocked` — a 200, never an error.
-        ReserveOutcome::DeviceAlreadyClaimed => {
-            payment_required(&state, &auth, &new, preferred_digits.as_deref()).await
-        }
+        ReserveOutcome::DeviceAlreadyClaimed => Ok(device_ineligible()),
     }
 }
 
-/// The PAYMENT_REQUIRED outcome. Lane off (`PAYMENT_LANE_ENABLED=false`):
-/// the bare body — a dead end, pinned by the parked
-/// `register-200-devicecheck-payment-required` fixture. Lane on: mint (or
-/// return) the subject's durable quote — the spec's deposit instructions;
-/// the Phase-3 watcher registers the stored claim once the deposit lands.
-async fn payment_required(
-    state: &AppState,
-    auth: &AuthSubject,
-    new: &NewReservation,
-    preferred_digits: Option<&str>,
-) -> UsernamesResult<Response> {
-    let Some(config) = state.config.payment.as_ref() else {
-        return Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({ "registrationOutcome": "PAYMENT_REQUIRED" })),
-        )
-            .into_response());
-    };
-    let payload = payment::ClaimPayload::from_reservation(new, preferred_digits);
-    let quote = payment::quote(&state.pool, config, &auth.subject, &payload)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, "payment quote failed");
-            UsernamesError::PersistenceFailed
-        })?;
-    tracing::info!(
-        subject = %auth.subject,
-        base = %new.base,
-        address = %quote.payment_address,
-        "payment quote issued"
-    );
-    Ok((
+/// The outcome for a device that already spent (or cannot prove) its free
+/// registration. The paid lane that once followed it is retired, so this is a
+/// dead end; the `PAYMENT_REQUIRED` wire value is kept because shipped clients
+/// match on it to show their "claim unavailable" screen.
+fn device_ineligible() -> Response {
+    (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "registrationOutcome": "PAYMENT_REQUIRED",
-            "paymentAddress": quote.payment_address,
-            // Planck as a string, pending the client-team unit ruling
-            // recorded in the plan.
-            "amountRequired": quote.amount_planck.to_string(),
-        })),
+        Json(serde_json::json!({ "registrationOutcome": "PAYMENT_REQUIRED" })),
     )
-        .into_response())
+        .into_response()
 }
+
 /// Advisory-lock key serializing hard-mode free-iOS DeviceCheck claims across
 /// replicas (device-attestation database namespace).
 const FREE_IOS_CLAIM_LOCK_KEY: i64 = 0x1DEA_DC01;
@@ -506,17 +444,17 @@ enum WidevineGate {
     /// Proceed on the standard lane; `Some` carries the device record to
     /// reserve atomically with the claim (enforced mode, unseen device).
     Proceed(Option<crate::widevine::store::PendingDevice>),
-    /// Route to the payment outcome: seen device, or an enforced Android
-    /// claim without acceptable evidence.
-    PaymentRequired,
+    /// Route to the ineligible outcome: seen device, or an enforced Android
+    /// claim without evidence.
+    Ineligible,
 }
 
 /// Evaluate the Widevine device evidence for this claim (wire spec v1).
 ///
 /// Gate off: the evidence fields are ignored. Soft mode: verdicts are logged
 /// and routing never changes. Enforced: malformed evidence is a 400, invalid
-/// evidence a 403, a seen device or an evidence-less Android claim the payment
-/// outcome, and an unseen device proceeds carrying its `PENDING` record.
+/// evidence a 403, a seen device or an evidence-less Android claim the
+/// ineligible outcome, and an unseen device proceeds carrying its `PENDING` record.
 ///
 /// The challenge is consumed only after evidence fully verifies, so malformed
 /// evidence cannot burn one and a CRL outage stays retryable. The challenge is
@@ -547,10 +485,10 @@ async fn widevine_gate(
         Err(verdict) => return reject(verdict),
     };
     let Some(raw) = raw else {
-        // No evidence. Enforced mode routes Android claims to the paid lane;
-        // other platforms have their own gates (iOS: DeviceCheck above).
+        // No evidence. Enforced mode rules Android claims ineligible; other
+        // platforms have their own gates (iOS: DeviceCheck below).
         if enforce && auth.platform.as_deref() == Some("android") {
-            return Ok(WidevineGate::PaymentRequired);
+            return Ok(WidevineGate::Ineligible);
         }
         return Ok(WidevineGate::Proceed(None));
     };
@@ -631,7 +569,7 @@ async fn widevine_gate(
         return Ok(WidevineGate::Proceed(None));
     }
     if seen {
-        return Ok(WidevineGate::PaymentRequired);
+        return Ok(WidevineGate::Ineligible);
     }
     Ok(WidevineGate::Proceed(Some(
         crate::widevine::store::PendingDevice {
@@ -655,8 +593,8 @@ enum ReserveOutcome {
 /// With a `widevine_device` (an enforced-mode fresh Android device) the device
 /// record is reserved `PENDING` in the same transaction as the claim: the
 /// unique `device_hmac` key is the race arbiter, so a concurrent claim
-/// for the same physical device yields `DeviceAlreadyClaimed` (mapped to a 200
-/// PAYMENT_REQUIRED) instead of a second free registration.
+/// for the same physical device yields `DeviceAlreadyClaimed` (mapped to the 200
+/// ineligible outcome) instead of a second free registration.
 ///
 /// With a `mark_token` (a hard-mode fresh iOS device) the whole claim is
 /// serialized under a transaction-scoped advisory lock, and Apple is re-queried
@@ -858,7 +796,7 @@ struct ParsedDotns {
     reserved_username: Option<String>,
 }
 
-/// The full-person name this claim asks to reserve, if it asks for one.
+/// The personhood name this claim asks to reserve, if it asks for one.
 fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
     parsed.dotns.as_ref()?.reserved_username.as_deref()
 }
@@ -1226,12 +1164,7 @@ fn validate_register(
         }
 
         if let Some((_signature, signed_at, reserved_username)) = &dotns {
-            if !config.dotns_gateway_enabled {
-                errors.push(FieldError {
-                    message: MSG_DOTNS_DISABLED.to_string(),
-                    field: "dotns".to_string(),
-                });
-            } else {
+            {
                 if let Some(signed_at) = signed_at {
                     let now = time::OffsetDateTime::now_utc().unix_timestamp();
                     let skew = config.dotns_max_future_skew_secs as i64;
@@ -1564,21 +1497,8 @@ mod tests {
     }
 
     #[test]
-    fn dotns_gating_and_freshness_use_the_captured_messages() {
-        let mut disabled = config();
-        disabled.dotns_gateway_enabled = false;
-        let mut body = valid_body();
+    fn dotns_freshness_uses_the_captured_messages() {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        body["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        match validate_register(&body, &disabled) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0].field, "dotns");
-                assert_eq!(errors[0].message, MSG_DOTNS_DISABLED);
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
-
         let enabled = config();
         let mut future = valid_body();
         future["dotns"] =
@@ -1651,6 +1571,25 @@ mod tests {
 
         let parsed = validate_register(&body, &config).expect("valid");
         assert_eq!(reserved_name(&parsed), Some("reservedname"));
+    }
+
+    /// Shipped clients match on this exact body to show their "claim
+    /// unavailable" screen, so it must stay a bare 200 with nothing else.
+    #[tokio::test]
+    async fn an_ineligible_device_gets_the_bare_payment_required_outcome() {
+        use http_body_util::BodyExt as _;
+
+        let response = device_ineligible();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read body")
+            .to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body, json!({ "registrationOutcome": "PAYMENT_REQUIRED" }));
     }
 
     /// The 409 names the name that was actually checked — the reserved one,

@@ -1,23 +1,60 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! PCF fork: the blob is generated from the public `people-paseo` (products devnet), e.g.
-//! `--url wss://people-paseo.rotko.net`. Refresh with:
-//! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Game,ProofOfInk,Members -f bytes -o crates/chain-types/metadata/people.scale`
+//! Generated People Chain types for the network this build targets.
+//!
+//! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
+//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `polkadot` (polkadot-test). Each has its own vendored blob,
+//! `metadata/metadata.<network>.scale`. Refresh one with:
+//! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
+//! where `<pallets>` is `System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members`,
+//! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
+//!
+//! PCF fork: `paseo` is the PCF products devnet, generated from the public
+//! `people-paseo` (e.g. `--url wss://people-paseo.rotko.net`), with `Game,ProofOfInk`.
 
 use subxt::config::transaction_extensions as tx_ext;
 
 #[allow(clippy::all, missing_docs, rustdoc::all)]
-#[subxt::subxt(runtime_metadata_path = "metadata/people.scale")]
+#[cfg_attr(
+    dub_network = "testnet",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.testnet.scale")
+)]
+#[cfg_attr(
+    dub_network = "polkadot",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
+)]
+#[cfg_attr(
+    dub_network = "paseo",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.paseo.scale")
+)]
 pub mod people {}
 
 pub use subxt;
+
+/// The network this build targets.
+pub const NETWORK: &str = env!("DUB_NETWORK");
+
+/// The vendored blob [`people`] is generated from, relative to the workspace root.
+pub const METADATA_FILE: &str = concat!(
+    "crates/chain-types/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+);
+
+static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+));
 
 /// The vendored metadata [`people`] is generated from, decoded once.
 static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
     std::sync::LazyLock::new(|| {
         std::sync::Arc::new(
-            subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+            subxt::Metadata::decode_from(METADATA_BYTES)
                 .expect("vendored People Chain metadata decodes"),
         )
     });
@@ -180,9 +217,6 @@ pub type PeopleTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
-    // Declared by `people-paseo` (the PCF products devnet, Paseo People 1004);
-    // absent from `next-people-paseo`. Resolved by name, so a runtime without
-    // it is unaffected.
     tx_ext::CheckMetadataHash,
     Noop<StorageWeightReclaim>,
 );
@@ -203,6 +237,7 @@ delegating_config! {
 pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
+    Noop<VerifyMultiSignature>,
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
@@ -217,9 +252,6 @@ pub type AssetHubTransactionExtensions<T> = (
     tx_ext::CheckNonce,
     Noop<CheckWeight>,
     tx_ext::ChargeAssetTxPayment<T>,
-    // Declared by the public `asset-hub-paseo` (the PCF products devnet, AH
-    // 1000): the claims pallet's unit-payload extension. Not on the `next-`
-    // Asset Hubs.
     Noop<PrevalidateAttests>,
     tx_ext::CheckMetadataHash,
     Noop<EthSetOrigin>,
@@ -229,7 +261,7 @@ pub type AssetHubTransactionExtensions<T> = (
 extrinsic_params_builder! {
     AssetHubExtrinsicParamsBuilder<AssetHubConfig> => AssetHubTransactionExtensions,
     |mortality, nonce, tip| (
-        (), (), (), (), (), (), (), (), (), (), (), (),
+        (), (), (), (), (), (), (), (), (), (), (), (), (),
         mortality, nonce, (), tip, (), (), (), (),
     )
 }
@@ -328,6 +360,7 @@ noop_names! {
     AsScarcity = &[0],
     AsDotnsGateway = &[0],
     EthSetOrigin,
+    VerifyMultiSignature = &[0],
     PrevalidateAttests,
 }
 
@@ -366,6 +399,7 @@ mod tests {
     const ASSET_HUB_TUPLE_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "AuthorizeValueTransfer",
+        "VerifyMultiSignature",
         "AuthorizeCall",
         "AsPgas",
         "AsRingAlias",
@@ -386,75 +420,9 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    struct KnownRuntime {
-        env: &'static str,
-        spec_name: &'static str,
-        spec_version: u32,
-        tuple: &'static [&'static str],
-        extensions: &'static [&'static str],
-    }
-
-    /// What the public `people-paseo` 2005001 (PCF products devnet, Paseo
-    /// People 1004, Paseo runtimes v2.5.1) declares, in order — unchanged
-    /// from 2004003. Kept so a binary pointed at a node still on v2.5.1
-    /// signs; the vendored `people.scale` now comes from 2005002, see
-    /// [`PEOPLE_DEVNET_V252_EXTENSIONS`].
-    const PEOPLE_DEVNET_EXTENSIONS: &[&str] = &[
-        "AuthorizeValueTransfer",
-        "VerifyMultiSignature",
-        "AsPerson",
-        "AsProofOfInkParticipant",
-        "ScoreAsParticipant",
-        "GameAsInvited",
-        "PeopleLiteAuth",
-        "AsMember",
-        "AsCoinage",
-        "AsResources",
-        "HonourAuth",
-        "AuthorizeCall",
-        "RestrictOrigins",
-        "CheckNonZeroSender",
-        "CheckSpecVersion",
-        "CheckTxVersion",
-        "CheckGenesis",
-        "CheckMortality",
-        "CheckNonce",
-        "CheckWeight",
-        "ChargeAssetTxPayment",
-        "CheckMetadataHash",
-        "StorageWeightReclaim",
-    ];
-
-    /// What the public `asset-hub-paseo` 2005000 (PCF products devnet, AH
-    /// 1000, Paseo runtimes v2.5.0) declares, in order. `AsRingAlias` is
-    /// gone relative to 2004002; the tuple still names it, harmlessly.
-    const ASSET_HUB_DEVNET_EXTENSIONS: &[&str] = &[
-        "AuthorizeValueTransfer",
-        "AuthorizeCall",
-        "AsPgas",
-        "AsDotnsGateway",
-        "RestrictOrigins",
-        "CheckNonZeroSender",
-        "CheckSpecVersion",
-        "CheckTxVersion",
-        "CheckGenesis",
-        "CheckMortality",
-        "CheckNonce",
-        "CheckWeight",
-        "ChargeAssetTxPayment",
-        "PrevalidateAttests",
-        "CheckMetadataHash",
-        "EthSetOrigin",
-        "StorageWeightReclaim",
-    ];
-
-    /// What the public `people-paseo` 2005002 (Paseo runtimes v2.5.2)
-    /// declares, in order. v2.5.2 removes the W3S `AuthorizeValueTransfer`
-    /// extension, so slot 0 of the origin-modifier tuple is the unit
-    /// extension and the metadata names `UnitTransactionExtension` there;
-    /// the other 22 are as in 2005001. The vendored `people.scale` is
-    /// generated from this runtime (from the released wasm, ahead of
-    /// enactment).
+    /// PCF fork: what the public `people-paseo` 2005002 (the PCF products
+    /// devnet, Paseo runtimes v2.5.2) declares, in order. `metadata.paseo.scale`
+    /// is generated from this runtime.
     const PEOPLE_DEVNET_V252_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "VerifyMultiSignature",
@@ -481,9 +449,7 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    /// What the public `asset-hub-paseo` 2005002 (Paseo runtimes v2.5.2)
-    /// declares, in order: 2005000 with `AuthorizeValueTransfer` replaced by
-    /// `UnitTransactionExtension` in slot 0.
+    /// PCF fork: what the public `asset-hub-paseo` 2005002 declares, in order.
     const ASSET_HUB_DEVNET_V252_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "AuthorizeCall",
@@ -503,6 +469,14 @@ mod tests {
         "EthSetOrigin",
         "StorageWeightReclaim",
     ];
+
+    struct KnownRuntime {
+        env: &'static str,
+        spec_name: &'static str,
+        spec_version: u32,
+        tuple: &'static [&'static str],
+        extensions: &'static [&'static str],
+    }
 
     /// What `next-people-paseo` 3000000 declares, in order. paseo-next-v2 and
     /// previewnet upgraded together and their metadata is identical, so one
@@ -532,6 +506,31 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    /// What `people-polkadot` 2005000 declares, in order (extension version 1,
+    /// the one subxt encodes with). Game and ProofOfInk are gone, and with
+    /// them their gates; `CheckMetadataHash` is new.
+    const PEOPLE_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "RestrictOrigins",
+        "AuthorizeCall",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
     /// What `next-asset-hub-paseo` 3000000 declares, in order. `AsRingAlias`
     /// is gone and `AsScarcity` took its place; the tuple carries both,
     /// because the runtimes below are still in the list.
@@ -550,6 +549,30 @@ mod tests {
         "CheckNonce",
         "CheckWeight",
         "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
+    /// What `statemint` 2005000 (the polkadot-test Asset Hub) declares, in
+    /// order (extension version 1). New against the Paseo Asset Hubs:
+    /// `VerifyMultiSignature` and `PrevalidateAttests`; `AsScarcity` is gone.
+    const ASSET_HUB_POLKADOT_2005000_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
         "CheckMetadataHash",
         "EthSetOrigin",
         "StorageWeightReclaim",
@@ -575,18 +598,18 @@ mod tests {
             extensions: ASSET_HUB_DEVNET_V252_EXTENSIONS,
         },
         KnownRuntime {
-            env: "products-devnet",
-            spec_name: "people-paseo",
-            spec_version: 2_005_001,
+            env: "polkadot-test",
+            spec_name: "people-polkadot",
+            spec_version: 2_005_000,
             tuple: TUPLE_EXTENSIONS,
-            extensions: PEOPLE_DEVNET_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
         },
         KnownRuntime {
-            env: "products-devnet asset hub",
-            spec_name: "asset-hub-paseo",
+            env: "polkadot-test asset hub",
+            spec_name: "statemint",
             spec_version: 2_005_000,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
-            extensions: ASSET_HUB_DEVNET_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
         },
         KnownRuntime {
             env: "paseo-next-v2 / previewnet",
@@ -754,10 +777,9 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            2_005_002,
+            VENDORED_VERSION.0,
             "the blob's own System::Version is what chain-client logs the live \
-             chain against, so refreshing the blob moves this number with it \
-             (PCF fork: vendored from the public people-paseo, the products devnet)"
+             chain against, so refreshing the blob moves this number with it"
         );
     }
 
@@ -794,6 +816,7 @@ mod tests {
         assert_eq!(call.call_name(), "register_lite_person");
     }
 
+    #[cfg(invite_tickets)]
     #[test]
     fn builds_set_invite_ticket_calls() {
         let ticket = subxt::utils::AccountId32([0u8; 32]);
@@ -806,6 +829,7 @@ mod tests {
         assert_eq!(poi.call_name(), "set_invite_ticket");
     }
 
+    #[cfg(invite_tickets)]
     #[test]
     fn builds_available_invites_queries() {
         let game = people::storage().game().available_invites();
@@ -817,8 +841,15 @@ mod tests {
         assert_eq!(poi.entry_name(), "AvailableInvites");
     }
 
+    #[cfg(dub_network = "polkadot")]
+    const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
+    #[cfg(dub_network = "testnet")]
+    const VENDORED_VERSION: (u32, u32) = (3_000_000, 5);
+    #[cfg(dub_network = "paseo")]
+    const VENDORED_VERSION: (u32, u32) = (2_005_002, 3);
+
     fn people_metadata() -> subxt::ArcMetadata {
-        subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+        subxt::Metadata::decode_from(METADATA_BYTES)
             .expect("vendored metadata decodes")
             .arc()
     }
@@ -826,8 +857,8 @@ mod tests {
     fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
-            spec_version: 3_000_000,
-            transaction_version: 5,
+            spec_version: VENDORED_VERSION.0,
+            transaction_version: VENDORED_VERSION.1,
             metadata: people_metadata(),
         }
     }

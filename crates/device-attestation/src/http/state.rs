@@ -3,17 +3,18 @@
 
 use std::sync::Arc;
 
+use http_common::rate_limiter::Config as RateLimiterConfig;
 use jwt_verify::Jwt;
 use sqlx::PgPool;
 
 use secrecy::ExposeSecret as _;
 
-use super::middleware::RateLimiter;
 use crate::auth::key_attest::crl::CrlCache;
 use crate::auth::play_integrity::google::GoogleDecoder;
 use crate::chain::PeopleChain;
 use crate::config::Config;
 use crate::device_check;
+use http_common::RateLimiter;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,7 +46,12 @@ impl http_common::HasJwtVerifier for AppState {
 
 impl AppState {
     pub fn new(pool: PgPool, chain: PeopleChain, jwt: Jwt, config: Config) -> Self {
-        let limiter = RateLimiter::new(config.auth_rate_limit, config.auth_rate_window);
+        let limiter = RateLimiter::new(
+            RateLimiterConfig::default()
+                .set_window_secs(config.auth_rate_window.as_secs())
+                .set_max_burst(config.auth_rate_limit),
+        )
+        .expect("rate limiter config validated during startup");
         let crl = CrlCache::new(
             config.android_crl_url.clone(),
             config.android_crl_cache_ttl,

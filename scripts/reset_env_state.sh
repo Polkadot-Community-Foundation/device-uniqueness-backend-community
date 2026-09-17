@@ -14,9 +14,6 @@
 #                                   filter. Left in place, a base with 100
 #                                   historical rows reports EXHAUSTED against an
 #                                   empty chain.
-#   deleted  payment_requests       deposit addresses and quotes denominated on
-#                                   the dead chain; any observed balance is gone
-#                                   with it.
 #   deleted  writer_lease           expires on its own, but clearing it lets the
 #                                   restarted writer claim immediately instead of
 #                                   waiting out a lease from before the reset.
@@ -162,7 +159,6 @@ count() {
 echo "project:        $project"
 echo "database:       $db_name (role $db_user)"
 echo "device-attestation rows:  username_reservations=$(count username_reservations)" \
-     "payment_requests=$(count payment_requests)" \
      "writer_lease=$(count writer_lease)"
 echo "preserved:      app_attest_keys=$(count app_attest_keys)" \
      "registration_vouchers=$(count registration_vouchers)"
@@ -190,13 +186,10 @@ compose stop device-attestation-chain-writer registration-queue >/dev/null 2>&1 
 deleted_reservations="$(device_attestation_psql \
   "WITH gone AS (DELETE FROM username_reservations RETURNING 1) SELECT count(*) FROM gone" \
   | tr -d '[:space:]')"
-deleted_payments="$(device_attestation_psql \
-  "WITH gone AS (DELETE FROM payment_requests RETURNING 1) SELECT count(*) FROM gone" \
-  | tr -d '[:space:]')"
 device_attestation_psql "DELETE FROM writer_lease" >/dev/null
 
 echo "deleted:        username_reservations=$deleted_reservations" \
-     "payment_requests=$deleted_payments writer_lease=all"
+     "writer_lease=all"
 
 if [[ "$include_indexer" == true ]]; then
   echo "stopping username-indexer…"

@@ -7,7 +7,7 @@ use anyhow::Context as _;
 
 use notifications::{
     routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, PushProvider,
-    RateLimiter, UnconfiguredProvider,
+    RateLimiter, RateLimiterConfig, UnconfiguredProvider,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -45,7 +45,13 @@ pub async fn run() -> anyhow::Result<()> {
 pub fn build_state(config: Config) -> anyhow::Result<AppState> {
     let apns = build_apns_provider()?;
     let fcm = build_fcm_provider()?;
-    let limiter = RateLimiter::new(config.rate_limit, config.rate_window);
+    let limiter = RateLimiter::new(
+        RateLimiterConfig::default()
+            .set_max_burst(config.rate_limit)
+            .set_window_secs(config.rate_window.as_secs()),
+    )
+    .expect("rate limiter config validated during startup");
+
     tracing::info!(
         limit = config.rate_limit,
         window_secs = config.rate_window.as_secs(),

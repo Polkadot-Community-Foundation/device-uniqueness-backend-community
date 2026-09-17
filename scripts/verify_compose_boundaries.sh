@@ -14,11 +14,13 @@ DB_URL_KEYS=(
   DATABASE_URL
 )
 
-rendered="$(docker compose config)"
+# `--profile '*'`: the boundaries hold for every service the file can start,
+# including the ones behind a profile (invite-tickets) that .env may leave off.
+rendered="$(docker compose --profile '*' config)"
 # Cleared so a shell still holding the local-run overrides (see the header of
 # gateway/docker-compose.yml) checks the committed defaults, not its own ports.
 rendered_gateway="$(EDGE_HTTP_PORT= EDGE_HTTPS_PORT= docker compose -f gateway/docker-compose.yml config)"
-rendered_debug="$(docker compose -f docker-compose.yml -f docker-compose.debug.yml config)"
+rendered_debug="$(docker compose --profile '*' -f docker-compose.yml -f docker-compose.debug.yml config)"
 # Same treatment as the gateway: cleared so a shell that republished a UI port
 # for itself is checked against the committed loopback defaults.
 rendered_observability="$(PROMETHEUS_PORT= GRAFANA_PORT= ALLOY_PORT= \
@@ -94,18 +96,6 @@ for service in device-attestation-api device-attestation-chain-writer username-i
   forbid_key "$service" INVITER_SIGNER_SURI
 done
 
-# The dotNS gateway lane has two halves that must agree, exactly like
-# QUEUE_ENABLED. device-attestation-api gates intake on the flag. device-attestation-chain-writer
-# submits DotnsGateway::reserve_name behind the same flag. A split value is the
-# intake-accepts-but-nothing-submits gap the lane exists to close. The flag is
-# therefore REQUIRED on both and forbidden everywhere else.
-require_key device-attestation-api DOTNS_GATEWAY_ENABLED
-require_key device-attestation-chain-writer DOTNS_GATEWAY_ENABLED
-for service in registration-queue username-indexer \
-               invite-tickets-api invite-tickets-pool turn-api; do
-  forbid_key "$service" DOTNS_GATEWAY_ENABLED
-done
-
 # Request-validation bounds are intake-only. They shape 400s, not extrinsics.
 for key in DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS DOTNS_MAX_FUTURE_SKEW_SECS; do
   require_key device-attestation-api "$key"
@@ -116,14 +106,16 @@ for key in DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS DOTNS_MAX_FUTURE_SKEW_SECS; do
 done
 
 # The Asset Hub connection and the attester identity belong to the writer. It is
-# the only process that submits there. ATTESTER_ACCOUNT names the authority on
+# the only process that submits there. The dotNS lane is not optional, so a
+# writer without ASSET_HUB_RPC_URL aborts at boot rather than running half a
+# registration. ATTESTER_ACCOUNT names the authority on
 # both chains and the writer derives proxying from it, so the two must be one
 # value. device-attestation-api needs it too, since it serves GET /api/v1/attester.
 # Nothing else does, and no other service opens an Asset Hub connection.
 require_key device-attestation-chain-writer ASSET_HUB_RPC_URL
 require_key device-attestation-chain-writer ATTESTER_ACCOUNT
 require_key device-attestation-api ATTESTER_ACCOUNT
-for service in registration-queue username-indexer \
+for service in device-attestation-api registration-queue username-indexer \
                invite-tickets-api invite-tickets-pool turn-api \
                notify-relay; do
   forbid_key "$service" ASSET_HUB_RPC_URL
@@ -261,7 +253,7 @@ require_key notify-relay NOTIFY_RATE_LIMIT_WINDOW_SECS
   for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
              INVITE_INVITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
              JWT_ED25519_PUBLIC_KEY APNS_PRIVATE_KEY APNS_PRIVATE_KEY_FILE \
-             FCM_SERVICE_ACCOUNT_JSON POC_HMAC_SECRET DOTNS_GATEWAY_ENABLED \
+             FCM_SERVICE_ACCOUNT_JSON POC_HMAC_SECRET \
              ASSET_HUB_RPC_URL DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS \
              DOTNS_MAX_FUTURE_SKEW_SECS; do
     forbid_key caddy "$key"

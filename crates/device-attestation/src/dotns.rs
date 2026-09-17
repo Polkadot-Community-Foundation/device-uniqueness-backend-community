@@ -26,8 +26,7 @@ pub const RESERVE_NAME_FIELDS: [&str; 6] = [
 #[error(
     "DotnsGateway::reserve_name shape mismatch: this writer builds [{expected}], \
      the connected Asset Hub declares [{found}]. This chain runs a different \
-     dotns-gateway; point ASSET_HUB_RPC_URL at one with the signed_at variant, \
-     or leave DOTNS_GATEWAY_ENABLED off for this environment."
+     dotns-gateway; point ASSET_HUB_RPC_URL at one with the signed_at variant."
 )]
 pub struct ReserveNameShapeError {
     /// Comma-separated argument names this writer encodes.

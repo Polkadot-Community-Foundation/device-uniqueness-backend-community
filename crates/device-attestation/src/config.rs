@@ -1,9 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::net::SocketAddr;
-use std::str::FromStr as _;
-use std::time::Duration;
+use std::{net::SocketAddr, str::FromStr as _, time::Duration};
 
 use chain_types::subxt::utils::AccountId32;
 use secrecy::{SecretBox, SecretString};
@@ -43,9 +41,6 @@ pub struct Config {
     /// `true` recognises `lifetimePoUDVoucher` on `POST /api/v1/usernames`;
     /// `false` (default) ignores the field, keeping the frozen wire.
     pub registration_vouchers_enabled: bool,
-    /// Whether registration accepts the optional `dotns` block (mirrors the
-    /// legacy `DOTNS_GATEWAY_ENABLED` gate and its captured 400 message).
-    pub dotns_gateway_enabled: bool,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -88,11 +83,6 @@ pub struct Config {
     /// Apple DeviceCheck (iOS uniqueness at username claim). `None` while
     /// `DEVICE_CHECK_IOS_ENABLED=false`; required key material otherwise.
     pub device_check: Option<DeviceCheckConfig>,
-    /// Payment lane (the eligibility slice's PAYMENT_REQUIRED quote). `None`
-    /// while `PAYMENT_LANE_ENABLED=false` — device-gate blocks then keep the
-    /// frozen bare `PAYMENT_REQUIRED` body (a dead end); enabled, blocks
-    /// return a deposit address + amount and store the claim for the watcher.
-    pub payment: Option<PaymentConfig>,
     /// Widevine dedup gate; `None` while `WIDEVINE_DEDUP_ENABLED=false`, in
     /// which case the evidence fields are ignored entirely.
     pub widevine: Option<WidevineConfig>,
@@ -107,21 +97,6 @@ pub struct WidevineConfig {
     /// 32-byte HMAC-SHA256 key (`WIDEVINE_DEDUP_HMAC_KEY`) pseudonymizing
     /// the client-hashed device id before storage.
     pub hmac_key: SecretBox<[u8; 32]>,
-}
-
-/// Payment-lane parameters (all required when `PAYMENT_LANE_ENABLED=true`).
-#[derive(Debug, Clone)]
-pub struct PaymentConfig {
-    /// Cold master account (`PAYMENT_MASTER_ACCOUNT`, SS58): deposit
-    /// addresses are its threshold-1 multisigs with a keyless per-subject
-    /// dummy; the service never holds a key for it or the deposits.
-    pub master_account: [u8; 32],
-    /// Required deposit per registration in planck
-    /// (`PAYMENT_AMOUNT_PLANCK`, > 0; must clear the existential deposit).
-    pub amount_planck: u64,
-    /// Quote lifetime (`PAYMENT_REQUEST_TTL_SECS`); an unpaid request past
-    /// this expires and the client must re-claim.
-    pub request_ttl: Duration,
 }
 
 /// Apple DeviceCheck key material and endpoint (legacy env names).
@@ -144,6 +119,17 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("environment variable {key} is invalid: {reason}")]
     Invalid { key: &'static str, reason: String },
+}
+
+impl From<http_common::config::ConfigError> for ConfigError {
+    fn from(e: http_common::config::ConfigError) -> Self {
+        match e {
+            http_common::config::ConfigError::Missing(key) => ConfigError::Missing(key),
+            http_common::config::ConfigError::Invalid { key, reason } => {
+                ConfigError::Invalid { key, reason }
+            }
+        }
+    }
 }
 
 impl Config {
@@ -229,11 +215,6 @@ impl Config {
             enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
-            // Defaults off in code while `.env.example` and `docker-compose.yml` ship it
-            // on: their PEOPLE_RPC_URL and ASSET_HUB_RPC_URL name the same network, which
-            // is what makes the lane safe. A bare process has no such pairing, so the
-            // fallback stays conservative. Must match the writer's default.
-            dotns_gateway_enabled: env_bool("DOTNS_GATEWAY_ENABLED", false)?,
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -262,7 +243,6 @@ impl Config {
             play_integrity_verification_key,
             google_credentials: parse_google_credentials()?,
             device_check: parse_device_check()?,
-            payment: parse_payment()?,
             widevine: parse_widevine()?,
         })
     }
@@ -286,7 +266,6 @@ impl Config {
             enforce_auth: false,
             queue_enabled: false,
             registration_vouchers_enabled: false,
-            dotns_gateway_enabled: true,
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),
@@ -302,7 +281,6 @@ impl Config {
             play_integrity_verification_key: None,
             google_credentials: None,
             device_check: None,
-            payment: None,
             widevine: None,
         }
     }
@@ -513,64 +491,6 @@ fn validate_device_check_pem(raw: &str) -> Result<String, ConfigError> {
         }
     })?;
     Ok(private_key_pem)
-}
-
-/// Parse the payment-lane block: `None` while `PAYMENT_LANE_ENABLED` is
-/// false; enabled, the master account and amount are required and validated
-/// (fail-fast — a mistyped master would quote unsweepable addresses).
-fn parse_payment() -> Result<Option<PaymentConfig>, ConfigError> {
-    if !env_bool("PAYMENT_LANE_ENABLED", false)? {
-        return Ok(None);
-    }
-    let master_raw = std::env::var("PAYMENT_MASTER_ACCOUNT")
-        .map(|v| v.trim().to_string())
-        .ok()
-        .filter(|v| !v.is_empty())
-        .ok_or(ConfigError::Missing("PAYMENT_MASTER_ACCOUNT"))?;
-    let master_account = decode_payment_master(&master_raw)?;
-    let amount_raw = std::env::var("PAYMENT_AMOUNT_PLANCK")
-        .map_err(|_| ConfigError::Missing("PAYMENT_AMOUNT_PLANCK"))?;
-    let amount_planck = decode_payment_amount(&amount_raw)?;
-    Ok(Some(PaymentConfig {
-        master_account,
-        amount_planck,
-        request_ttl: Duration::from_secs(parse_var("PAYMENT_REQUEST_TTL_SECS", "86400")?),
-    }))
-}
-
-/// Decode the cold master account from SS58.
-fn decode_payment_master(raw: &str) -> Result<[u8; 32], ConfigError> {
-    use std::str::FromStr as _;
-
-    Ok(subxt::utils::AccountId32::from_str(raw)
-        .map_err(|e| ConfigError::Invalid {
-            key: "PAYMENT_MASTER_ACCOUNT",
-            reason: format!("expected an SS58 address: {e}"),
-        })?
-        .0)
-}
-
-/// Decode the per-registration deposit: a positive planck amount that the
-/// quote row's BIGINT column can hold (refused at startup rather than letting
-/// the insert clamp or fail late).
-fn decode_payment_amount(raw: &str) -> Result<u64, ConfigError> {
-    let amount_planck: u64 = raw.trim().parse().map_err(|e| ConfigError::Invalid {
-        key: "PAYMENT_AMOUNT_PLANCK",
-        reason: format!("expected planck as an integer: {e}"),
-    })?;
-    if amount_planck == 0 {
-        return Err(ConfigError::Invalid {
-            key: "PAYMENT_AMOUNT_PLANCK",
-            reason: "must be greater than zero".to_string(),
-        });
-    }
-    if i64::try_from(amount_planck).is_err() {
-        return Err(ConfigError::Invalid {
-            key: "PAYMENT_AMOUNT_PLANCK",
-            reason: "must fit a signed 64-bit integer (database BIGINT)".to_string(),
-        });
-    }
-    Ok(amount_planck)
 }
 
 /// Parse the Widevine dedup block: `None` while `WIDEVINE_DEDUP_ENABLED` is
@@ -814,38 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn payment_master_decodes_ss58() {
-        let alice = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
-        let want: [u8; 32] =
-            hex::decode("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
-                .unwrap()
-                .try_into()
-                .unwrap();
-        assert_eq!(decode_payment_master(alice).unwrap(), want);
-
-        let err = decode_payment_master("not-an-address").unwrap_err();
-        assert!(
-            err.to_string().contains("expected an SS58 address"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn payment_amount_is_positive_and_bigint_safe() {
-        assert_eq!(
-            decode_payment_amount(" 1000000000 ").unwrap(),
-            1_000_000_000
-        );
-
-        let err = decode_payment_amount("0").unwrap_err();
-        assert!(err.to_string().contains("greater than zero"), "{err}");
-        let err = decode_payment_amount("ten").unwrap_err();
-        assert!(err.to_string().contains("expected planck"), "{err}");
-        let err = decode_payment_amount(&u64::MAX.to_string()).unwrap_err();
-        assert!(err.to_string().contains("signed 64-bit"), "{err}");
-    }
-
-    #[test]
     fn widevine_hmac_key_decodes_a_32_byte_key() {
         use base64::Engine as _;
         use secrecy::ExposeSecret as _;
@@ -929,17 +817,12 @@ mod tests {
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:8080");
         assert_eq!(config.jwt_issuer, "polkadot-app");
         assert!(!config.auth_enabled);
-        assert!(
-            !config.dotns_gateway_enabled,
-            "the gateway is opt-in; a minimal environment must not claim dotNS labels"
-        );
         let alice: [u8; 32] =
             hex::decode("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
                 .unwrap()
                 .try_into()
                 .unwrap();
         assert_eq!(config.attester_account, alice);
-        assert!(config.payment.is_none());
         assert!(config.device_check.is_none());
         assert!(config.widevine.is_none());
 

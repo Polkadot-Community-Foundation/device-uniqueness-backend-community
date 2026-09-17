@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::ss58;
 
@@ -123,6 +123,7 @@ pub(crate) async fn upsert(
             display_username = EXCLUDED.display_username,
             snapshot_hash = EXCLUDED.snapshot_hash,
             snapshot_number = EXCLUDED.snapshot_number,
+            speculative_from_block = NULL,
             updated_at = now()",
     )
     .bind(record.account_id.as_slice())
@@ -153,6 +154,123 @@ pub(crate) async fn delete_account(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn upsert_speculative(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &AssignedUsername,
+    best_number: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "INSERT INTO assigned_usernames (
+            account_id, account_id_ss58, identifier_key, lite_username, lite_base,
+            lite_digits, full_username, display_username, snapshot_hash, snapshot_number,
+            speculative_from_block
+         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $10)
+         ON CONFLICT (account_id) DO UPDATE SET
+            account_id_ss58 = EXCLUDED.account_id_ss58,
+            identifier_key = EXCLUDED.identifier_key,
+            lite_username = EXCLUDED.lite_username,
+            lite_base = EXCLUDED.lite_base,
+            lite_digits = EXCLUDED.lite_digits,
+            full_username = EXCLUDED.full_username,
+            display_username = EXCLUDED.display_username,
+            snapshot_hash = EXCLUDED.snapshot_hash,
+            snapshot_number = EXCLUDED.snapshot_number,
+            updated_at = now()
+         WHERE assigned_usernames.speculative_from_block IS NOT NULL
+           AND (
+                assigned_usernames.account_id_ss58,
+                assigned_usernames.identifier_key,
+                assigned_usernames.lite_username,
+                assigned_usernames.lite_base,
+                assigned_usernames.lite_digits,
+                assigned_usernames.full_username,
+                assigned_usernames.display_username
+           ) IS DISTINCT FROM (
+                EXCLUDED.account_id_ss58,
+                EXCLUDED.identifier_key,
+                EXCLUDED.lite_username,
+                EXCLUDED.lite_base,
+                EXCLUDED.lite_digits,
+                EXCLUDED.full_username,
+                EXCLUDED.display_username
+           )",
+    )
+    .bind(record.account_id.as_slice())
+    .bind(&record.account_id_ss58)
+    .bind(record.identifier_key.as_slice())
+    .bind(&record.lite_username)
+    .bind(&record.lite_base)
+    .bind(&record.lite_digits)
+    .bind(&record.full_username)
+    .bind(&record.display_username)
+    .bind(record.snapshot_hash.as_slice())
+    .bind(best_number)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn delete_if_speculative(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM assigned_usernames
+         WHERE account_id = $1 AND speculative_from_block IS NOT NULL",
+    )
+    .bind(account_id.as_slice())
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(crate) async fn finalized_accounts(
+    pool: &PgPool,
+    accounts: &[[u8; 32]],
+) -> Result<std::collections::BTreeSet<[u8; 32]>, sqlx::Error> {
+    if accounts.is_empty() {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let keys: Vec<&[u8]> = accounts.iter().map(|account| account.as_slice()).collect();
+    let rows = sqlx::query(
+        "SELECT account_id FROM assigned_usernames
+         WHERE speculative_from_block IS NULL AND account_id = ANY($1)",
+    )
+    .bind(&keys)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let bytes: Vec<u8> = row.try_get("account_id").ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect())
+}
+
+pub(crate) async fn speculative_accounts(pool: &PgPool) -> Result<Vec<[u8; 32]>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT account_id FROM assigned_usernames WHERE speculative_from_block IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let bytes: Vec<u8> = row.try_get("account_id").ok()?;
+            <[u8; 32]>::try_from(bytes.as_slice()).ok()
+        })
+        .collect())
+}
+
+pub async fn clear_speculative(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let result =
+        sqlx::query("DELETE FROM assigned_usernames WHERE speculative_from_block IS NOT NULL")
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected())
 }
 
 #[cfg(test)]

@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+# Compiles per DUB_NETWORK; the one script every such crate shares.
+build = "../chain-types/build.rs"
 
 [[bin]]
 name = "apidoc-gen"

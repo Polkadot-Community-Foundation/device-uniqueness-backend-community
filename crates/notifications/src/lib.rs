@@ -10,7 +10,7 @@ pub mod provider;
 
 pub use config::{Config, ConfigError};
 pub use http::{routes, AppState};
-pub use http_common::RateLimiter;
+pub use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 pub use jwt_verify::{JwtError, VerifiedClaims, Verifier};
 pub use notify::{NotifyResponse, PushError};
 pub use platform::Platform;

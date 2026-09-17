@@ -24,13 +24,21 @@ pub fn merged_doc() -> Value {
         .expect("device-attestation doc");
     let indexer =
         serde_json::to_value(username_indexer::openapi::ApiDoc::openapi()).expect("indexer doc");
+    #[cfg(invite_tickets)]
     let invites =
         serde_json::to_value(invite_tickets::openapi::ApiDoc::openapi()).expect("invites doc");
     let turn = serde_json::to_value(turn::openapi::ApiDoc::openapi()).expect("turn doc");
     let notify =
         serde_json::to_value(notifications::openapi::ApiDoc::openapi()).expect("notify doc");
 
-    for other in [&indexer, &invites, &turn, &notify] {
+    let others = [
+        &indexer,
+        #[cfg(invite_tickets)]
+        &invites,
+        &turn,
+        &notify,
+    ];
+    for other in others {
         merge_object(&mut base, other, "/paths");
         merge_object(&mut base, other, "/components/schemas");
         merge_array(&mut base, other, "/tags");
@@ -705,6 +713,7 @@ mod tests {
             "/api/v1/usernames",
             "/api/v1/usernames/available",
             "/api/v1/usernames/search",
+            #[cfg(invite_tickets)]
             "/api/v1/invitation-ticket/claim",
             "/api/v1/turn/issue",
             "/api/v1/notify",
@@ -737,6 +746,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(invite_tickets),
+        ignore = "the committed reference documents every surface, invite-tickets included"
+    )]
     fn committed_artifacts_are_in_sync() {
         let want_json = std::fs::read_to_string(openapi_json_path()).expect("read openapi.json");
         assert_eq!(

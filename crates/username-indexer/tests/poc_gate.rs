@@ -10,8 +10,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use http_body_util::BodyExt as _;
+use http_common::{rate_limiter, RateLimiter};
 use tower::ServiceExt as _;
-use username_indexer::http::middleware::RateLimiter;
 use username_indexer::poc::puzzle::{checksum_hex, derive_secret};
 use username_indexer::poc::solution::{leading_zero_bits, mine};
 use username_indexer::poc::{now_millis, Poc, Solution};
@@ -33,11 +33,12 @@ async fn dead_chain_client() -> PeopleChain {
             Json(serde_json::json!(format!("0x{}", "00".repeat(32))))
         })
         .build();
-    let backend = subxt::backend::LegacyBackend::builder().build(RpcClient::new(mock));
+    let rpc = RpcClient::new(mock);
+    let backend = subxt::backend::LegacyBackend::builder().build(rpc.clone());
     let client = subxt::OnlineClient::<chain_types::PeopleConfig>::from_backend(Arc::new(backend))
         .await
         .expect("offline client from mock backend");
-    PeopleChain::from_online(client)
+    PeopleChain::from_parts(client, rpc)
 }
 
 async fn app(gate: bool) -> axum::Router {
@@ -49,7 +50,7 @@ async fn app(gate: bool) -> axum::Router {
         pool,
         dead_chain_client().await,
         Freshness::new(),
-        RateLimiter::new(1_000, Duration::from_secs(60)),
+        RateLimiter::new(rate_limiter::Config::default().set_max_burst(1000)).unwrap(),
     );
     let state = if gate {
         state.with_poc(Poc::new(
