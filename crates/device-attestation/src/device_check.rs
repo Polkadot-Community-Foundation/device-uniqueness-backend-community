@@ -46,7 +46,7 @@ pub enum Decision {
     /// verdict). `None` = DeviceCheck said nothing (failed/inactive).
     Proceed { available: Option<bool> },
     /// Device already used its free registration (hard mode) — the caller
-    /// maps this to the PAYMENT_REQUIRED outcome, not an error.
+    /// maps this to the 200 ineligible outcome, not an error.
     Blocked,
     /// Hard mode requires a device token and none was usable.
     TokenRequired,

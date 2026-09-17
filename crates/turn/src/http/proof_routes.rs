@@ -146,11 +146,13 @@ pub(crate) async fn issue_with_proof(
     })?;
 
     // Keep the alias confined to private throttle and keyed-derivation inputs.
-    if !proof_state.alias_limiter.allow(&hex::encode(alias)) {
-        return Err(AppError::RateLimited {
-            retry_after_secs: proof_state.alias_limiter.window_secs(),
-        });
-    }
+    let () = proof_state
+        .alias_limiter
+        .allow(hex::encode(alias))
+        .await
+        .map_err(|err| AppError::RateLimited {
+            retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
+        })?;
 
     let credentials = state
         .issuer

@@ -21,6 +21,8 @@
 # the source tree but not a live database.
 
 FROM rust:1.95-bookworm AS builder
+# The People runtime this image targets: testnet or polkadot.
+ARG DUB_NETWORK=testnet
 WORKDIR /app
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

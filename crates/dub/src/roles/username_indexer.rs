@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
-use username_indexer::http::middleware::RateLimiter;
+use http_common::{rate_limiter, RateLimiter};
 use username_indexer::poc::{self, Poc};
 use username_indexer::sync::{self, Freshness, FreshnessSnapshot};
 use username_indexer::{db, ensure_seeded, routes, AppState, Config, PeopleChain};
@@ -62,6 +62,18 @@ pub async fn build_state(
     // than after the finalized bootstrap scan (which can take minutes).
     let poc = build_poc(config)?;
 
+    match username_indexer::try_projection_lock(&pool).await? {
+        Some(_lock) => {
+            let dropped = username_indexer::clear_speculative(&pool).await?;
+            if dropped > 0 {
+                tracing::info!(dropped, "cleared speculative rows left by a previous run");
+            }
+        }
+        None => tracing::info!(
+            "another instance holds the projection lock; leaving its speculative rows alone"
+        ),
+    }
+
     let freshness = Freshness::new();
     match ensure_seeded(&pool, &chain, config.storage_page_size).await? {
         Some(report) => {
@@ -97,9 +109,11 @@ pub async fn build_state(
     ));
 
     let limiter = RateLimiter::new(
-        config.search_rate_limit,
-        Duration::from_secs(config.search_rate_limit_window_secs.into()),
-    );
+        rate_limiter::Config::default()
+            .set_window_secs(config.search_rate_limit_window_secs.into())
+            .set_max_burst(config.search_rate_limit),
+    )
+    .expect("rate limiter config validated during startup");
     let mut state = AppState::new(pool.clone(), chain, freshness, limiter);
     if let Some(poc) = poc {
         tracing::info!(

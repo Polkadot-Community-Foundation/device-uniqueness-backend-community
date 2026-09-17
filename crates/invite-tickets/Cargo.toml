@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../chain-types/build.rs"
 autobins = false
 
 # invite-tickets is a library (domain: the invitation-ticket keypair pool +

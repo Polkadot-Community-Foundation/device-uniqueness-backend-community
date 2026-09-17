@@ -3,10 +3,10 @@
 
 use sqlx::PgPool;
 
-use super::middleware::RateLimiter;
 use crate::poc::Poc;
 use crate::sync::Freshness;
 use crate::PeopleChain;
+use http_common::RateLimiter;
 
 /// Cheap-to-clone database and People Chain handles for handlers.
 #[derive(Clone)]

@@ -10,6 +10,8 @@ name: Image
 # image lives under.
 #
 # Tag = YYYYMMDD-HHMMSS-<sha8>, the same shape the previous backend used.
+#
+# Built for DUB_NETWORK=paseo: the PCF products devnet (public people-paseo).
 
 on:
   push:
@@ -26,6 +28,7 @@ concurrency:
 
 env:
   IMAGE_REPO: us-docker.pkg.dev/polkadot-community-foundation/identity-backend/device-uniqueness-backend
+  DUB_NETWORK: paseo
 
 jobs:
   push:

@@ -38,8 +38,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-api"]
     restart: unless-stopped
@@ -76,16 +78,12 @@ services:
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
-      # On by default: the PEOPLE_RPC_URL and ASSET_HUB_RPC_URL defaults both
-      # name PreviewNet. That pairing IS the safety property. Split
-      # across two networks, the writer would claim LiteLabelOwner on one for
-      # usernames attested on another: a global claim, and unrecoverable,
+      # The PEOPLE_RPC_URL and ASSET_HUB_RPC_URL
+      # defaults both name PreviewNet, and that pairing IS the safety property:
+      # split across two networks, the writer would claim LiteLabelOwner on one
+      # for usernames attested on another — a global claim, and unrecoverable,
       # because only the client can re-sign. An environment that overrides
-      # PEOPLE_RPC_URL to another network MUST also repoint ASSET_HUB_RPC_URL to
-      # that environment, or set DOTNS_GATEWAY_ENABLED=false in the same .env.
-      # Both halves move together; intake accepting blocks the writer never
-      # submits is the other gap this pair closes.
-      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
+      # PEOPLE_RPC_URL MUST repoint ASSET_HUB_RPC_URL in the same .env.
       DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: ${DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS:-600}
       # Matches the gateway pallet's MaxFutureSkewSeconds; see .env.example.
       DOTNS_MAX_FUTURE_SKEW_SECS: ${DOTNS_MAX_FUTURE_SKEW_SECS:-30}
@@ -117,8 +115,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "device-attestation-chain-writer"]
     restart: unless-stopped
@@ -144,20 +144,16 @@ services:
       CHAIN_WRITER_BATCH_SIZE: ${CHAIN_WRITER_BATCH_SIZE:-25}
       CHAIN_WRITER_FINALIZE_SECS: ${CHAIN_WRITER_FINALIZE_SECS:-120}
       CHAIN_WRITER_MAX_ATTEMPTS: ${CHAIN_WRITER_MAX_ATTEMPTS:-8}
-      # dotNS gateway lane (Asset Hub). On by default, and must match
-      # device-attestation-api's DOTNS_GATEWAY_ENABLED. That side gates intake, this side
-      # submits. A split value means blocks are accepted that nothing ever
-      # writes. On + no ASSET_HUB_RPC_URL = startup abort, by design; every
-      # other dotNS failure parks the lane rather than the writer, including a
-      # reserve_name shape the connected runtime does not match.
+      # dotNS gateway lane (Asset Hub). Not optional: no ASSET_HUB_RPC_URL is a
+      # startup abort. Every dotNS failure after that parks the lane rather than
+      # the writer, including a reserve_name shape the connected runtime does
+      # not match.
       # ATTESTER_ACCOUNT above covers both chains: proxying is derived from it,
       # so the account clients bind their signatures to is this writer's
       # signing origin by construction.
       # The URL below must name the Asset Hub of the same network PEOPLE_RPC_URL
       # points at, or the writer claims labels on the wrong chain. Both default
-      # to PreviewNet; an environment that moves one moves the other, or turns
-      # the lane off explicitly.
-      DOTNS_GATEWAY_ENABLED: ${DOTNS_GATEWAY_ENABLED:-true}
+      # to PreviewNet; an environment that moves one moves the other.
       ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
       # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
       # drained here (stranded-queue warning only); off = janitor drain.
@@ -195,8 +191,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "registration-queue"]
     restart: unless-stopped
@@ -245,8 +243,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "username-indexer"]
     restart: unless-stopped
@@ -261,6 +261,7 @@ services:
       PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
+      SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}
       SEARCH_RATE_LIMIT: ${SEARCH_RATE_LIMIT:-60}
       SEARCH_RATE_LIMIT_WINDOW_SECS: ${SEARCH_RATE_LIMIT_WINDOW_SECS:-60}
       # Proof-of-compute gate on public search, OFF by default. When enabled the
@@ -296,10 +297,16 @@ services:
       # a health failure during it would restart the scan from the beginning.
       start_period: 300s
 
+  # The invite-tickets services run under the `invite-tickets` profile
+  # (COMPOSE_PROFILES=invite-tickets): only networks whose People runtime still
+  # has Game and ProofOfInk have them, and an image built for any other
+  # DUB_NETWORK rejects both roles. See .env.example, "network".
+  #
   # invite-tickets owns its persistence independently: the ticket-pool table
   # holds private keys and must share nothing with the device-attestation DB.
   invite-tickets-postgres:
     image: postgres:16-alpine
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     environment:
       POSTGRES_USER: invite_tickets
@@ -320,10 +327,13 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "invite-tickets-api"]
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     depends_on:
       invite-tickets-postgres:
@@ -368,10 +378,13 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "invite-tickets-pool"]
+    profiles: ["invite-tickets"]
     restart: unless-stopped
     depends_on:
       invite-tickets-postgres:
@@ -414,8 +427,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "turn-api"]
     restart: unless-stopped
@@ -471,8 +486,10 @@ services:
     build:
       context: .
       target: dub
+      args:
+        DUB_NETWORK: ${DUB_NETWORK:-testnet}
     image: ${IMAGE_REPO:-device-uniqueness-backend}:${IMAGE_TAG:-local}
-    # One image, eight roles: this line is what makes the container this
+    # One image, one role per service: this line is what makes the container this
     # service. verify_role_split.sh checks it against `dub --list-roles`.
     command: ["--role", "notify-relay"]
     restart: unless-stopped

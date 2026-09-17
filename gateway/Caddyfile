@@ -43,16 +43,10 @@
 		file_server
 	}
 
-	# GET username reads belong to the indexer — EXCEPT the payment-status poll, which is
-	# device-attestation-api's, and except every non-GET method (the write and availability surface,
-	# and the collection-root CORS preflight). A plain path-prefix rule can express neither
-	# carve-out; this is why the Traefik emitter renders an IngressRoute rather than an Ingress.
-	@username_reads {
-		method GET
-		path /api/v1/usernames /api/v1/usernames/*
-		not path /api/v1/usernames/payment-status
-	}
-	handle @username_reads {
+	# Username search is the indexer's only route under /api/v1/usernames; the rest of that
+	# prefix (the claim and availability writes, their CORS preflight) falls through to
+	# device-attestation-api.
+	handle /api/v1/usernames/search* {
 		reverse_proxy {args[1]}
 	}
 

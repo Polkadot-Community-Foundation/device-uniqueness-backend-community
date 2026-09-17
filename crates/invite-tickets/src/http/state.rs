@@ -7,6 +7,7 @@ use http_common::RateLimiter;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use http_common::rate_limiter::Config as RateLimiterConfig;
 
 /// There is **no chain client here**: the claim path is DB + signing only. All
 /// chain interaction lives in the single-instance pool-maintainer binary.
@@ -23,7 +24,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: PgPool, config: Config) -> Self {
-        let limiter = RateLimiter::new(config.rate_limit, config.rate_window);
+        let limiter = RateLimiter::new(
+            RateLimiterConfig::default()
+                .set_window_secs(config.rate_window.as_secs())
+                .set_max_burst(config.rate_limit),
+        )
+        .expect("rate limiter config validated during startup");
         Self {
             pool,
             verifier: Arc::new(config.jwt_verifier.clone()),

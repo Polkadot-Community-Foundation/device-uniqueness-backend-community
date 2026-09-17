@@ -11,8 +11,7 @@ pub(super) fn record_writer_info(config: &WriterConfig, signer: &AccountId32) {
     metrics::gauge!(
         "dub_writer_info",
         "signer" => hex_account(&signer.0),
-        "attester" => hex_account(&config.attester),
-        "dotns_lane" => if config.dotns_gateway_enabled { "enabled" } else { "disabled" }
+        "attester" => hex_account(&config.attester)
     )
     .set(1.0);
 }
@@ -35,7 +34,7 @@ pub(super) async fn record_spec_version<C: subxt::Config>(
 }
 
 const SUBMIT_LANES: [&str; 2] = ["people", "dotns"];
-const SUBMIT_OUTCOMES: [&str; 3] = ["ok", "retry", "terminal"];
+const SUBMIT_OUTCOMES: [&str; 4] = ["ok", "retry", "deferred", "terminal"];
 
 pub(super) fn zero_init_submit_outcomes() {
     for lane in SUBMIT_LANES {

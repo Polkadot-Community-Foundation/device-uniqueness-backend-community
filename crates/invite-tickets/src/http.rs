@@ -63,14 +63,14 @@ pub async fn readiness(state: AppState) -> health::Readiness {
 }
 
 /// Enforce the per-subject fixed window; `429` with `Retry-After` on excess.
-fn check_rate_limit(state: &AppState, subject: &str) -> Result<(), AppError> {
-    if state.limiter.allow(subject) {
-        Ok(())
-    } else {
-        Err(AppError::RateLimited {
-            retry_after_secs: state.limiter.window_secs(),
+async fn check_rate_limit(state: &AppState, subject: String) -> Result<(), AppError> {
+    state
+        .limiter
+        .allow(subject)
+        .await
+        .map_err(|err| AppError::RateLimited {
+            retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })
-    }
 }
 
 /// Retry a transient-failure-prone DB operation with exponential back-off,
@@ -218,8 +218,7 @@ pub(crate) async fn claim_ticket(
     let body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| AppError::MalformedJson)?;
     let request = validate_body(&body).map_err(AppError::InvalidBody)?;
-
-    check_rate_limit(&state, &auth.subject)?;
+    check_rate_limit(&state, auth.subject).await?;
 
     let dim = request.dim;
     let network = state.config.network;

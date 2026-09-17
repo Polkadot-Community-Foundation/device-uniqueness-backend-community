@@ -59,9 +59,6 @@ base64 = "0.22"
 sha2 = "0.10"
 # Widevine dedup: HMAC-SHA256 pseudonymization of the raw device id.
 hmac = "0.12"
-# Payment lane: deposit-account derivation (blake2_256 of the
-# pallet_multisig entropy tuple and of the keyless dummy signatory).
-blake2 = "0.10"
 # dotNS settlement: keccak-256 for the revive address mapping and Solidity selectors.
 sha3 = "0.10"
 hex = "0.4"

@@ -88,16 +88,16 @@ if [ "$mode" = "chain" ]; then
   # one-key-per-request path against real chain state. Its latency probe stays
   # skipped unless BATCH_PROBE_CONCURRENCY is set, so this stays a correctness
   # gate rather than a benchmark.
-  for suite in voucher_http_live payment_http_live payment_watch_live batched_read_live; do
+  for suite in voucher_http_live batched_read_live; do
     DEVICE_ATTESTATION_TEST_DATABASE_URL="$device_attestation_url" \
       "${cargo_cmd[@]}" -p device-attestation --test "$suite" -- --ignored
   done
   exit 0
 fi
 
-# Deterministic database-only gate: 13 suites / 28 ignored tests. Keep this
+# Deterministic database-only gate: 12 suites / 30 ignored tests. Keep this
 # list here so local tests, CI, and coverage all execute the same catalog.
-for suite in allocation_live auth_live outbox_live dotns_live queue_live voucher_live payment_live; do
+for suite in allocation_live auth_live outbox_live dotns_live queue_live voucher_live; do
   DEVICE_ATTESTATION_TEST_DATABASE_URL="$device_attestation_url" \
     "${cargo_cmd[@]}" -p device-attestation --test "$suite" -- --ignored
 done

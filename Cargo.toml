@@ -6,7 +6,7 @@ members = ["crates/*"]
 # The released version, and the only place it is written down: release.yml
 # refuses a `v*` tag that disagrees with it, so a release is always a commit
 # that bumped this line. Pre-1.0, breaking changes bump the minor.
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.95"
 license = "GPL-3.0-only"
@@ -19,9 +19,18 @@ chain-client = { path = "crates/chain-client" }
 jwt-verify = { path = "crates/jwt-verify" }
 http-common = { path = "crates/http-common" }
 
-subxt = { version = "0.50.3", default-features = false, features = ["native", "reconnecting-rpc-client"] }
-subxt-rpcs = { version = "0.50.3", default-features = false, features = ["native", "reconnecting-rpc-client"] }
-subxt-signer = { version = "0.50.3", default-features = false, features = ["sr25519", "std"] }
+subxt = { version = "0.50.3", default-features = false, features = [
+    "native",
+    "reconnecting-rpc-client",
+] }
+subxt-rpcs = { version = "0.50.3", default-features = false, features = [
+    "native",
+    "reconnecting-rpc-client",
+] }
+subxt-signer = { version = "0.50.3", default-features = false, features = [
+    "sr25519",
+    "std",
+] }
 
 # Ring-VRF personhood-proof verification. Pinned to the revision the People
 # Chain runtime pins (the 288-byte `MembersCommitment` encoding); verify-only
@@ -38,6 +47,12 @@ thiserror = "2"
 anyhow = "1"
 utoipa = { version = "5", features = ["axum_extras", "preserve_order"] }
 metrics = "0.24"
+
+# Rate limiting 
+moka = "0.12.16"
+governor = "0.10.4"
+client-ip = "0.2.1"
+
 # The exporter's own hyper listener is unused: the recorder handle is rendered
 # from our axum `/metrics` route, so the http-listener/push-gateway defaults
 # (a second HTTP stack) stay off.

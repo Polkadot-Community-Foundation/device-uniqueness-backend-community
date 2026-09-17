@@ -10,7 +10,6 @@ pub mod dotns;
 pub mod eligibility;
 pub mod http;
 pub mod openapi;
-pub mod payment;
 pub mod queue;
 pub mod usernames;
 pub mod widevine;

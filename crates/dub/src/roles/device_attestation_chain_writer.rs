@@ -11,5 +11,5 @@ pub async fn run() -> anyhow::Result<()> {
 
     let config = WriterConfig::from_env()
         .context("invalid device-attestation-chain-writer configuration")?;
-    writer::run(config).await
+    Ok(writer::run(config).await?)
 }

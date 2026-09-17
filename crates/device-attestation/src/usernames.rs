@@ -48,8 +48,8 @@ fn is_valid_base(base: &str) -> bool {
 }
 
 /// The free discriminators for a base: `1..=99` minus the taken set (`00` is
-/// never offered). Shared so availability, registration, and the payment
-/// watcher's confirmation-time re-selection agree on what's free.
+/// never offered). Shared so availability and registration agree on what's
+/// free.
 pub(crate) fn available_digits(taken: &BTreeSet<u8>) -> Vec<u8> {
     (1..=99u8).filter(|d| !taken.contains(d)).collect()
 }
@@ -93,14 +93,15 @@ pub(crate) async fn reservation_state(
 
 /// Subject-keyed rate limit for the authenticated usernames surface (never
 /// IP — the CGNAT postmortem). Renders the 429 with `Retry-After`.
-pub(crate) fn check_rate_limit(state: &AppState, subject: &str) -> UsernamesResult<()> {
+pub(crate) async fn check_rate_limit(state: &AppState, subject: &str) -> UsernamesResult<()> {
     let key = format!("/api/v1/usernames:{subject}");
-    if state.limiter.allow(&key) {
-        return Ok(());
-    }
-    Err(UsernamesError::RateLimited {
-        retry_after_secs: state.config.auth_rate_window.as_secs(),
-    })
+    state
+        .limiter
+        .allow(key)
+        .await
+        .map_err(|err| UsernamesError::RateLimited {
+            retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
+        })
 }
 
 /// Parse the request body as JSON, content type ignored. Unparseable → 400.
@@ -111,9 +112,8 @@ pub(crate) fn parse_json_body(body: &Bytes) -> UsernamesResult<Value> {
 /// Build the `/usernames` router.
 ///
 /// Method fallbacks keep wrong-method requests on the JSON 404; the collection
-/// root also answers CORS preflights. `/payment-status` mounts only with the
-/// payment lane enabled, the same contract as `/registration/queue`.
-pub fn router(payment_enabled: bool) -> Router<AppState> {
+/// root also answers CORS preflights.
+pub fn router() -> Router<AppState> {
     let root = Router::new()
         .route(
             "/",
@@ -122,15 +122,7 @@ pub fn router(payment_enabled: bool) -> Router<AppState> {
                 .fallback(not_found),
         )
         .layer(axum::middleware::from_fn(allow_any_origin));
-    let routes = root.route("/available", post(available::check).fallback(not_found));
-    if payment_enabled {
-        routes.route(
-            "/payment-status",
-            axum::routing::get(crate::payment::status).fallback(not_found),
-        )
-    } else {
-        routes
-    }
+    root.route("/available", post(available::check).fallback(not_found))
 }
 
 /// Stamp `access-control-allow-origin: *` on every collection-root response,

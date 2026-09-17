@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chain_types::people;
 use chain_types::people::runtime_types::indiv_pallet_resources::types::ConsumerInfo;
@@ -29,6 +29,20 @@ pub struct IndexReport {
     pub decode_failures: u64,
 }
 
+impl IndexReport {
+    /// A pass that indexed nothing and left the projection resting at `block`.
+    fn idle(block: u64) -> Self {
+        Self {
+            from_block: block,
+            to_block: block,
+            blocks_processed: 0,
+            accounts_upserted: 0,
+            accounts_deleted: 0,
+            decode_failures: 0,
+        }
+    }
+}
+
 /// Fatal incremental indexing failure.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -47,16 +61,50 @@ pub enum IndexError {
     SnapshotNumber(u64),
 }
 
-/// Index every finalized block from the stored checkpoint up to the head.
+/// Index every finalized block from the stored checkpoint up to the head,
+/// reading the finalized head itself.
+///
+/// The order matters: the lock, then the checkpoint, and only then the chain.
+/// Both early exits — another instance holds the lock, or the projection has no
+/// checkpoint to index from — are answerable from the database alone, and
+/// asking the chain for a head neither would use turns a local no-op into a
+/// round trip that can fail.
+pub async fn index_finalized_range(
+    pool: &PgPool,
+    chain: &PeopleChain,
+) -> Result<Option<IndexReport>, IndexError> {
+    let Some(_lock) = try_projection_lock(pool).await? else {
+        return Ok(None);
+    };
+    let Some(checkpoint) = read_checkpoint(pool).await? else {
+        return Ok(Some(IndexReport::idle(0)));
+    };
+    let head_number = chain.finalized_head_number().await?;
+    index_from_checkpoint(pool, chain, checkpoint, head_number).await
+}
+
+/// Index every finalized block from the stored checkpoint up to `head_number`.
 ///
 /// Takes the projection lock with `pg_try_advisory_lock`, returning `Ok(None)`
 /// when another instance holds it. Commits per block, so an interrupted pass
 /// never advances past the last fully-written one. A zero report means the
 /// checkpoint row is missing (bootstrap seeds it at startup).
-pub async fn index_finalized_range(
+pub async fn index_finalized_range_to(
     pool: &PgPool,
     chain: &PeopleChain,
+    head_number: u64,
 ) -> Result<Option<IndexReport>, IndexError> {
+    let Some(_lock) = try_projection_lock(pool).await? else {
+        return Ok(None);
+    };
+    index_finalized_range_locked(pool, chain, head_number).await
+}
+
+pub struct ProjectionLock {
+    _connection: sqlx::pool::PoolConnection<Postgres>,
+}
+
+pub async fn try_projection_lock(pool: &PgPool) -> Result<Option<ProjectionLock>, sqlx::Error> {
     let mut lock_connection = pool.acquire().await?;
     lock_connection.close_on_drop();
     let acquired: bool = sqlx::query("SELECT pg_try_advisory_lock($1)")
@@ -67,38 +115,41 @@ pub async fn index_finalized_range(
     if !acquired {
         return Ok(None);
     }
+    Ok(Some(ProjectionLock {
+        _connection: lock_connection,
+    }))
+}
 
-    let checkpoint_row = sqlx::query("SELECT last_finalized_number FROM sync_state WHERE id = 1")
-        .fetch_optional(pool)
-        .await?;
-    let Some(checkpoint_row) = checkpoint_row else {
-        return Ok(Some(IndexReport {
-            from_block: 0,
-            to_block: 0,
-            blocks_processed: 0,
-            accounts_upserted: 0,
-            accounts_deleted: 0,
-            decode_failures: 0,
-        }));
+pub async fn index_finalized_range_locked(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    head_number: u64,
+) -> Result<Option<IndexReport>, IndexError> {
+    let Some(checkpoint) = read_checkpoint(pool).await? else {
+        return Ok(Some(IndexReport::idle(0)));
     };
-    let checkpoint = checkpoint_row.try_get::<i64, _>("last_finalized_number")?;
-    let checkpoint = u64::try_from(checkpoint).unwrap_or(0);
+    index_from_checkpoint(pool, chain, checkpoint, head_number).await
+}
 
-    let head = chain
-        .online()
-        .at_current_block()
-        .await
-        .map_err(|source| ChainError::Query(Box::new(source)))?;
-    let head_number = head.block_number();
+async fn read_checkpoint(pool: &PgPool) -> Result<Option<u64>, IndexError> {
+    let Some(row) = sqlx::query("SELECT last_finalized_number FROM sync_state WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let checkpoint = row.try_get::<i64, _>("last_finalized_number")?;
+    Ok(Some(u64::try_from(checkpoint).unwrap_or(0)))
+}
+
+async fn index_from_checkpoint(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    checkpoint: u64,
+    head_number: u64,
+) -> Result<Option<IndexReport>, IndexError> {
     if head_number <= checkpoint {
-        return Ok(Some(IndexReport {
-            from_block: checkpoint,
-            to_block: checkpoint,
-            blocks_processed: 0,
-            accounts_upserted: 0,
-            accounts_deleted: 0,
-            decode_failures: 0,
-        }));
+        return Ok(Some(IndexReport::idle(checkpoint)));
     }
 
     let mut report = IndexReport {
@@ -116,6 +167,228 @@ pub async fn index_finalized_range(
     }
 
     Ok(Some(report))
+}
+
+pub const MAX_SPECULATIVE_WINDOW: u64 = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeculativeWindow {
+    /// Finality has caught up to the best head; nothing is unfinalized.
+    Nothing,
+    /// The gap is too wide to be a normal finality trail — stand down.
+    StandDown,
+    /// Scan this inclusive range for events.
+    Scan { from: u64, to: u64 },
+}
+
+fn plan_speculative_window(finalized: u64, best: u64) -> SpeculativeWindow {
+    if best <= finalized {
+        return SpeculativeWindow::Nothing;
+    }
+    if best - finalized > MAX_SPECULATIVE_WINDOW {
+        return SpeculativeWindow::StandDown;
+    }
+    SpeculativeWindow::Scan {
+        from: finalized + 1,
+        to: best,
+    }
+}
+
+/// Outcome of one speculative pass over the unfinalized window.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpeculativeReport {
+    /// First unfinalized block scanned (finalized head + 1).
+    pub from_block: u64,
+    /// Best block the window was reconciled against.
+    pub to_block: u64,
+    /// Unfinalized blocks scanned for events this pass.
+    pub blocks_scanned: u64,
+    /// Accounts re-read at the best head: those named by window events plus
+    /// the rows already held speculatively, less any already held *finalized* —
+    /// speculation can neither overwrite nor delete those, so reading them
+    /// could only confirm what it may not act on.
+    pub accounts_checked: u64,
+    /// Rows added, or refreshed because their content actually changed. A row
+    /// that is merely still pending is left untouched, so this counts
+    /// admissions rather than passes.
+    pub accounts_admitted: u64,
+    /// Speculative rows retracted — the fork that carried them lost, or the
+    /// consumer entry is simply gone at the new best head.
+    pub accounts_retracted: u64,
+    /// Consumer values that failed decoding. Also counted in
+    /// `accounts_retracted`, since a value that will not decode is retracted.
+    pub decode_failures: u64,
+    /// Set when the window was too wide to scan, so nothing new was admitted.
+    /// Rows already held were still re-checked.
+    pub skipped_wide_window: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct SpeculativeCache {
+    entries: BTreeMap<u64, CachedBlock>,
+}
+
+/// The accounts one block's events named, and the hash they were read from.
+#[derive(Debug)]
+struct CachedBlock {
+    hash: [u8; 32],
+    accounts: Vec<[u8; 32]>,
+}
+
+impl SpeculativeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, number: u64, hash: &[u8; 32]) -> Option<&[[u8; 32]]> {
+        self.entries
+            .get(&number)
+            .filter(|cached| &cached.hash == hash)
+            .map(|cached| cached.accounts.as_slice())
+    }
+
+    fn insert(&mut self, number: u64, hash: [u8; 32], accounts: Vec<[u8; 32]>) {
+        self.entries.insert(number, CachedBlock { hash, accounts });
+    }
+
+    /// Drop everything at or below `finalized`: those heights can no longer be
+    /// replaced, and the finalized pass owns them from here on.
+    fn prune_finalized(&mut self, finalized: u64) {
+        self.entries = self.entries.split_off(&finalized.saturating_add(1));
+    }
+}
+
+pub async fn index_speculative_window(
+    pool: &PgPool,
+    chain: &PeopleChain,
+    finalized: u64,
+    best: u64,
+    cache: &mut SpeculativeCache,
+) -> Result<SpeculativeReport, IndexError> {
+    let mut report = SpeculativeReport {
+        from_block: finalized.saturating_add(1),
+        to_block: best,
+        ..Default::default()
+    };
+    let scan = match plan_speculative_window(finalized, best) {
+        SpeculativeWindow::Nothing => {
+            report.to_block = finalized;
+            None
+        }
+        SpeculativeWindow::StandDown => {
+            report.skipped_wide_window = true;
+            None
+        }
+        SpeculativeWindow::Scan { from, to } => Some((from, to)),
+    };
+    cache.prune_finalized(finalized);
+
+    let mut affected: Vec<[u8; 32]> = Vec::new();
+    if let Some((from, to)) = scan {
+        for number in from..=to {
+            let at = chain
+                .online()
+                .at_block(number)
+                .await
+                .map_err(|source| ChainError::Query(Box::new(source)))?;
+            let hash = at.block_hash().0;
+            match cache.get(number, &hash) {
+                Some(accounts) => affected.extend_from_slice(accounts),
+                None => {
+                    let events = at
+                        .events()
+                        .fetch()
+                        .await
+                        .map_err(|source| ChainError::Query(Box::new(source)))?;
+                    let accounts = accounts_from_events(&events)?;
+                    affected.extend_from_slice(&accounts);
+                    cache.insert(number, hash, accounts);
+                }
+            }
+            report.blocks_scanned += 1;
+        }
+    }
+    affected.extend(projection::speculative_accounts(pool).await?);
+    let affected = dedupe_accounts(affected);
+    let already_finalized = projection::finalized_accounts(pool, &affected).await?;
+    let affected: Vec<[u8; 32]> = affected
+        .into_iter()
+        .filter(|account| !already_finalized.contains(account))
+        .collect();
+    report.accounts_checked = affected.len() as u64;
+    if affected.is_empty() {
+        return Ok(report);
+    }
+
+    let head = best.max(finalized);
+    let at = chain
+        .online()
+        .at_block(head)
+        .await
+        .map_err(|source| ChainError::Query(Box::new(source)))?;
+    let block_hash = at.block_hash().0;
+    let block_number = at.block_number();
+    let block_number_db =
+        i64::try_from(block_number).map_err(|_| IndexError::SnapshotNumber(block_number))?;
+    let ss58_prefix = crate::ss58::validate_prefix(
+        at.constants()
+            .entry(people::constants().system().ss58_prefix())
+            .map_err(|source| IndexError::Storage(Box::new(source)))?,
+    )?;
+
+    let mut tx = pool.begin().await?;
+    for account in &affected {
+        let consumer = at
+            .storage()
+            .try_fetch(
+                people::storage().resources().consumers(),
+                (AccountId32(*account),),
+            )
+            .await
+            .map_err(|source| IndexError::Storage(Box::new(source)))?;
+        let mut decode_failed = false;
+        let decoded = match consumer {
+            Some(value) => {
+                let consumer: ConsumerInfo = value
+                    .decode()
+                    .map_err(|source| IndexError::Storage(Box::new(source)))?;
+                match projection::decode_consumer(
+                    *account,
+                    consumer.identifier_key,
+                    consumer.lite_username.0,
+                    consumer.full_username.map(|username| username.0),
+                    ss58_prefix,
+                    block_hash,
+                    block_number,
+                ) {
+                    Ok(record) => Some(record),
+                    Err(error) => {
+                        decode_failed = true;
+                        tracing::warn!(stage = "speculative", account = ?account, error = ?error, "retracting undecodable consumer");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        match decoded {
+            Some(record) => {
+                if projection::upsert_speculative(&mut tx, &record, block_number_db).await? {
+                    report.accounts_admitted += 1;
+                }
+            }
+            None => {
+                if decode_failed {
+                    report.decode_failures += 1;
+                }
+                if projection::delete_if_speculative(&mut tx, account).await? {
+                    report.accounts_retracted += 1;
+                }
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(report)
 }
 
 /// Index one finalized block, committing its writes and checkpoint atomically.
@@ -141,24 +414,7 @@ async fn index_block(
         .await
         .map_err(|source| ChainError::Query(Box::new(source)))?;
 
-    let mut affected: Vec<[u8; 32]> = Vec::new();
-    for event in events.find::<people::resources::events::LitePersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::PersonRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::resources::events::IdentifierKeyUpdated>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    for event in events.find::<people::people_lite::events::ConsumerRegistered>() {
-        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
-        affected.push(event.account.0);
-    }
-    let affected = dedupe_accounts(affected);
+    let affected = dedupe_accounts(accounts_from_events(&events)?);
 
     if affected.is_empty() {
         let mut tx = pool.begin().await?;
@@ -262,6 +518,29 @@ async fn advance_checkpoint(
     Ok(())
 }
 
+fn accounts_from_events(
+    events: &subxt::events::Events<chain_types::PeopleConfig>,
+) -> Result<Vec<[u8; 32]>, IndexError> {
+    let mut affected: Vec<[u8; 32]> = Vec::new();
+    for event in events.find::<people::resources::events::LitePersonRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::resources::events::PersonRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::resources::events::IdentifierKeyUpdated>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    for event in events.find::<people::people_lite::events::ConsumerRegistered>() {
+        let event = event.map_err(|source| IndexError::Storage(Box::new(source)))?;
+        affected.push(event.account.0);
+    }
+    Ok(affected)
+}
+
 /// Deduplicate affected accounts deterministically for stable per-block reads.
 fn dedupe_accounts(accounts: impl IntoIterator<Item = [u8; 32]>) -> Vec<[u8; 32]> {
     accounts
@@ -273,7 +552,42 @@ fn dedupe_accounts(accounts: impl IntoIterator<Item = [u8; 32]>) -> Vec<[u8; 32]
 
 #[cfg(test)]
 mod tests {
-    use super::dedupe_accounts;
+    use super::{
+        dedupe_accounts, plan_speculative_window, SpeculativeCache, SpeculativeWindow,
+        MAX_SPECULATIVE_WINDOW,
+    };
+
+    #[test]
+    fn nothing_to_speculate_when_finality_has_caught_up() {
+        assert_eq!(plan_speculative_window(10, 10), SpeculativeWindow::Nothing);
+        assert_eq!(plan_speculative_window(10, 9), SpeculativeWindow::Nothing);
+    }
+
+    #[test]
+    fn scans_the_gap_starting_one_past_the_checkpoint() {
+        assert_eq!(
+            plan_speculative_window(10, 13),
+            SpeculativeWindow::Scan { from: 11, to: 13 }
+        );
+        // Comfortably past the measured People trail of 2-5 blocks.
+        assert_eq!(
+            plan_speculative_window(100, 114),
+            SpeculativeWindow::Scan { from: 101, to: 114 }
+        );
+    }
+
+    #[test]
+    fn stands_down_once_the_window_stops_looking_like_a_finality_trail() {
+        let edge = MAX_SPECULATIVE_WINDOW;
+        assert_eq!(
+            plan_speculative_window(0, edge),
+            SpeculativeWindow::Scan { from: 1, to: edge }
+        );
+        assert_eq!(
+            plan_speculative_window(0, edge + 1),
+            SpeculativeWindow::StandDown
+        );
+    }
 
     #[test]
     fn dedupe_removes_duplicates_and_sorts() {
@@ -286,5 +600,39 @@ mod tests {
         let forward = dedupe_accounts([[1; 32], [2; 32], [3; 32]]);
         let reversed = dedupe_accounts([[3; 32], [2; 32], [1; 32]]);
         assert_eq!(forward, reversed);
+    }
+
+    #[test]
+    fn cache_answers_a_height_only_for_the_hash_it_was_read_from() {
+        let mut cache = SpeculativeCache::new();
+        cache.insert(10, [0xaa; 32], vec![[1; 32]]);
+
+        assert_eq!(cache.get(10, &[0xaa; 32]), Some([[1; 32]].as_slice()));
+        assert_eq!(cache.get(10, &[0xbb; 32]), None);
+        assert_eq!(cache.get(11, &[0xaa; 32]), None);
+    }
+
+    #[test]
+    fn cache_forgets_heights_finality_has_reached() {
+        let mut cache = SpeculativeCache::new();
+        for number in 8..=12 {
+            cache.insert(number, [number as u8; 32], vec![[number as u8; 32]]);
+        }
+
+        cache.prune_finalized(10);
+
+        for number in 8..=10 {
+            assert_eq!(cache.get(number, &[number as u8; 32]), None);
+        }
+        for number in 11..=12 {
+            assert!(cache.get(number, &[number as u8; 32]).is_some());
+        }
+    }
+
+    #[test]
+    fn a_wide_window_still_reconciles_rows_it_already_holds() {
+        let plan = plan_speculative_window(0, MAX_SPECULATIVE_WINDOW + 1);
+        assert_eq!(plan, SpeculativeWindow::StandDown);
+        assert!(!matches!(plan, SpeculativeWindow::Scan { .. }));
     }
 }

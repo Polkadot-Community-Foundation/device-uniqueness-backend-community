@@ -137,33 +137,27 @@ pub struct RootsConfig {
 /// Spawn the background refresher without blocking the listener.
 pub fn spawn_refresher(cache: Arc<RootCache>, config: RootsConfig) {
     tokio::spawn(async move {
+        let mut interval = tokio::time::interval(config.refresh);
+        let api = chain_client::connect(&config.rpc_url).await.unwrap();
         loop {
-            let api = match chain_client::connect(&config.rpc_url).await {
-                Ok(api) => api,
-                Err(error) => {
-                    tracing::warn!(
-                        collection = %hex::encode(config.collection),
-                        %error,
-                        "proof root refresher: chain connect failed"
-                    );
-                    tokio::time::sleep(config.refresh).await;
-                    continue;
-                }
+            let Ok(api) = api.at_current_block().await else {
+                continue;
             };
-            let genesis = api.genesis_hash().0;
-            if genesis != config.genesis {
+            let genesis = api.genesis_hash();
+            if genesis.is_some_and(|genesis| genesis.0 != config.genesis) {
                 tracing::error!(
                     collection = %hex::encode(config.collection),
-                    chain_genesis = %hex::encode(genesis),
+                    chain_genesis = %hex::encode(genesis.unwrap_or_default()),
                     configured = %hex::encode(config.genesis),
                     "proof root refresher: genesis mismatch — refusing to serve roots"
                 );
+                interval.tick().await;
                 cache.clear();
-                tokio::time::sleep(config.refresh * 10).await;
                 continue;
             }
             loop {
-                match refresh(&api, config.collection).await {
+                interval.tick().await;
+                match refresh(&api.online_client(), config.collection).await {
                     Ok(snapshot) => {
                         tracing::debug!(
                             collection = %hex::encode(config.collection),
@@ -176,13 +170,11 @@ pub fn spawn_refresher(cache: Arc<RootCache>, config: RootsConfig) {
                         tracing::warn!(
                             collection = %hex::encode(config.collection),
                             %error,
-                            "proof root refresh failed; reconnecting and re-verifying genesis"
+                            "proof root refresh failed; retrying and re-verifying genesis"
                         );
-                        tokio::time::sleep(config.refresh).await;
                         break;
                     }
                 }
-                tokio::time::sleep(config.refresh).await;
             }
         }
     });
