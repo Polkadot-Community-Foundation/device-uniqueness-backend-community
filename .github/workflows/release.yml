@@ -2,6 +2,11 @@ name: Release
 
 # Publishes a release: per-platform binary tarballs plus a standalone compose
 # bundle, attached to a GitHub Release.
+#
+# Every artifact is built TWICE, once per People runtime (`DUB_NETWORK`), because
+# the network is a build input: it selects the vendored metadata and whether the
+# invite-tickets roles exist. One tag ships both, so a release is never "the
+# polkadot one" or "the testnet one" — the network is in each asset's name.
 on:
   workflow_dispatch:
     inputs:
@@ -60,14 +65,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        # Both axes are real: a binary is one platform AND one network.
+        network: [testnet, polkadot]
+        target:
           - platform: linux/amd64
             runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            triple: x86_64-unknown-linux-gnu
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
+            triple: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.target.runner }}
     permissions:
       contents: read
     steps:
@@ -79,15 +86,20 @@ jobs:
       - name: Export the binary
         run: |
           docker buildx build --target binaries \
-            --platform ${{ matrix.platform }} \
+            --platform ${{ matrix.target.platform }} \
+            --build-arg DUB_NETWORK=${{ matrix.network }} \
             --output "type=local,dest=${{ runner.temp }}/bin" .
 
       - name: Package the binary
         env:
           VERSION: ${{ needs.version.outputs.version }}
-          TARGET: ${{ matrix.target }}
+          NETWORK: ${{ matrix.network }}
+          TARGET: ${{ matrix.target.triple }}
         run: |
-          name="dub-$VERSION-$TARGET"
+          # The network is in the NAME, not only in the notes: the two binaries
+          # are byte-different and an operator holding one file must be able to
+          # tell which chain it speaks to.
+          name="dub-$VERSION-$NETWORK-$TARGET"
           mv "$RUNNER_TEMP/bin" "$RUNNER_TEMP/$name"
           test -f "$RUNNER_TEMP/$name/dub" ||
             { echo "::error::the binaries stage produced no dub"; exit 1; }
@@ -95,27 +107,36 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: binaries-${{ matrix.target }}
+          name: binaries-${{ matrix.network }}-${{ matrix.target.triple }}
           path: ${{ runner.temp }}/*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
   macos-binaries:
     needs: [version, check]
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [testnet, polkadot]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ needs.version.outputs.tag }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.network }}
       - name: Build the release binary
+        env:
+          DUB_NETWORK: ${{ matrix.network }}
         run: cargo build --release -p dub
       - name: Package the binary
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          NETWORK: ${{ matrix.network }}
           TARGET: aarch64-apple-darwin
         run: |
-          name="dub-$VERSION-$TARGET"
+          name="dub-$VERSION-$NETWORK-$TARGET"
           mkdir -p "$RUNNER_TEMP/$name"
           # One binary, every service: `dub --role <name>`. The tarball's
           # contents match the Linux ones, with no list to keep in step.
@@ -123,7 +144,7 @@ jobs:
           tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v7
         with:
-          name: binaries-aarch64-apple-darwin
+          name: binaries-${{ matrix.network }}-aarch64-apple-darwin
           path: ${{ runner.temp }}/*.tar.gz
           if-no-files-found: error
           retention-days: 1
@@ -145,77 +166,149 @@ jobs:
           merge-multiple: true
 
       - id: image
-        name: Is the published image pullable at this tag?
+        name: Are the published images pullable at this tag?
         env:
           PUBLIC_REPO: ${{ vars.PUBLIC_IMAGE_REPO || 'docker.io/paritytech/device-uniqueness-backend' }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           repo="${PUBLIC_REPO#docker.io/}"
+          # One image per network, tagged `<tag>-<network>`: the image carries a
+          # binary built for one runtime, so a single `<tag>` could only be one
+          # of them and nothing in the manifest would say which.
+          #
           # `|| { …; }`, not a bare assignment: this step runs under `bash -e`,
           # where a failed command substitution aborts the step — turning a
           # network blip into a hard release failure.
           token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$repo:pull" | jq -r .token) || {
-            echo "::warning::$repo is not anonymously pullable — the compose bundle will build from source instead."
-            echo 'pinned=' >> "$GITHUB_OUTPUT"; exit 0
+            echo "::warning::$repo is not anonymously pullable — the compose bundles will build from source instead."
+            for network in testnet polkadot; do
+              echo "pinned_$network=" >> "$GITHUB_OUTPUT"
+            done
+            exit 0
           }
-          curl -fsS -o /dev/null \
-            -H "Authorization: Bearer $token" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-            "https://registry-1.docker.io/v2/$repo/manifests/$TAG" || {
-            echo "::warning::$repo:$TAG is not anonymously pullable — the compose bundle will build from source instead."
-            echo 'pinned=' >> "$GITHUB_OUTPUT"; exit 0
-          }
-          echo "pinned=$PUBLIC_REPO" >> "$GITHUB_OUTPUT"
+          for network in testnet polkadot; do
+            if curl -fsS -o /dev/null \
+              -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://registry-1.docker.io/v2/$repo/manifests/$TAG-$network"; then
+              echo "pinned_$network=$PUBLIC_REPO" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::$repo:$TAG-$network is not anonymously pullable — that compose bundle will build from source instead."
+              echo "pinned_$network=" >> "$GITHUB_OUTPUT"
+            fi
+          done
 
       - name: Bundle the compose files
         env:
           VERSION: ${{ needs.version.outputs.version }}
-          PINNED: ${{ steps.image.outputs.pinned }}
           TAG: ${{ needs.version.outputs.tag }}
+          PINNED_TESTNET: ${{ steps.image.outputs.pinned_testnet }}
+          PINNED_POLKADOT: ${{ steps.image.outputs.pinned_polkadot }}
         run: |
-          mkdir -p bundle/gateway
-          cp .env.example bundle/.env.example
-          cp gateway/Caddyfile gateway/docker-compose.yml bundle/gateway/
+          # One bundle per network. They differ in four places: the image tag
+          # they pin, DUB_NETWORK, COMPOSE_PROFILES — `polkadot` has no
+          # invite-tickets roles, so starting that profile against its image
+          # would crash-loop three services — and the chain endpoints. The
+          # testnet bundle keeps the repository's previewnet defaults; the
+          # polkadot one must point at polkadot-test, or its binary signs
+          # against a runtime whose metadata it was not built for.
+          for network in testnet polkadot; do
+            case "$network" in
+              testnet)
+                pinned="$PINNED_TESTNET"; profiles='invite-tickets'
+                people_rpc=''; asset_hub_rpc=''
+                ;;
+              polkadot)
+                pinned="$PINNED_POLKADOT"; profiles=''
+                people_rpc='wss://polkadot-test.substrate.dev/people'
+                asset_hub_rpc='wss://polkadot-test.substrate.dev/asset-hub'
+                ;;
+            esac
 
-          if [ -n "$PINNED" ]; then
-            # Every service names the same image, so pinning is two
-            # substitutions of one variable each. `command: ["--role", …]` is
-            # what still makes each service itself, and survives untouched.
-            sed -e '/^    build:$/,+2d' \
-                -e "s|\${IMAGE_REPO:-device-uniqueness-backend}|$PINNED|g" \
-                -e "s|\${IMAGE_TAG:-local}|$TAG|g" \
-                docker-compose.yml > bundle/docker-compose.yml
+            out="bundle/$network"
+            mkdir -p "$out/gateway"
+            cp gateway/docker-compose.yml "$out/gateway/"
+            # The polkadot stack runs no invite-tickets-api, so the claim path
+            # must default to this environment's device-attestation-api (a JSON
+            # 404), not the absent invite-tickets-api (a 502). It is the
+            # Caddyfile default that changes: the edge is its own compose
+            # project under gateway/, so it never reads the bundle's .env.
+            case "$network" in
+              polkadot)
+                sed -e 's|{\$INVITE_TICKETS_UPSTREAM:invite-tickets-api-paseo-next-v2:8080}|{$INVITE_TICKETS_UPSTREAM:device-attestation-api-paseo-next-v2:8080}|' \
+                    gateway/Caddyfile > "$out/gateway/Caddyfile"
+                if grep -q 'invite-tickets-api-' "$out/gateway/Caddyfile"; then
+                  echo '::error::the polkadot bundle'"'"'s Caddyfile still routes to an invite-tickets-api it does not run'
+                  exit 1
+                fi
+                ;;
+              *) cp gateway/Caddyfile "$out/gateway/" ;;
+            esac
 
-            if grep -qE '^    build:' bundle/docker-compose.yml; then
-              echo '::error::the bundled docker-compose.yml still declares `build:` — it would try to build from a source tree the bundle does not carry'
-              exit 1
+            # The bundled .env.example names this bundle's network, so
+            # `cp .env.example .env && docker compose up -d` is correct as-is.
+            endpoints=()
+            if [ -n "$people_rpc" ]; then
+              endpoints+=(-e "s|^PEOPLE_RPC_URL=.*|PEOPLE_RPC_URL=$people_rpc|")
+              endpoints+=(-e "s|^ASSET_HUB_RPC_URL=.*|ASSET_HUB_RPC_URL=$asset_hub_rpc|")
             fi
-            if grep -qE '\$\{IMAGE_(REPO|TAG)' bundle/docker-compose.yml; then
-              echo '::error::the bundled docker-compose.yml still has unresolved image variables'
-              exit 1
+            sed -e "s|^DUB_NETWORK=.*|DUB_NETWORK=$network|" \
+                -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=$profiles|" \
+                "${endpoints[@]}" \
+                .env.example > "$out/.env.example"
+            grep -qE "^DUB_NETWORK=$network\$" "$out/.env.example" ||
+              { echo "::error::the $network bundle's .env.example does not name its network"; exit 1; }
+            grep -qE "^COMPOSE_PROFILES=$profiles\$" "$out/.env.example" ||
+              { echo "::error::the $network bundle's .env.example has the wrong COMPOSE_PROFILES"; exit 1; }
+            if [ -n "$people_rpc" ]; then
+              grep -qxF "PEOPLE_RPC_URL=$people_rpc" "$out/.env.example" &&
+                grep -qxF "ASSET_HUB_RPC_URL=$asset_hub_rpc" "$out/.env.example" ||
+                { echo "::error::the $network bundle's .env.example does not point at its chain"; exit 1; }
             fi
-            test "$(grep -cE "^    image: .*:$TAG\$" bundle/docker-compose.yml)" -eq 6 ||
-              { echo "::error::expected six services pinned to the release image"; exit 1; }
-          else
-            # No pullable image: ship the file as-is. It builds from a source
-            # tree, which the notes then tell the reader to clone.
-            cp docker-compose.yml bundle/docker-compose.yml
-          fi
 
-          test "$(grep -cE '^    command: \["--role", ' bundle/docker-compose.yml)" -eq 6 ||
-            { echo "::error::the bundle lost a service's --role; every service would start the same way"; exit 1; }
-          # The edits above are textual; this proves the result is still a valid
-          # compose file rather than something the substitutions mangled.
-          docker compose -f bundle/docker-compose.yml config -q
+            if [ -n "$pinned" ]; then
+              # Every service names the same image, so pinning is two
+              # substitutions of one variable each. `command: ["--role", …]` is
+              # what still makes each service itself, and survives untouched.
+              # `build:` is five lines: context, target, and the DUB_NETWORK arg.
+              sed -e '/^    build:$/,+4d' \
+                  -e "s|\${IMAGE_REPO:-device-uniqueness-backend}|$pinned|g" \
+                  -e "s|\${IMAGE_TAG:-local}|$TAG-$network|g" \
+                  docker-compose.yml > "$out/docker-compose.yml"
 
-          tar -C bundle -czf "dub-compose-$VERSION.tar.gz" \
-            docker-compose.yml .env.example gateway
+              if grep -qE '^    build:' "$out/docker-compose.yml"; then
+                echo '::error::the bundled docker-compose.yml still declares `build:` — it would try to build from a source tree the bundle does not carry'
+                exit 1
+              fi
+              if grep -qE '\$\{IMAGE_(REPO|TAG)' "$out/docker-compose.yml"; then
+                echo '::error::the bundled docker-compose.yml still has unresolved image variables'
+                exit 1
+              fi
+              test "$(grep -cE "^    image: .*:$TAG-$network\$" "$out/docker-compose.yml")" -eq 8 ||
+                { echo "::error::expected eight services pinned to the $network release image"; exit 1; }
+            else
+              # No pullable image: ship the file as-is. It builds from a source
+              # tree, which the notes then tell the reader to clone — and its
+              # build arg reads DUB_NETWORK from the .env written above.
+              cp docker-compose.yml "$out/docker-compose.yml"
+            fi
+
+            test "$(grep -cE '^    command: \["--role", ' "$out/docker-compose.yml")" -eq 8 ||
+              { echo "::error::the bundle lost a service's --role; every service would start the same way"; exit 1; }
+            # The edits above are textual; this proves the result is still a
+            # valid compose file rather than something the substitutions mangled.
+            docker compose -f "$out/docker-compose.yml" config -q
+
+            tar -C "$out" -czf "dub-compose-$VERSION-$network.tar.gz" \
+              docker-compose.yml .env.example gateway
+          done
 
       - name: Build the release notes
         env:
           VERSION: ${{ needs.version.outputs.version }}
           TAG: ${{ needs.version.outputs.tag }}
-          PINNED: ${{ steps.image.outputs.pinned }}
+          PINNED_TESTNET: ${{ steps.image.outputs.pinned_testnet }}
+          PINNED_POLKADOT: ${{ steps.image.outputs.pinned_polkadot }}
         run: |
           # The section body for this version: everything between its heading
           # and the next `## `, which is the previous release. Link definitions
@@ -234,23 +327,30 @@ jobs:
           }
 
           {
+            printf 'Every asset comes in two builds, one per People runtime: **testnet** (previewnet and paseo-next-v2) and **polkadot** (polkadot-test). The runtime is fixed when the binary is built — it selects the vendored metadata, and the polkadot build has no invite-tickets roles — so pick the one matching the chain you point at. `dub --help` prints the network a binary was built for.\n\n'
             printf '```bash\n'
-            printf '# the whole stack:\n'
-            printf 'tar xzf dub-compose-%s.tar.gz && cp .env.example .env\n' "$VERSION"
+            printf '# the whole stack, for one network (testnet shown):\n'
+            printf 'tar xzf dub-compose-%s-testnet.tar.gz && cp .env.example .env\n' "$VERSION"
             printf 'docker network create dub-edge dub-metrics   # once per host\n'
-            if [ -z "$PINNED" ]; then
+            if [ -z "$PINNED_TESTNET" ]; then
               printf 'docker buildx bake all                       # no published image for this tag\n'
             fi
             printf 'docker compose up -d\n'
-            if [ -n "$PINNED" ]; then
+            if [ -n "$PINNED_TESTNET" ]; then
               printf '\n# ...or one service:\n'
-              printf 'docker run %s:%s --role device-attestation-api\n' "$PINNED" "$TAG"
+              printf 'docker run %s:%s-testnet --role device-attestation-api\n' "$PINNED_TESTNET" "$TAG"
             fi
             printf '```\n'
-            printf 'No containers? `dub-%s-<target>.tar.gz` carries the single `dub` binary for `x86_64`/`aarch64` Linux and Apple Silicon — every service is a role of it (`dub --role device-attestation-api`, `dub --list-roles`). `SHA256SUMS` covers every asset here; verify with `sha256sum -c SHA256SUMS`.\n\n' "$VERSION"
-            if [ -z "$PINNED" ]; then
-              printf '> No published container image was found for `%s`, so the bundled compose file builds from source. Clone the repository at this tag alongside it.\n\n' "$TAG"
-            fi
+            printf 'No containers? `dub-%s-<network>-<target>.tar.gz` carries the single `dub` binary for `x86_64`/`aarch64` Linux and Apple Silicon — every service is a role of it (`dub --role device-attestation-api`, `dub --list-roles`). `SHA256SUMS` covers every asset here; verify with `sha256sum -c SHA256SUMS`.\n\n' "$VERSION"
+            for network in testnet polkadot; do
+              case "$network" in
+                testnet)  pinned="$PINNED_TESTNET" ;;
+                polkadot) pinned="$PINNED_POLKADOT" ;;
+              esac
+              if [ -z "$pinned" ]; then
+                printf '> No published container image was found for `%s-%s`, so that compose bundle builds from source. Clone the repository at this tag alongside it.\n\n' "$TAG" "$network"
+              fi
+            done
             cat section.md
             grep -E '^\[[^]]+\]: ' CHANGELOG.md
           } > notes.md
@@ -266,16 +366,22 @@ jobs:
           case "$TAG" in *-*) prerelease='--prerelease' ;; esac
 
           # Every asset in one directory, then one checksum file over all of
-          # them — including the compose bundle, so `sha256sum -c` covers the
+          # them — including the compose bundles, so `sha256sum -c` covers the
           # whole release rather than only the binaries.
-          mv "dub-compose-$VERSION.tar.gz" binaries/
+          mv "dub-compose-$VERSION"-*.tar.gz binaries/
           ( cd binaries && sha256sum ./*.tar.gz | sed 's| \./| |' > SHA256SUMS )
 
-          # The notes promise three targets plus the bundle; assert it rather
-          # than shipping notes that point at files nobody uploaded.
+          # The notes promise three targets per network plus a bundle each;
+          # assert it rather than shipping notes that point at files nobody
+          # uploaded.
           count=$(ls binaries/*.tar.gz | wc -l)
-          test "$count" -eq 4 ||
-            { echo "::error::expected 4 tarballs (3 binary targets + compose bundle), got $count"; exit 1; }
+          test "$count" -eq 8 ||
+            { echo "::error::expected 8 tarballs (3 binary targets x 2 networks + 2 compose bundles), got $count"; exit 1; }
+          for network in testnet polkadot; do
+            n=$(ls binaries/*-"$network"-*.tar.gz binaries/*-"$network".tar.gz 2>/dev/null | wc -l)
+            test "$n" -eq 4 ||
+              { echo "::error::expected 4 $network assets (3 binaries + bundle), got $n"; exit 1; }
+          done
 
           gh release create "$TAG" \
             --title "$TAG" \

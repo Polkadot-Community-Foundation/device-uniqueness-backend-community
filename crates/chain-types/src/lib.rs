@@ -1,22 +1,53 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Refresh with:
-//! `subxt metadata --url <people-rpc> --pallets System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members -f bytes -o crates/chain-types/metadata/people.scale`
+//! Generated People Chain types for the network this build targets.
+//!
+//! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
+//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `polkadot` (polkadot-test). Each has its own vendored blob,
+//! `metadata/metadata.<network>.scale`. Refresh one with:
+//! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
+//! where `<pallets>` is `System,Balances,Utility,Proxy,People,PeopleLite,Resources,Members`,
+//! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
 
 #[allow(clippy::all, missing_docs, rustdoc::all)]
-#[subxt::subxt(runtime_metadata_path = "metadata/people.scale")]
+#[cfg_attr(
+    dub_network = "testnet",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.testnet.scale")
+)]
+#[cfg_attr(
+    dub_network = "polkadot",
+    subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
+)]
 pub mod people {}
 
 pub use subxt;
+
+/// The network this build targets.
+pub const NETWORK: &str = env!("DUB_NETWORK");
+
+/// The vendored blob [`people`] is generated from, relative to the workspace root.
+pub const METADATA_FILE: &str = concat!(
+    "crates/chain-types/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+);
+
+static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/metadata/metadata.",
+    env!("DUB_NETWORK"),
+    ".scale"
+));
 
 /// The vendored metadata [`people`] is generated from, decoded once.
 static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
     std::sync::LazyLock::new(|| {
         std::sync::Arc::new(
-            subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+            subxt::Metadata::decode_from(METADATA_BYTES)
                 .expect("vendored People Chain metadata decodes"),
         )
     });
@@ -322,8 +353,6 @@ noop_names! {
     AsScarcity = &[0],
     AsDotnsGateway = &[0],
     EthSetOrigin,
-    // `VerifySignature::Disabled`: the Asset Hub lane signs the extrinsic
-    // itself, so this extension carries no signature of its own.
     VerifyMultiSignature = &[0],
     PrevalidateAttests,
 }
@@ -677,7 +706,7 @@ mod tests {
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
-            2_005_000,
+            VENDORED_VERSION.0,
             "the blob's own System::Version is what chain-client logs the live \
              chain against, so refreshing the blob moves this number with it"
         );
@@ -716,8 +745,38 @@ mod tests {
         assert_eq!(call.call_name(), "register_lite_person");
     }
 
+    #[cfg(invite_tickets)]
+    #[test]
+    fn builds_set_invite_ticket_calls() {
+        let ticket = subxt::utils::AccountId32([0u8; 32]);
+        let game = people::tx().game().set_invite_ticket(ticket);
+        assert_eq!(game.pallet_name(), "Game");
+        assert_eq!(game.call_name(), "set_invite_ticket");
+
+        let poi = people::tx().proof_of_ink().set_invite_ticket(ticket);
+        assert_eq!(poi.pallet_name(), "ProofOfInk");
+        assert_eq!(poi.call_name(), "set_invite_ticket");
+    }
+
+    #[cfg(invite_tickets)]
+    #[test]
+    fn builds_available_invites_queries() {
+        let game = people::storage().game().available_invites();
+        assert_eq!(game.pallet_name(), "Game");
+        assert_eq!(game.entry_name(), "AvailableInvites");
+
+        let poi = people::storage().proof_of_ink().available_invites();
+        assert_eq!(poi.pallet_name(), "ProofOfInk");
+        assert_eq!(poi.entry_name(), "AvailableInvites");
+    }
+
+    #[cfg(dub_network = "polkadot")]
+    const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
+    #[cfg(not(dub_network = "polkadot"))]
+    const VENDORED_VERSION: (u32, u32) = (3_000_000, 5);
+
     fn people_metadata() -> subxt::ArcMetadata {
-        subxt::Metadata::decode_from(include_bytes!("../metadata/people.scale"))
+        subxt::Metadata::decode_from(METADATA_BYTES)
             .expect("vendored metadata decodes")
             .arc()
     }
@@ -725,8 +784,8 @@ mod tests {
     fn offline_client_state() -> subxt::config::ClientState<PeopleConfig> {
         subxt::config::ClientState {
             genesis_hash: subxt::utils::H256::zero(),
-            spec_version: 2_005_000,
-            transaction_version: 0,
+            spec_version: VENDORED_VERSION.0,
+            transaction_version: VENDORED_VERSION.1,
             metadata: people_metadata(),
         }
     }

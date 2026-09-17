@@ -22,7 +22,7 @@ pub struct PendingDevice {
 #[derive(Debug, thiserror::Error)]
 pub enum InsertDeviceError {
     /// The device is already recorded (`PENDING` or `CONSUMED`) — a lost
-    /// race, resolved as the payment outcome like any seen device.
+    /// race, resolved as the ineligible outcome like any seen device.
     #[error("device already recorded")]
     Seen,
     /// Any other database failure.

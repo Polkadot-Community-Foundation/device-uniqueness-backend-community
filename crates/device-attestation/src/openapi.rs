@@ -68,7 +68,6 @@ of `{ field, message }` when the failure is per-field validation."
         crate::usernames::available::check,
         crate::usernames::register::register,
         crate::queue::status,
-        crate::payment::status,
     ),
     components(schemas(
         crate::http::error::ErrorResponse,
@@ -85,7 +84,6 @@ of `{ field, message }` when the failure is per-field validation."
         crate::usernames::register::Dotns,
         crate::usernames::register::RegisterResponse,
         crate::queue::QueueStatusResponse,
-        crate::payment::PaymentStatusResponse,
     )),
     modifiers(&SecurityAddon)
 )]

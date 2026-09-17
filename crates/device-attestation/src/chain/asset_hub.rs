@@ -165,6 +165,13 @@ impl AssetHub {
                 .context("reading DotnsGateway::MaxFutureSkewSeconds")?,
         })
     }
+
+    pub async fn next_nonce(&self, account: &AccountId32) -> anyhow::Result<u64> {
+        self.rpc
+            .system_account_next_index(account)
+            .await
+            .context("system_accountNextIndex on Asset Hub")
+    }
 }
 
 fn label_key(lite_label: &str) -> Value {

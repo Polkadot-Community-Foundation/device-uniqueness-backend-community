@@ -127,9 +127,11 @@ async fn report_runtime_version<T: subxt::Config>(
             spec_version,
             transaction_version,
             vendored_spec_version = vendored,
+            network = chain_types::NETWORK,
+            vendored_metadata = chain_types::METADATA_FILE,
             "live runtime and the vendored metadata disagree; refresh \
-             crates/chain-types/metadata/people.scale (or repoint at a node \
-             on the version it was built from) — until then any signed call \
+             vendored_metadata, or check this build's DUB_NETWORK names the \
+             network this node belongs to — until then any signed call \
              whose types changed is rejected as not compatible with the live \
              chain"
         ),

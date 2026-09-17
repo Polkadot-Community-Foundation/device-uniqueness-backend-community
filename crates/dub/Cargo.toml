@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "../chain-types/build.rs"
 autobins = false
 
 # The single deployable binary. Every service and worker in this workspace is a
@@ -28,6 +29,7 @@ path = "src/main.rs"
 http-common.workspace = true
 device-attestation = { path = "../device-attestation" }
 username-indexer = { path = "../username-indexer" }
+invite-tickets = { path = "../invite-tickets" }
 turn = { path = "../turn" }
 notifications = { path = "../notifications" }
 

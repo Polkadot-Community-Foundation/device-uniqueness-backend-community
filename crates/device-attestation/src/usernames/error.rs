@@ -54,10 +54,6 @@ pub enum UsernamesError {
     /// claim, it never falls through to another lane).
     #[error("voucher not redeemable")]
     Voucher(crate::eligibility::VoucherError),
-    /// The authenticated account has no active payment request (404, new
-    /// `/api/v1/usernames/payment-status` surface).
-    #[error("no active payment request")]
-    NoPaymentRequest,
     #[error("registration persistence failed")]
     PersistenceFailed,
     /// Hard-mode DeviceCheck required a usable `Device-Token-iOS` and none
@@ -157,11 +153,6 @@ impl IntoResponse for UsernamesError {
                 };
                 (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
             }
-            UsernamesError::NoPaymentRequest => (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "No active payment request" })),
-            )
-                .into_response(),
             UsernamesError::PersistenceFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "Failed to persist username registration" })),
