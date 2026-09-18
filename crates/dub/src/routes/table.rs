@@ -10,13 +10,6 @@ pub enum Match {
     /// A path prefix that requires the separator: `/api/v1/turn/` owns
     /// `/api/v1/turn/issue` but not `/api/v1/turning`.
     PrefixSlash(&'static str),
-    /// `GET` reads under `prefix`, except one carved-out path which falls
-    /// through to the catch-all owner.
-    GetReads {
-        prefix: &'static str,
-        /// The one path that does not, despite matching.
-        except: &'static str,
-    },
     CatchAll,
 }
 
@@ -65,27 +58,36 @@ pub const TABLE: &[Row] = &[
         ],
     },
     Row {
-        name: "username-reads",
+        name: "username-search",
         owner: "username-indexer",
         caddy_arg: 1,
-        matches: Match::GetReads {
-            prefix: "/api/v1/usernames",
-            except: "/api/v1/usernames/payment-status",
-        },
+        matches: Match::Prefix("/api/v1/usernames/search"),
         priority: 100,
         strip_prefix: false,
         shared: false,
         why: &[
-            "GET username reads belong to the indexer — EXCEPT the payment-status poll, which is",
-            "device-attestation-api's, and except every non-GET method (the write and availability surface,",
-            "and the collection-root CORS preflight). A plain path-prefix rule can express neither",
-            "carve-out; this is why the Traefik emitter renders an IngressRoute rather than an Ingress.",
+            "Username search is the indexer's only route under /api/v1/usernames; the rest of that",
+            "prefix (the claim and availability writes, their CORS preflight) falls through to",
+            "device-attestation-api.",
         ],
+    },
+    // Kept on every network: the edge config is shared, and a build without
+    // invite-tickets serves the catch-all 404 here. A deployment that runs no
+    // invite-tickets-api points this upstream at its device-attestation-api.
+    Row {
+        name: "invite-tickets",
+        owner: "invite-tickets-api",
+        caddy_arg: 2,
+        matches: Match::PrefixSlash("/api/v1/invitation-ticket/"),
+        priority: 90,
+        strip_prefix: false,
+        shared: false,
+        why: &["The synchronous invitation-credential claim route."],
     },
     Row {
         name: "turn",
         owner: "turn-api",
-        caddy_arg: 2,
+        caddy_arg: 3,
         matches: Match::PrefixSlash("/api/v1/turn/"),
         priority: 90,
         strip_prefix: false,
@@ -98,7 +100,7 @@ pub const TABLE: &[Row] = &[
     Row {
         name: "notify",
         owner: "notify-relay",
-        caddy_arg: 3,
+        caddy_arg: 4,
         matches: Match::Prefix("/api/v1/notify"),
         priority: 90,
         strip_prefix: false,
@@ -170,20 +172,6 @@ pub fn caddy_snippet() -> String {
                     row.caddy_arg
                 ));
             }
-            Match::GetReads { prefix, except } => {
-                // `path /p/*` alone does NOT match the bare `/p`, so both are
-                // listed. Traefik's PathPrefix needs only one term — the reason
-                // these are two emitters and not a translation.
-                out.push_str(&format!("\t@{} {{\n", row.name.replace('-', "_")));
-                out.push_str("\t\tmethod GET\n");
-                out.push_str(&format!("\t\tpath {prefix} {prefix}/*\n"));
-                out.push_str(&format!("\t\tnot path {except}\n\t}}\n"));
-                out.push_str(&format!("\thandle @{} {{\n", row.name.replace('-', "_")));
-                out.push_str(&format!(
-                    "\t\treverse_proxy {{args[{}]}}\n\t}}\n",
-                    row.caddy_arg
-                ));
-            }
             Match::CatchAll => {
                 out.push_str("\thandle {\n");
                 out.push_str(&format!(
@@ -227,9 +215,6 @@ pub fn chart_routes() -> String {
 fn traefik_rule(row: &Row) -> String {
     match row.matches {
         Match::Prefix(prefix) | Match::PrefixSlash(prefix) => format!("PathPrefix(`{prefix}`)"),
-        Match::GetReads { prefix, except } => {
-            format!("Method(`GET`) && PathPrefix(`{prefix}`) && !Path(`{except}`)")
-        }
         Match::CatchAll => "PathPrefix(`/`)".to_string(),
     }
 }
@@ -254,15 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn username_reads_outranks_the_catch_all_in_both_orderings() {
-        let reads = TABLE
+    fn username_search_outranks_the_catch_all_in_both_orderings() {
+        let search = TABLE
             .iter()
-            .position(|r| r.name == "username-reads")
+            .position(|r| r.name == "username-search")
             .unwrap();
         let default = TABLE.iter().position(|r| r.name == "default").unwrap();
-        assert!(reads < default, "Caddy order: first match wins");
+        assert!(search < default, "Caddy order: first match wins");
         assert!(
-            TABLE[reads].priority > TABLE[default].priority,
+            TABLE[search].priority > TABLE[default].priority,
             "Traefik order"
         );
     }
@@ -271,7 +256,9 @@ mod tests {
     fn every_owner_is_a_real_target() {
         for row in TABLE {
             assert!(
-                crate::roles::ROLES.contains(&row.owner) || row.owner == "api-docs",
+                crate::roles::ROLES.contains(&row.owner)
+                    || crate::roles::INVITE_TICKETS_ROLES.contains(&row.owner)
+                    || row.owner == "api-docs",
                 "route {} names unknown owner {}",
                 row.name,
                 row.owner
@@ -280,12 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn the_get_reads_matcher_covers_the_bare_path() {
+    fn only_search_under_usernames_reaches_the_indexer() {
         let snippet = caddy_snippet();
         assert!(
-            snippet.contains("path /api/v1/usernames /api/v1/usernames/*"),
+            snippet.contains("handle /api/v1/usernames/search* {"),
             "{snippet}"
         );
-        assert!(snippet.contains("not path /api/v1/usernames/payment-status"));
+        assert!(
+            !snippet.contains("path /api/v1/usernames /api/v1/usernames/*")
+                && !snippet.contains("handle /api/v1/usernames* {"),
+            "the claim root must fall through to device-attestation-api: {snippet}"
+        );
     }
 }

@@ -10,11 +10,7 @@
 //! that declares several — both polkadot-test chains do (People: 11 extensions
 //! at version 0, 19 at version 1; Asset Hub: 13 and 18) — the extrinsic cannot
 //! be decoded, and the node aborts validation with a wasm trap rather than an
-//! `InvalidTransaction` verdict. Every transaction the writer submitted would
-//! be refused.
-//!
-//! [`create_signed_v4`] is `create_signed` with that one choice corrected: the
-//! same nonce and block injection, the same signer payload rules, version 0.
+//! `InvalidTransaction` verdict.
 
 use subxt::{
     client::{ClientAtBlock, OnlineClientAtBlockImpl},
@@ -33,7 +29,11 @@ use subxt::{
 const V4_EXTENSION_VERSION: u8 = 0;
 
 /// Build and sign a v4 extrinsic for `call` against the block `at` is pinned
-/// to, encoding the version-0 transaction extensions. See the module docs.
+/// to, encoding the version-0 transaction extensions.
+///
+/// Like `create_signed`, it first checks `call` against the live metadata, so a
+/// call whose shape changed since the vendored metadata fails here with
+/// `IncompatibleCodegen` instead of being signed and submitted.
 pub async fn create_signed_v4<T, Call, S>(
     at: &ClientAtBlock<T, OnlineClientAtBlockImpl<T>>,
     call: &Call,
@@ -46,10 +46,9 @@ where
     S: Signer<T>,
 {
     let transactions = at.transactions();
+    transactions.validate(call)?;
     let account = signer.account_id();
 
-    // What `create_signable` injects: an explicit nonce in `params` wins over
-    // the chain's, and an immortal transaction ignores the block.
     params.inject_account_nonce(transactions.account_nonce(&account).await?);
     params.inject_block(at.block_number(), at.block_hash());
 

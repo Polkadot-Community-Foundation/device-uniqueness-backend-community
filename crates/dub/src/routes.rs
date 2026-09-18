@@ -34,20 +34,27 @@ pub struct Surfaces {
     pub attestation: Router,
     /// Username reads (`/search`) and proof-of-compute issuance.
     pub indexer: Router,
+    /// `/api/v1/invitation-ticket/*`. Absent where the network has no invite
+    /// pallets; the path then falls through to the catch-all JSON 404.
+    #[cfg(invite_tickets)]
+    pub invite_tickets: Router,
     /// `/api/v1/turn/*`.
     pub turn: Router,
     /// `/api/v1/notify*` — see the module docs for its distinct 404 dialect.
     pub notifications: Router,
 }
 
-/// Merge the four surfaces into the public route table.
+/// Merge the surfaces into the public route table.
 ///
 /// The caller adds health, `/docs` and the middleware stack; this function owns
 /// only who-answers-what.
 pub fn merge(surfaces: Surfaces) -> Router {
-    Router::new()
+    let router = Router::new()
         .merge(surfaces.attestation)
-        .merge(surfaces.indexer)
+        .merge(surfaces.indexer);
+    #[cfg(invite_tickets)]
+    let router = router.merge(surfaces.invite_tickets);
+    router
         .merge(surfaces.turn)
         .merge(surfaces.notifications)
         .fallback(fallback)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One image, six roles — checked statically.
+# One image, one role per service — checked statically.
 #
 # This replaces verify_image_split.sh. That gate existed because a service whose
 # build target pointed at another service's stage "still starts, still passes
@@ -30,8 +30,6 @@ fail() {
 
 bake="$(docker buildx bake --print all 2>/dev/null)" ||
   fail "docker buildx bake --print all failed"
-compose="$(docker compose config --format json)" ||
-  fail "docker compose config failed"
 
 # 1. ONE bake target, building the Dockerfile stage of the same name.
 mapfile -t targets < <(jq -r '.group.all.targets[]' <<<"$bake")
@@ -55,10 +53,28 @@ grep -qE '^ENTRYPOINT \["dub"\]$' Dockerfile ||
 
 # 3. The roles the binary actually accepts. `cargo run` rather than a built
 #    artifact so this stays offline and needs no prior `docker build`.
+#
+#    The set depends on the network the binary is built for (DUB_NETWORK, read
+#    by cargo here): networks without the invite pallets drop both
+#    invite-tickets roles, and compose keeps those services behind the
+#    `invite-tickets` profile. So the compose file is rendered with exactly the
+#    profiles this build can serve, and the rest of the gate is unchanged.
 mapfile -t roles < <(cargo run --quiet -p dub -- --list-roles | sort) ||
   fail "dub --list-roles failed"
-[ "${#roles[@]}" -eq 6 ] ||
-  fail "dub accepts ${#roles[@]} roles, expected 6"
+profiles=()
+if printf '%s\n' "${roles[@]}" | grep -qx invite-tickets-api; then
+  expected_roles=8
+  profiles=(--profile invite-tickets)
+else
+  expected_roles=6
+fi
+[ "${#roles[@]}" -eq "$expected_roles" ] ||
+  fail "dub (DUB_NETWORK=${DUB_NETWORK:-testnet}) accepts ${#roles[@]} roles, expected $expected_roles"
+
+# COMPOSE_PROFILES cleared so a .env or shell selecting profiles cannot widen or
+# narrow what is checked; the build decides.
+compose="$(COMPOSE_PROFILES= docker compose "${profiles[@]}" config --format json)" ||
+  fail "docker compose config failed"
 
 # 4. Compose: every service that runs the image names a role, exactly once, and
 #    its service name IS that role.
@@ -105,7 +121,7 @@ mapfile -t refs < <(jq -r '.services | to_entries[]
 
 # 6. The two topologies are disjoint sets of roles.
 #
-#    The binary offers a standard shape (the six per-service roles) and a
+#    The binary offers a standard shape (the per-service roles) and a
 #    merged `all-in-one`. A deployment enables one set or the other, never a
 #    mix — which only means anything if no role belongs to both.
 mapfile -t merged_roles < <(cargo run --quiet -p dub -- --list-merged-roles | sort) ||

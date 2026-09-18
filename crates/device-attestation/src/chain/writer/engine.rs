@@ -661,9 +661,6 @@ const SIGNER_CONTENTION: &[&str] = &[
     // Pool: the identical transaction is already queued. Resubmitting cannot
     // improve on that; waiting can.
     "Transaction Already Imported",
-    // The cached nonce trailed the chain. Re-read it and try again, but not at
-    // this row's expense.
-    "Transaction is outdated",
     // Transport, not verdict: the subscription or the socket died while the
     // transaction was in flight. It may already be in a pool holding our nonce,
     // so the row learns nothing from this and everything behind it is refused
@@ -680,6 +677,13 @@ const SIGNER_CONTENTION: &[&str] = &[
 /// run: it is one shared condition, and every row behind it waits the same.
 pub(super) const SIGNER_CONTENTION_BACKOFF_SECS: i64 = 30;
 
+/// The node's refusal of a nonce *below* the signer's current one: the slot
+/// was already consumed, by one of our own transactions the nonce read did not
+/// see yet or by something else signing from the same account.
+pub(super) const STALE_NONCE: &str = "Transaction is outdated";
+
+pub(super) const STALE_NONCE_BACKOFF_SECS: i64 = 6;
+
 /// What [`finalize`] says when `finalize_timeout` runs out.
 ///
 /// It reads like a rejection and is not one: the transaction is still alive in
@@ -693,6 +697,7 @@ const FINALIZE_TIMEOUT: &str = "finalization timed out";
 
 fn is_signer_contention(reason: &str) -> bool {
     reason.contains(FINALIZE_TIMEOUT)
+        || reason.contains(STALE_NONCE)
         || SIGNER_CONTENTION
             .iter()
             .any(|refusal| reason.contains(refusal))
@@ -917,7 +922,10 @@ mod tests {
     #[test]
     fn every_signer_wide_refusal_defers_rather_than_spending_the_row() {
         let candidate = [7; 32];
-        for refusal in SIGNER_CONTENTION.iter().chain([&FINALIZE_TIMEOUT]) {
+        for refusal in SIGNER_CONTENTION
+            .iter()
+            .chain([&FINALIZE_TIMEOUT, &STALE_NONCE])
+        {
             let reason = format!("Error during transaction progress: {refusal}");
             assert_eq!(
                 classify_submit_failure(&reason, None, candidate, 8, 8),

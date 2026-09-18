@@ -22,7 +22,15 @@ env:
 
 jobs:
   offline:
+    # Each network compiles differently (vendored metadata, invite-tickets
+    # roles), so each one is linted and tested as its own build.
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [testnet, polkadot]
     runs-on: ubuntu-latest
+    env:
+      DUB_NETWORK: ${{ matrix.network }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -41,6 +49,8 @@ jobs:
         run: scripts/verify_compose_boundaries.sh
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.network }}
 
       - name: role split
         run: scripts/verify_role_split.sh

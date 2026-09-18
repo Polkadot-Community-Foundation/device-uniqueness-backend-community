@@ -39,7 +39,6 @@ impl Ticker {
 pub(super) struct Passes {
     resources: Ticker,
     stranded: Ticker,
-    payment: Ticker,
 }
 
 impl Passes {
@@ -47,7 +46,6 @@ impl Passes {
         Self {
             resources: Ticker::new(config.resource_poll_interval),
             stranded: Ticker::new(config.queue_fallback_after),
-            payment: Ticker::new(config.payment_poll_interval),
         }
     }
 
@@ -73,9 +71,6 @@ impl Passes {
         }
 
         self.queue(pool, config).await;
-        if self.payment.due() {
-            payment(pool, chain).await;
-        }
     }
 
     // The queue's two mutually exclusive halves.
@@ -104,20 +99,6 @@ impl Passes {
                 Err(e) => tracing::warn!(error = %e, "queue janitor drain failed"),
             }
         }
-    }
-}
-
-async fn payment(pool: &sqlx::PgPool, chain: &PeopleChain) {
-    match crate::payment::watch_pass(pool, chain).await {
-        Ok(stats) if stats.acted() => tracing::info!(
-            expired = stats.expired,
-            confirmed = stats.confirmed,
-            conflicted = stats.conflicted,
-            still_pending = stats.still_pending,
-            "payment watch pass"
-        ),
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "payment watch pass failed"),
     }
 }
 

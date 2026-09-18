@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Every database credential in the workspace. The services read NAMESPACED
-# names — a bare DATABASE_URL was read by several configs pointing at different
-# Postgres instances, so one process reading two of them would connect a service
-# to another service's database and run the wrong migrations against it. The
-# bare name is still honoured by the dual-read for one release, so it is
-# forbidden alongside the namespaced ones.
+# Every database credential in the workspace. The four services read NAMESPACED
+# names — a bare DATABASE_URL was read by four configs pointing at four
+# different Postgres instances, so one process reading two of them would connect
+# a service to another service's database and run the wrong migrations against
+# it. The bare name is still honoured by the dual-read for one release, so it is
+# forbidden alongside the four.
 DB_URL_KEYS=(
   DEVICE_ATTESTATION_DATABASE_URL
   INDEXER_DATABASE_URL
+  INVITE_TICKETS_DATABASE_URL
   DATABASE_URL
 )
 
-rendered="$(docker compose config)"
+# `--profile '*'`: the boundaries hold for every service the file can start,
+# including the ones behind a profile (invite-tickets) that .env may leave off.
+rendered="$(docker compose --profile '*' config)"
 # Cleared so a shell still holding the local-run overrides (see the header of
 # gateway/docker-compose.yml) checks the committed defaults, not its own ports.
 rendered_gateway="$(EDGE_HTTP_PORT= EDGE_HTTPS_PORT= docker compose -f gateway/docker-compose.yml config)"
-rendered_debug="$(docker compose -f docker-compose.yml -f docker-compose.debug.yml config)"
+rendered_debug="$(docker compose --profile '*' -f docker-compose.yml -f docker-compose.debug.yml config)"
 # Same treatment as the gateway: cleared so a shell that republished a UI port
 # for itself is checked against the committed loopback defaults.
 rendered_observability="$(PROMETHEUS_PORT= GRAFANA_PORT= ALLOY_PORT= \
@@ -89,11 +92,15 @@ forbid_key() {
   fi
 }
 
+for service in device-attestation-api device-attestation-chain-writer username-indexer; do
+  forbid_key "$service" INVITER_SIGNER_SURI
+done
+
 # Request-validation bounds are intake-only. They shape 400s, not extrinsics.
 for key in DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS DOTNS_MAX_FUTURE_SKEW_SECS; do
   require_key device-attestation-api "$key"
   for service in device-attestation-chain-writer registration-queue username-indexer \
-                 turn-api; do
+                 invite-tickets-api invite-tickets-pool turn-api; do
     forbid_key "$service" "$key"
   done
 done
@@ -109,7 +116,8 @@ require_key device-attestation-chain-writer ASSET_HUB_RPC_URL
 require_key device-attestation-chain-writer ATTESTER_ACCOUNT
 require_key device-attestation-api ATTESTER_ACCOUNT
 for service in device-attestation-api registration-queue username-indexer \
-               turn-api notify-relay; do
+               invite-tickets-api invite-tickets-pool turn-api \
+               notify-relay; do
   forbid_key "$service" ASSET_HUB_RPC_URL
 done
 
@@ -117,7 +125,8 @@ done
 # device-attestation DB — never signing secrets or JWT material. Its lease is the queue
 # liveness signal, so it needs its cadence knobs.
 for key in JWT_ED25519_SECRET JWT_ED25519_PUBLIC_KEY JWT_JWKS_JSON \
-           CHAIN_WRITER_SIGNER_SURI TURN_SECRET; do
+           CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI INVITE_INVITER_SIGNER_SURI \
+           TURN_SECRET; do
   forbid_key registration-queue "$key"
 done
 require_key registration-queue QUEUE_ADVANCE_INTERVAL_SECS
@@ -134,7 +143,8 @@ require_key device-attestation-chain-writer QUEUE_FALLBACK_AFTER_SECS
 # public key admits authenticated callers past the proof-of-compute gate, but the
 # service can never mint a token. The signing secret and every other service's
 # secret stay out.
-for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI TURN_SECRET; do
+for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+           INVITE_INVITER_SIGNER_SURI TURN_SECRET; do
   forbid_key username-indexer "$key"
 done
 require_key username-indexer SEARCH_RATE_LIMIT
@@ -146,7 +156,9 @@ require_key username-indexer JWT_ED25519_PUBLIC_KEY
 require_key username-indexer POC_HMAC_SECRET
 # Every other service in the compose file, application and database alike.
 for service in device-attestation-api device-attestation-chain-writer registration-queue \
-               turn-api notify-relay postgres username-indexer-postgres; do
+               invite-tickets-api invite-tickets-pool turn-api notify-relay \
+               postgres username-indexer-postgres \
+               invite-tickets-postgres; do
   forbid_key "$service" POC_HMAC_SECRET
 done
 
@@ -165,8 +177,8 @@ debug_mappings="$(port_mappings <<<"$rendered_debug")"
 debug_count="$(grep -c . <<<"$debug_mappings" || true)"
 debug_public="$(grep -vc '^127\.0\.0\.1|' <<<"$debug_mappings" || true)"
 debug_unique="$(cut -d'|' -f2 <<<"$debug_mappings" | cut -d'-' -f1 | sort -u | grep -c . || true)"
-if [ "$debug_count" -ne 6 ]; then
-  echo "docker-compose.debug.yml must republish all 6 service/Postgres ports ($debug_count found)" >&2
+if [ "$debug_count" -ne 8 ]; then
+  echo "docker-compose.debug.yml must republish all 8 service/Postgres ports ($debug_count found)" >&2
   echo "$debug_mappings" >&2
   exit 1
 fi
@@ -191,10 +203,11 @@ fi
 declare -A DB_OWNERS=(
   [DEVICE_ATTESTATION_DATABASE_URL]="device-attestation-api device-attestation-chain-writer registration-queue"
   [INDEXER_DATABASE_URL]="username-indexer"
+  [INVITE_TICKETS_DATABASE_URL]="invite-tickets-api invite-tickets-pool"
 )
 APP_SERVICES=(
   device-attestation-api device-attestation-chain-writer registration-queue username-indexer
-  turn-api notify-relay
+  invite-tickets-api invite-tickets-pool turn-api notify-relay
 )
 for key in "${!DB_OWNERS[@]}"; do
   for service in "${APP_SERVICES[@]}"; do
@@ -212,7 +225,9 @@ for service in "${APP_SERVICES[@]}"; do
 done
 
 # The per-service rate limits, which used to be one shared `RATE_LIMIT` — tuning
-# one service retuned the others.
+# one service retuned the other two.
+require_key invite-tickets-api INVITE_TICKETS_RATE_LIMIT
+require_key invite-tickets-api INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS
 require_key turn-api TURN_RATE_LIMIT
 require_key turn-api TURN_RATE_LIMIT_WINDOW_SECS
 for service in "${APP_SERVICES[@]}"; do
@@ -222,7 +237,8 @@ done
 
 # notify-relay is verify-only and holds its own push secrets, but never another
 # service's signing/DB secrets.
-for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}"; do
+for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+           INVITE_INVITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}"; do
   forbid_key notify-relay "$key"
 done
 require_key notify-relay JWT_ED25519_PUBLIC_KEY
@@ -234,8 +250,8 @@ require_key notify-relay NOTIFY_RATE_LIMIT_WINDOW_SECS
 # scoped to a subshell rather than left in place for whatever is added below.
 (
   rendered="$rendered_gateway"
-  for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI TURN_SECRET \
-             "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
+  for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+             INVITE_INVITER_SIGNER_SURI TURN_SECRET "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
              JWT_ED25519_PUBLIC_KEY APNS_PRIVATE_KEY APNS_PRIVATE_KEY_FILE \
              FCM_SERVICE_ACCOUNT_JSON POC_HMAC_SECRET \
              ASSET_HUB_RPC_URL DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS \
@@ -271,8 +287,8 @@ fi
 (
   rendered="$rendered_observability"
   for service in prometheus loki alloy grafana; do
-    for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI TURN_SECRET POC_HMAC_SECRET \
-               "${DB_URL_KEYS[@]}" \
+    for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+               INVITE_INVITER_SIGNER_SURI TURN_SECRET POC_HMAC_SECRET "${DB_URL_KEYS[@]}" \
                APNS_PRIVATE_KEY FCM_SERVICE_ACCOUNT_JSON; do
       forbid_key "$service" "$key"
     done

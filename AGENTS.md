@@ -33,7 +33,8 @@ If a change makes a doc wrong, fix the doc (or flag the drift) in the same chang
 Twelve crates today (plans may add more independently-deployable service crates):
 
 - `dub` — **the single deployable binary**. Every service and worker is a *role* of this one
-  process (`dub --role device-attestation-api`; `dub --list-roles` prints the eight, `--list-merged-roles` the
+  process (`dub --role device-attestation-api`; `dub --list-roles` prints them — eight on a `testnet`
+  build, six on `polkadot` — and `--list-merged-roles` the
   small topology's `all-in-one`). Process wiring only, no
   domain logic: each role module holds that service's former `main` body and enters the service
   crate through its library `routes()` / `run()`. Also serves `--healthcheck` (a GET on this
@@ -42,16 +43,23 @@ Twelve crates today (plans may add more independently-deployable service crates)
   `gateway/Caddyfile` proxies, in Rust, which `--role all-in-one` serves so a consumer can run the
   whole API with no edge. `all-in-one` is accepted by `--role` but deliberately **absent from
   `--list-roles`** (it holds every secret in one process), so the gate rejects it in any manifest.
-  **Two topologies**: standard (six workloads) and small (`all-in-one` + the two workers). They
+  **Two topologies**: standard (eight workloads, six on `polkadot`) and small (`all-in-one` + the
+  three workers, two on `polkadot`). They
   are mutually exclusive and the compose file here runs the standard one —
   `docs/architecture.md` "Deployment topologies" has the threat model,
   `docs/operations.md` "Choosing a topology" the operator view.
-- `chain-types` — generated People Chain type surface (subxt codegen).
+- `chain-types` — generated People Chain type surface (subxt codegen), from the vendored
+  `metadata/metadata.<network>.scale` that `DUB_NETWORK` selects. Its `build.rs` is **the** network
+  switch: `invite-tickets`, `dub` and `apidoc-gen` name it as their own `build =` script, and it
+  emits `cfg(dub_network = "…")` plus `cfg(invite_tickets)` (`testnet`, not `polkadot`). Two values,
+  because two People runtimes — previewnet and paseo-next-v2 share one, so they share one build. Gate
+  network-specific code on those cfgs; never read `DUB_NETWORK` at runtime.
 - `chain-client` — reconnecting People Chain connection + the chain-writer signing key (`WriterSigner`); product-agnostic transport shared by the services.
 - `jwt-verify` — the cross-service auth contract: JWKS parsing, Ed25519 signing and verification, claims. It holds **both** halves, but only `device-attestation` is given `JWT_ED25519_SECRET`, so it is the only process that can construct the issuer; every other service builds a verifier from public key material alone. (The crate name predates the issuer moving in.)
-- `http-common` — shared axum primitives: the one JSON error envelope every service renders (`{error}`, plus a `fields` array of `{field, message}` on per-field validation failures), the JWT extractor, rate limiter, health, middleware stack, and fail-fast env helpers; consumed by turn and notifications. Also holds the two things **every** process installs: the metrics exporter (`metrics::spawn`) and the log subscriber (`telemetry::init`).
+- `http-common` — shared axum primitives: the one JSON error envelope every service renders (`{error}`, plus a `fields` array of `{field, message}` on per-field validation failures), the JWT extractor, rate limiter, health, middleware stack, and fail-fast env helpers; consumed by invite-tickets. Also holds the two things **every** process installs: the metrics exporter (`metrics::spawn`) and the log subscriber (`telemetry::init`).
 - `device-attestation` — the device attestation service (lib + the `voucher-mint` CLI; roles `device-attestation-api`, `device-attestation-chain-writer`, and the `registration-queue` advancer — with `QUEUE_ENABLED` on, its promotion is the only queue exit: down, claims park as `QUEUED` and the writer raises a stranded-queue warning).
 - `username-indexer` — username indexer + search service.
+- `invite-tickets` — synchronous invitation-credential claim service, the route the shipping apps call (lib; roles `invite-tickets-api` and `invite-tickets-pool`).
 - `turn` — stateless TURN credential issuer (coturn REST-API HMAC construction over a relay-shared secret; lib; role `turn-api`). No DB; when proof issuance is enabled, each environment's process maintains a read-only root cache from its own People Chain.
 - `notifications` — thin `/api/v1/notify` relay (verify-only Ed25519 JWT, stateless, DB-free, per-subject rate limited; role `notify-relay`) with optional iOS APNs + Android FCM providers.
 - `apidoc-gen` — dev-only tool (not deployed) that renders the committed API reference from the service crates' `#[utoipa::path]` annotations. Run via `just openapi`.
@@ -62,7 +70,10 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 ## Commands
 
 - `just check` — the fast offline gate: fmt `--check` + `clippy -D warnings` + `cargo test --workspace`.
-- `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 11 suites / 24 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
+  It checks **one** network build (`DUB_NETWORK`, default `testnet`). CI runs it for both, so
+  run `DUB_NETWORK=polkadot just check` too when touching anything invite-tickets or
+  chain-types.
+- `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 12 suites / 30 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
 - `just test-live-chain` — optional Postgres + live People Chain suites; external RPC availability keeps it outside the merge/release gate.
 - `just test-live-providers` — optional credentialed APNs/FCM smokes; runs only the providers configured in the environment and fails if neither is configured.
 - `just coverage-db` — canonical deterministic coverage (offline + Postgres). `just coverage-full` additionally merges the optional live-chain suites.
@@ -86,6 +97,12 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 - Releasing: bump `[workspace.package] version` in `Cargo.toml`, add the matching `## [X.Y.Z]`
   section to `CHANGELOG.md`, merge, tag `vX.Y.Z`, then dispatch `release.yml` manually. The workflow
   refuses a tag that disagrees with either the manifest or the changelog.
+  **Record the runtime versions in that changelog section** — one row per network
+  (`testnet` → `next-people-paseo`, `polkadot` → `people-polkadot`, with each blob's
+  `spec_version`) — because a release ships a build per network and the notes are generated from
+  that section, so this is the only place they are written. The current values are the
+  `KNOWN_RUNTIMES` / `VENDORED_VERSION` entries in `crates/chain-types/src/lib.rs`, which move when
+  a metadata blob is refreshed.
 - Local stack: `docker network create dub-edge` once, then `docker compose up`
   (Postgres + `device-attestation-api` + `device-attestation-chain-writer` + `username-indexer` + its own Postgres).
   All env vars in `.env.example`. Nothing publishes a host port: add
@@ -110,7 +127,7 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
 - **sqlx is runtime-checked** — queries use `sqlx::query(...)` with bound `$n` params; there are **no** `query!`/`query_as!` macros and **no `.sqlx` cache**. Do not add compile-time SQL macros or `cargo sqlx prepare`; deterministic runtime database suites run separately in CI.
 - **Migrations auto-run** via `sqlx::migrate!("./migrations")` in `db::connect` on every boot (advisory-locked, safe across replicas). Don't run them by hand; add schema as new `crates/<service>/migrations/*.sql`.
 - **Config is fail-fast** (`Config::from_env`): required vars (e.g. `DEVICE_ATTESTATION_DATABASE_URL`, `JWT_ED25519_SECRET`, `ATTESTER_ACCOUNT`) have no defaults and abort startup if missing/malformed. Don't add fallbacks for them.
-- **Per-service config keys are namespaced.** The database URLs are `DEVICE_ATTESTATION_` / `INDEXER_DATABASE_URL` and the rate limits `SEARCH_` / `TURN_` / `NOTIFY_RATE_LIMIT[_WINDOW_SECS]` — a bare `DATABASE_URL` used to name several different Postgres instances, so `all-in-one` would have wired services to each other's databases. The names these keys used to have — the bare `DATABASE_URL` / `RATE_LIMIT[_WINDOW_SECS]`, and `IDENTITY_DATABASE_URL` for the service that used to be `identity-service` — were read for one release with a deprecation `WARN` and are no longer read at all: an environment setting only an old name fails fast at boot. `verify_compose_boundaries.sh` asserts each credential reaches only its own services and that nothing is left on a bare name. `BIND_ADDR` and `PEOPLE_RPC_URL` stay shared — one listener, one chain.
+- **Per-service config keys are namespaced.** The database URLs are `DEVICE_ATTESTATION_` / `INDEXER_` / `INVITE_TICKETS_DATABASE_URL` and the rate limits `INVITE_TICKETS_` / `TURN_RATE_LIMIT[_WINDOW_SECS]` — a bare `DATABASE_URL` used to name several different Postgres instances, so `all-in-one` would have wired services to each other's databases. The names these keys used to have — the bare `DATABASE_URL` / `RATE_LIMIT[_WINDOW_SECS]`, and `IDENTITY_DATABASE_URL` for the service that used to be `identity-service` — were read for one release with a deprecation `WARN` and are no longer read at all: an environment setting only an old name fails fast at boot. `verify_compose_boundaries.sh` asserts each credential reaches only its own services and that nothing is left on a bare name. `BIND_ADDR` and `PEOPLE_RPC_URL` stay shared — one listener, one chain.
 - Module layout: `foo.rs` + optional `foo/` children (no new `foo/mod.rs`); short `lib.rs` (docs + lints + `pub mod` + curated re-exports); doc every `pub` item.
 - **Every role starts the same two lines**: `http_common::telemetry::init("<service>")` then `http_common::metrics::spawn("<service>")`, as the first two lines of its `run()`, with its OWN service name — both are process-global and `metrics::spawn` sets `service` as a global label, so hoisting either into `main` would relabel every scrape target. Don't build a subscriber in a role. Logs are aggregated, so prefer structured fields (`tracing::warn!(reservation_id, %error, "…")`) over interpolated message text — the field is queryable, the sentence is not. Don't add the service/environment name as a field: the log shipper labels those.
 

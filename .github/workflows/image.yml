@@ -9,7 +9,7 @@ name: Image
 # that environment. Registry and identity come from production environment
 # variables, so a missing value fails the run instead of falling back to the
 # repository-level devnet secrets. Registry tags are immutable: a tag is built
-# once.
+# once. Built for DUB_NETWORK=polkadot.
 
 on:
   push:
@@ -67,6 +67,8 @@ jobs:
     env:
       IMAGE_REPO: ${{ vars.IMAGE_REGISTRY }}/device-uniqueness-backend
       IMAGE_TAG: ${{ needs.release-tag.outputs.tag }}
+      # The People runtime baked into the image (docker-bake.hcl reads it).
+      DUB_NETWORK: polkadot
     steps:
       - name: Require production configuration
         env:
