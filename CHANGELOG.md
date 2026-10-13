@@ -270,6 +270,48 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **Vendored People metadata refreshed to `next-people-paseo` 3004000, and both
+  signing tuples gained the gates that runtime added.** Pulled from Paseo Next
+  v2 (`wss://paseo-people-next-system-rpc.polkadot.io`), which PreviewNet is now
+  byte-identical to. Unlike the 3003000 refresh this one changes how we sign:
+  `transactionVersion` moved 5 → 6, the runtime publishes a versioned extension
+  set, and the encoding set now declares **`CheckMetadataHash`** — which had no
+  slot in `PeopleTransactionExtensions`, so signing against the upgraded chain
+  would have failed. It is subxt's real extension, not a `Noop`: its value is
+  one byte but its implicit is `Option<[u8; 32]>`, and encoding nothing there is
+  a signer-payload mismatch. The individuality Asset Hubs moved to 3004000 too
+  and now declare **`VerifyMultiSignature`** (the same `pallet_verify_signature`
+  gate People has always had) and **`PrevalidateAttests`**;
+  `AssetHubTransactionExtensions` gained both, so the dotNS gateway write lane
+  keeps signing. Every earlier runtime stays in the known-runtime list, so a
+  binary pointed at a node that has not upgraded yet still signs. In the trimmed
+  pallet surface, `Game` gained a `product_name` constant, `Members` a
+  `RetiredIdentifiers` storage entry, and `System::Events` plus the
+  call-wrapping extrinsics (`Utility::batch`/`force_batch`, `Proxy::proxy`,
+  `People::under_alias`, `PeopleLite::dispatch_as_signer`) re-shaped around the
+  new calls; nothing this workspace constructs changed name or arity.
+
+- **subxt 0.50.3 → 0.51.1, which is required for the runtime above.** subxt
+  0.50 builds a **v4** extrinsic whenever the chain advertises version 4, but
+  encodes the transaction extensions from the runtime's **highest** extension
+  version. Those were the same thing until `next-people-paseo` /
+  `next-asset-hub-paseo` 3004000 split them into version 0 (the short legacy
+  list) and version 1 (the full one). A v4 extrinsic carries no
+  extension-version byte and is defined to use version 0, so one holding
+  version 1's bytes does not decode at all: the node traps inside
+  `validate_transaction` before it ever checks the signature. **Every write to
+  an upgraded chain would have failed**, whatever the metadata said. 0.51
+  resolves a versionless extrinsic to version 0 and fixes it; no workspace code
+  changed to adopt it. Verified against all four live runtimes by handing each
+  node's own `TaggedTransactionQueue_validate_transaction` a transaction built
+  by the unchanged writer path: `Valid` on People and Asset Hub, paseo-next-v2
+  and previewnet alike, where the same calls on 0.50.3 did not decode on any of
+  them. Two `chain-types` tests pin the behaviour — one that a versionless
+  extrinsic resolves to extension version 0, one that the tuple satisfies every
+  name that version declares — so a bump that regressed it fails in CI rather
+  than on chain. The runbook gains a row for the trap, which looks nothing like
+  a bad signature.
+
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync
   loop now subscribes to **best** block headers rather than finalized ones, and
   each pass reconciles the finalized range first (unchanged, authoritative) and
