@@ -886,18 +886,18 @@ Used by:
 
 
 
-- **apidoc-gen 0.6.0** — <https://crates.io/crates/apidoc-gen>
-- **chain-client 0.6.0** — <https://crates.io/crates/chain-client>
-- **chain-types 0.6.0** — <https://crates.io/crates/chain-types>
-- **device-attestation 0.6.0** — <https://crates.io/crates/device-attestation>
-- **dub 0.6.0** — <https://crates.io/crates/dub>
-- **http-common 0.6.0** — <https://crates.io/crates/http-common>
-- **invite-tickets 0.6.0** — <https://crates.io/crates/invite-tickets>
-- **jwt-verify 0.6.0** — <https://crates.io/crates/jwt-verify>
-- **notifications 0.6.0** — <https://crates.io/crates/notifications>
-- **routegen 0.6.0** — <https://crates.io/crates/routegen>
-- **turn 0.6.0** — <https://crates.io/crates/turn>
-- **username-indexer 0.6.0** — <https://crates.io/crates/username-indexer>
+- **apidoc-gen 0.7.0** — <https://crates.io/crates/apidoc-gen>
+- **chain-client 0.7.0** — <https://crates.io/crates/chain-client>
+- **chain-types 0.7.0** — <https://crates.io/crates/chain-types>
+- **device-attestation 0.7.0** — <https://crates.io/crates/device-attestation>
+- **dub 0.7.0** — <https://crates.io/crates/dub>
+- **http-common 0.7.0** — <https://crates.io/crates/http-common>
+- **invite-tickets 0.7.0** — <https://crates.io/crates/invite-tickets>
+- **jwt-verify 0.7.0** — <https://crates.io/crates/jwt-verify>
+- **notifications 0.7.0** — <https://crates.io/crates/notifications>
+- **routegen 0.7.0** — <https://crates.io/crates/routegen>
+- **turn 0.7.0** — <https://crates.io/crates/turn>
+- **username-indexer 0.7.0** — <https://crates.io/crates/username-indexer>
 
 ### GNU General Public License v3.0 or later
 

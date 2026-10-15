@@ -8,6 +8,8 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-16
+
 ### Added
 
 - **The container image is published from this repository.** Until now
@@ -156,10 +158,10 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
   Runtime versions this release targets:
 
-  | build | People runtime | spec_version |
-  | --- | --- | --- |
-  | `testnet` | `next-people-paseo-v2` | 3000000 |
-  | `polkadot` | `people-polkadot` | 2005000 |
+  | build      | People runtime         | spec_version |
+  | ---------- | ---------------------- | ------------ |
+  | `testnet`  | `next-people-paseo-v2` | 3000000      |
+  | `polkadot` | `people-polkadot`      | 2005000      |
 
 - **Widevine device dedup for Android username claims.**
   `POST /api/v1/usernames` accepts three optional evidence fields,
@@ -574,7 +576,9 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.7.0...HEAD
+
+[0.7.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.7.0
 
 [0.6.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.6.0
 
