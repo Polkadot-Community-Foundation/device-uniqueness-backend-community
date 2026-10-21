@@ -237,7 +237,7 @@ delegating_config! {
 pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
-    Noop<VerifyMultiSignature>,
+    tx_ext::VerifySignature<T>,
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
@@ -478,6 +478,32 @@ mod tests {
         extensions: &'static [&'static str],
     }
 
+    const PEOPLE_V3004_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "AsProofOfInkParticipant",
+        "ScoreAsParticipant",
+        "GameAsInvited",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "HonourAuth",
+        "AuthorizeCall",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
     /// What `next-people-paseo` 3000000 declares, in order. paseo-next-v2 and
     /// previewnet upgraded together and their metadata is identical, so one
     /// list covers both.
@@ -578,6 +604,28 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    const ASSET_HUB_V3004_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsScarcity",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
     /// Every runtime a deployment is known to have talked to. The tuples are
     /// the union of these sets, not a snapshot of the newest one: an entry
     /// stays here — and its gate stays in the tuple — so that a binary
@@ -614,7 +662,28 @@ mod tests {
         KnownRuntime {
             env: "paseo-next-v2 / previewnet",
             spec_name: "next-people-paseo",
-            spec_version: 3_000_000,
+            spec_version: 3_004_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 / previewnet asset hub",
+            spec_name: "next-asset-hub-paseo",
+            spec_version: 3_004_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2",
+            spec_name: "next-people-paseo",
+            spec_version: 3_003_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2",
+            spec_name: "next-people-paseo",
+            spec_version: 3_002_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_V3_EXTENSIONS,
         },
@@ -774,6 +843,41 @@ mod tests {
     }
 
     #[test]
+    fn a_v4_extrinsic_resolves_to_extension_version_zero() {
+        assert_eq!(
+            metadata_arc()
+                .extrinsic()
+                .transaction_extension_version_to_use_for_decoding(),
+            0,
+            "subxt must read a versionless (v4) extrinsic as extension \
+             version 0; anything else signs bytes the runtime cannot decode"
+        );
+    }
+
+    #[test]
+    fn version_zero_extensions_are_all_in_the_tuple() {
+        let metadata = metadata_arc();
+        let declared: Vec<&str> = metadata
+            .extrinsic()
+            .transaction_extensions_by_version(0)
+            .expect("version 0 is always declared")
+            .map(|extension| extension.identifier())
+            .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "version 0 must declare transaction extensions"
+        );
+        for name in &declared {
+            assert!(
+                TUPLE_EXTENSIONS.contains(name),
+                "version 0 declares extension {name}, which the tuple cannot \
+                 satisfy — a v4 extrinsic would not encode it"
+            );
+        }
+    }
+
+    #[test]
     fn vendored_metadata_names_the_runtime_it_came_from() {
         assert_eq!(
             vendored_spec_version(),
@@ -844,7 +948,7 @@ mod tests {
     #[cfg(dub_network = "polkadot")]
     const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
     #[cfg(dub_network = "testnet")]
-    const VENDORED_VERSION: (u32, u32) = (3_000_000, 5);
+    const VENDORED_VERSION: (u32, u32) = (3_004_000, 6);
     #[cfg(dub_network = "paseo")]
     const VENDORED_VERSION: (u32, u32) = (2_005_002, 3);
 

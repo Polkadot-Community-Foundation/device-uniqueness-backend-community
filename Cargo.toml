@@ -19,15 +19,15 @@ chain-client = { path = "crates/chain-client" }
 jwt-verify = { path = "crates/jwt-verify" }
 http-common = { path = "crates/http-common" }
 
-subxt = { version = "0.50.3", default-features = false, features = [
+subxt = { version = "0.51.1", default-features = false, features = [
     "native",
     "reconnecting-rpc-client",
 ] }
-subxt-rpcs = { version = "0.50.3", default-features = false, features = [
+subxt-rpcs = { version = "0.51.1", default-features = false, features = [
     "native",
     "reconnecting-rpc-client",
 ] }
-subxt-signer = { version = "0.50.3", default-features = false, features = [
+subxt-signer = { version = "0.51.1", default-features = false, features = [
     "sr25519",
     "std",
 ] }
