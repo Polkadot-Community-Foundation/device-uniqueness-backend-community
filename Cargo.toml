@@ -31,6 +31,7 @@ subxt-signer = { version = "0.51.1", default-features = false, features = [
     "sr25519",
     "std",
 ] }
+scale-info = { version = "2.11.4", default-features = false }
 
 # Ring-VRF personhood-proof verification. Pinned to the revision the People
 # Chain runtime pins (the 288-byte `MembersCommitment` encoding); verify-only

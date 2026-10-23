@@ -1297,6 +1297,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rsa",
+ "scale-info",
  "secrecy",
  "serde",
  "serde_json",

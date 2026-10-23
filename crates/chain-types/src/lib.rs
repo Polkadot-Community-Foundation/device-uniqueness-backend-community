@@ -12,7 +12,6 @@
 //! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
-
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[cfg_attr(
     dub_network = "testnet",
@@ -23,6 +22,30 @@ use subxt::config::transaction_extensions as tx_ext;
     subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
 )]
 pub mod people {}
+
+pub mod asset_hub {
+
+    static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/metadata/ah.",
+        env!("DUB_NETWORK"),
+        ".scale"
+    ));
+
+    /// The vendored metadata [`people`] is generated from, decoded once.
+    static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Arc::new(
+                subxt::Metadata::decode_from(METADATA_BYTES)
+                    .expect("vendored People Chain metadata decodes"),
+            )
+        });
+
+    /// subxt's own error-decoding entry point
+    pub fn metadata_arc() -> subxt::metadata::ArcMetadata {
+        METADATA.clone()
+    }
+}
 
 pub use subxt;
 

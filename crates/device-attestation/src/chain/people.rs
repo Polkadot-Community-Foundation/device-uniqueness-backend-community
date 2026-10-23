@@ -9,10 +9,13 @@ use chain_types::{people, PeopleConfig};
 use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
+use crate::{check_pallet_call_args, extract_call_fields, Pallet};
+
 const DISCRIMINATORS: u8 = 100;
 
-const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
+const PALLET: &str = "PeopleLite";
 
+const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
 fn owner_key(
     username: impl AsRef<[u8]>,
 ) -> people::runtime_types::bounded_collections::bounded_vec::BoundedVec<u8> {
@@ -87,7 +90,26 @@ pub struct PeopleChain {
 impl PeopleChain {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let (client, rpc) = chain_client::connect_with_rpc(url).await?;
-        Ok(Self::from_parts(client, rpc))
+        let self_ = Self::from_parts(client, rpc);
+        self_.check_attest_shape().await?;
+        Ok(self_)
+    }
+
+    async fn check_attest_shape(&self) -> anyhow::Result<()> {
+        let vendored_call =
+            extract_call_fields(chain_types::metadata_arc(), PALLET, "attest", true)?;
+        let call = extract_call_fields(
+            self.client.at_current_block().await?.metadata(),
+            PALLET,
+            "attest",
+            false,
+        )?;
+        check_pallet_call_args(
+            vendored_call.fields.as_slice(),
+            Pallet::PeopleLite,
+            call.fields.as_slice(),
+        )?;
+        Ok(())
     }
 
     pub fn from_parts(client: OnlineClient<PeopleConfig>, rpc: RpcClient) -> Self {

@@ -171,7 +171,6 @@ fn sr25519_signature(bytes: &[u8]) -> Value {
 mod tests {
     use super::*;
     use crate::chain::writer::fixtures::*;
-    use crate::dotns;
 
     #[test]
     fn a_single_row_set_submits_a_bare_attest() {
@@ -248,9 +247,15 @@ mod tests {
         let (r, candidate, _) = signed_reservation();
         let payload = build_reserve_name_tx(&r, &candidate, None);
 
+        let metadata = chain_types::asset_hub::metadata_arc();
+        let metadata_pallet = metadata.pallet_by_name("DotnsGateway").unwrap();
+        let metadata_call = metadata_pallet
+            .call_variant_by_name("reserve_name")
+            .unwrap();
+
         assert_eq!(payload.pallet_name(), "DotnsGateway");
         assert_eq!(payload.call_name(), "reserve_name");
-        assert_eq!(payload.call_data().len(), dotns::RESERVE_NAME_FIELDS.len());
+        assert_eq!(payload.call_data().len(), metadata_call.fields.len());
         assert_eq!(payload.call_data(), &reserve_name_args(&r, &candidate));
     }
 

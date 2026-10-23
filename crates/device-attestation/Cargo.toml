@@ -35,6 +35,7 @@ metrics.workspace = true
 subxt = { workspace = true, features = ["jsonrpsee"] }
 subxt-rpcs.workspace = true
 subxt-signer = { workspace = true, features = ["subxt"] }
+scale-info.workspace = true
 
 tokio.workspace = true
 axum.workspace = true

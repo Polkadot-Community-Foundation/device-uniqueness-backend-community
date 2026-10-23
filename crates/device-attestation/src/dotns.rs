@@ -6,35 +6,6 @@ use subxt::ext::codec::Encode as _;
 /// Message prefix, matching `RESERVE_MSG_PREFIX` in the gateway pallet.
 pub const RESERVE_MSG_PREFIX: &[u8] = b"pop:dotns-gateway:reserve";
 
-/// `DotnsGateway::reserve_name`'s argument names, in order, on the runtime this
-/// writer targets.
-///
-/// [`check_reserve_name_shape`] stops the writer if a future runtime changes
-/// this contract.
-pub const RESERVE_NAME_FIELDS: [&str; 6] = [
-    "candidate",
-    "candidate_signature",
-    "lite_label",
-    "chat_key",
-    "reserved_base_label",
-    "signed_at",
-];
-
-/// The connected Asset Hub's `reserve_name` is not the extrinsic this writer
-/// builds.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "DotnsGateway::reserve_name shape mismatch: this writer builds [{expected}], \
-     the connected Asset Hub declares [{found}]. This chain runs a different \
-     dotns-gateway; point ASSET_HUB_RPC_URL at one with the signed_at variant."
-)]
-pub struct ReserveNameShapeError {
-    /// Comma-separated argument names this writer encodes.
-    expected: String,
-    /// Comma-separated argument names the connected runtime declares.
-    found: String,
-}
-
 /// Returns the bytes of a lite label before the first `.`, or the whole label
 /// when it has none.
 ///
@@ -115,30 +86,6 @@ pub fn verify_reservation_signature(
 pub fn reservation_expired(signed_at: i64, max_validity_secs: u64, now: i64) -> bool {
     let deadline = signed_at.saturating_add_unsigned(max_validity_secs);
     now > deadline
-}
-
-/// Checks the connected Asset Hub's `reserve_name` arguments against
-/// [`RESERVE_NAME_FIELDS`].
-///
-/// Names, in order. A positional-only check would accept a runtime that renamed
-/// an argument. A set check would accept one that reordered it.
-pub fn check_reserve_name_shape<S: AsRef<str>>(fields: &[S]) -> Result<(), ReserveNameShapeError> {
-    let matches = fields.len() == RESERVE_NAME_FIELDS.len()
-        && fields
-            .iter()
-            .zip(RESERVE_NAME_FIELDS)
-            .all(|(found, expected)| found.as_ref() == expected);
-    if matches {
-        return Ok(());
-    }
-    Err(ReserveNameShapeError {
-        expected: RESERVE_NAME_FIELDS.join(", "),
-        found: fields
-            .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>()
-            .join(", "),
-    })
 }
 
 #[cfg(test)]
@@ -250,44 +197,5 @@ mod tests {
         assert!(!reservation_expired(1_000, WINDOW, 1_000 + WINDOW as i64));
         assert!(reservation_expired(1_000, WINDOW, 1_001 + WINDOW as i64));
         assert!(!reservation_expired(i64::MAX, WINDOW, 1_000));
-    }
-
-    #[test]
-    fn shape_guard_accepts_current_shape_and_rejects_historical_variant() {
-        assert!(check_reserve_name_shape(&RESERVE_NAME_FIELDS).is_ok());
-
-        let historical = [
-            "candidate",
-            "candidate_signature",
-            "ring_vrf_key",
-            "proof_of_ownership",
-            "lite_label",
-            "chat_key",
-            "reserved_base_label",
-        ];
-        let error = check_reserve_name_shape(&historical).expect_err("old shape must be rejected");
-        let rendered = error.to_string();
-        assert!(rendered.contains("proof_of_ownership"), "{rendered}");
-        assert!(rendered.contains("signed_at"), "{rendered}");
-
-        let renamed = [
-            "candidate",
-            "candidate_signature",
-            "lite_label",
-            "chat_key",
-            "reserved_label",
-            "signed_at",
-        ];
-        assert!(check_reserve_name_shape(&renamed).is_err());
-
-        let reordered = [
-            "candidate",
-            "candidate_signature",
-            "lite_label",
-            "chat_key",
-            "signed_at",
-            "reserved_base_label",
-        ];
-        assert!(check_reserve_name_shape(&reordered).is_err());
     }
 }
