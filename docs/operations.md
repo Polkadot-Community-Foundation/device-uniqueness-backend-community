@@ -474,7 +474,12 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 ```
 
 - `RETRY_AFTER` retries automatically, up to 8 attempts.
-- `FAILED_TERMINAL` never retries — inspect `last_error`.
+- `FAILED_TERMINAL` never retries — inspect `last_error`. A signature rejection
+  (`PeopleLite.InvalidAttestationSignature`) that clusters on one client build
+  is usually a payload-format change: the row's `payload_version` (also a field
+  on the writer's retry and terminal logs) is the format that claim declared, so
+  `group by payload_version` separates a client that signs a new format under an
+  old declaration from individually bad signatures.
 - **Not every failure spends one of those 8.** A refusal that belongs to the
   *signer* rather than the row — its next nonce still held by an earlier
   transaction of ours waiting in the node's pool, or a submission the writer

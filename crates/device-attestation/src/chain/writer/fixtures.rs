@@ -36,6 +36,7 @@ pub(super) fn reservation() -> Reservation {
         dotns_signature: None,
         dotns_signed_at: None,
         dotns_attempt: 0,
+        payload_version: 1,
         created_at: OffsetDateTime::UNIX_EPOCH,
     }
 }

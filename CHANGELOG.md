@@ -8,6 +8,12 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- **`dotns.signedAt` must be a JSON integer.** `POST /usernames` used to accept
+  a whole-valued float (`1780000000.0`) there; it is now a `400` on
+  `dotns.signedAt`, like a fractional one.
+
 ## [0.7.0] - 2026-09-16
 
 ### Added

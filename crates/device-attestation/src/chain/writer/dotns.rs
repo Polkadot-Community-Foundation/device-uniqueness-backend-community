@@ -300,6 +300,7 @@ impl Lane for Dotns {
                 tracing::warn!(
                     id = r.id,
                     username = %r.full_username,
+                    payload_version = r.payload_version,
                     reason,
                     "dotns reservation failed terminally; the People registration is unaffected"
                 );

@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{collections::BTreeSet, str::FromStr as _};
+use std::collections::BTreeSet;
 
 use axum::{
     body::Bytes,
@@ -13,7 +13,7 @@ use axum::{
 use base64::Engine as _;
 use http_common::AuthSubject;
 use rand::{rngs::OsRng, seq::SliceRandom as _};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -26,95 +26,13 @@ use crate::{
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state, reservation_state, MAX_BASE_LEN};
+use super::{available_digits, base_state, reservation_state};
 
-/// The flat registration request (documentation mirror — the handler
-/// validates raw JSON so it can report every failing field).
-#[derive(Deserialize, ToSchema)]
-#[allow(dead_code)]
-pub struct RegisterRequest {
-    /// SS58 beneficiary account that will own the username.
-    #[serde(rename = "candidateAccountId")]
-    #[schema(
-        rename = "candidateAccountId",
-        example = "5FbRAkhDvNVecNzHLFxBNXFXNwvBaV69S1W3nfBbnxYypkkT"
-    )]
-    candidate_account_id: String,
-    /// Base username (lowercase ASCII letters, 6..=29 chars).
-    #[schema(example = "tallesx")]
-    username: String,
-    /// Optional two-digit suffix, e.g. `"07"`; random-free if omitted.
-    #[serde(rename = "preferredDigits")]
-    #[schema(rename = "preferredDigits", example = "07")]
-    preferred_digits: Option<String>,
-    /// `0x`-hex 64-byte sr25519 signature proving control of the candidate.
-    #[serde(rename = "candidateSignature")]
-    #[schema(rename = "candidateSignature", example = "0x...64 bytes...")]
-    candidate_signature: String,
-    /// `0x`-hex ring VRF key.
-    #[serde(rename = "ringVrfKey")]
-    #[schema(rename = "ringVrfKey", example = "0x...")]
-    ring_vrf_key: String,
-    /// `0x`-hex 64-byte ownership proof.
-    #[serde(rename = "proofOfOwnership")]
-    #[schema(rename = "proofOfOwnership", example = "0x...64 bytes...")]
-    proof_of_ownership: String,
-    /// `0x`-hex 64-byte consumer registration signature.
-    #[serde(rename = "consumerRegistrationSignature")]
-    #[schema(rename = "consumerRegistrationSignature", example = "0x...64 bytes...")]
-    consumer_registration_signature: String,
-    /// `0x`-hex 65-byte identifier key.
-    #[serde(rename = "identifierKey")]
-    #[schema(rename = "identifierKey", example = "0x...65 bytes...")]
-    identifier_key: String,
-    /// Optional single-use registration voucher (the INSTANT lane): bypasses
-    /// the PoUD gate and the registration queue. Ignored unless
-    /// `REGISTRATION_VOUCHERS_ENABLED`.
-    #[serde(rename = "lifetimePoUDVoucher")]
-    #[schema(rename = "lifetimePoUDVoucher", example = "base64url-voucher-key")]
-    lifetime_poud_voucher: Option<String>,
-    /// Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first
-    /// base64 DER attestation chain, 2-10 entries, whose leaf key was created
-    /// with `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖
-    /// accountKey ‖ deviceId)`. All three evidence fields are present
-    /// together or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.
-    /// Sent only when the app measured Widevine L1.
-    #[serde(rename = "attestationChain")]
-    #[schema(rename = "attestationChain", example = json!(["base64-der-leaf", "base64-der-root"]))]
-    attestation_chain: Option<Vec<String>>,
-    /// Base64 32-byte single-use challenge from `/auth/challenges`, bound
-    /// into the leaf key's attestation challenge.
-    #[serde(rename = "deviceChallenge")]
-    #[schema(rename = "deviceChallenge", example = "base64-32-byte-challenge")]
-    device_challenge: Option<String>,
-    /// Base64 32-byte device pseudonym:
-    /// `SHA-256("dub/poud/widevine-id/v1" ‖ rawWidevineId)`, computed on the
-    /// device — the raw id never leaves it.
-    #[serde(rename = "deviceId")]
-    #[schema(rename = "deviceId", example = "base64-32-byte-device-id")]
-    device_id: Option<String>,
-    /// Optional DotNS reservation block.
-    dotns: Option<Dotns>,
-}
+mod request;
 
-/// Optional DotNS reservation, parking a base label for later personhood use.
-#[derive(Deserialize, ToSchema)]
-#[allow(dead_code)]
-pub(crate) struct Dotns {
-    /// `0x`-hex 64-byte signature.
-    #[schema(example = "0x...64 bytes...")]
-    signature: String,
-    /// Unix timestamp the reservation was signed at.
-    #[serde(rename = "signedAt")]
-    #[schema(rename = "signedAt", example = 1780000000i64)]
-    signed_at: i64,
-    /// The bare personhood name to reserve. Its own name on chain — it need
-    /// not be `username`, and availability is checked against *this* name, not
-    /// against the base of the lite username in the same claim.
-    #[serde(rename = "reservedUsername")]
-    #[schema(rename = "reservedUsername", example = "reservedname")]
-    reserved_username: Option<String>,
-}
+pub(crate) use request::Dotns;
+pub use request::RegisterRequest;
+use request::{reserved_name, validate_register, ParsedRegister};
 
 /// `202` body: the reserved full username and its parts.
 #[derive(Serialize, ToSchema)]
@@ -154,16 +72,6 @@ pub struct RegisterResponse {
     pub queue: Option<crate::queue::QueueStatusResponse>,
 }
 
-/// Field-check and refinement messages.
-const MSG_HEX_64: &str = "Must be a hexadecimal string of exactly 64 bytes.";
-const MSG_HEX_65: &str = "Must be a hexadecimal string of exactly 65 bytes.";
-const MSG_DIGITS: &str = "Digits must be between 01-99";
-const MSG_INVALID_SS58: &str = "Invalid ss58 address.";
-const MSG_INVALID_SIGNATURE: &str = "Invalid signature.";
-/// `BaseLabel` is `BoundedVec<u8, ConstU32<32>>` in the dotns-gateway pallet.
-const MAX_DOTNS_LABEL_LEN: usize = 32;
-const PATTERN_BASE: &str = "^([a-z]{6,})$";
-const PATTERN_HEX_STRING: &str = "^(0x)?[a-fA-F0-9]+$";
 const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
 
 /// Reserve a lite username and enqueue it for on-chain registration.
@@ -192,12 +100,14 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             historical (the retired paid lane) and kept for client compatibility.",
          body = serde_json::Value,
          example = json!({ "registrationOutcome": "PAYMENT_REQUIRED" })),
-        (status = 400, description = "Validation failed (with per-field `fields`), malformed JSON, \
+        (status = 400, description = "Validation failed (with per-field `fields`; an unsupported \
+            `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
-            or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence \
-            (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong \
-            field sizes — the specific reason is logged server-side, never returned).",
+            a device-evidence field of the wrong JSON type (in every Widevine mode, like any \
+            other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device \
+            evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, \
+            or wrong field sizes — the specific reason is logged server-side, never returned).",
          body = serde_json::Value,
          example = json!({
              "error": "The request body contains invalid values.",
@@ -263,11 +173,7 @@ pub async fn register(
             });
         }
     }
-    let digit = select_digit(
-        &base.taken,
-        parsed.preferred_digits.as_deref(),
-        &parsed.username,
-    )?;
+    let digit = select_digit(&base.taken, parsed.preferred_digits, &parsed.username)?;
     let digits = format!("{digit:02}");
     let full_username = format!("{}.{digits}", parsed.username);
     let voucher = parsed.voucher.take();
@@ -749,22 +655,6 @@ where
     }
 }
 
-/// The fully-validated registration request, with hex fields decoded.
-struct ParsedRegister {
-    candidate_account_id: String,
-    username: String,
-    preferred_digits: Option<String>,
-    candidate_signature: Vec<u8>,
-    ring_vrf_key: Vec<u8>,
-    proof_of_ownership: Vec<u8>,
-    consumer_registration_signature: Vec<u8>,
-    identifier_key: Vec<u8>,
-    /// `lifetimePoUDVoucher`, populated only when
-    /// `REGISTRATION_VOUCHERS_ENABLED` (the wire ignores the field).
-    voucher: Option<String>,
-    dotns: Option<ParsedDotns>,
-}
-
 /// Assemble the outbox row from the validated request (shared by the voucher
 /// INSTANT path and the standard gate/queue path).
 fn build_reservation(
@@ -787,18 +677,8 @@ fn build_reservation(
         dotns_signature: parsed.dotns.as_ref().map(|d| d.signature.clone()),
         dotns_signed_at: parsed.dotns.as_ref().map(|d| d.signed_at),
         reserved_username: parsed.dotns.and_then(|d| d.reserved_username),
+        payload_version: parsed.payload_version.into(),
     }
-}
-
-struct ParsedDotns {
-    signature: Vec<u8>,
-    signed_at: i64,
-    reserved_username: Option<String>,
-}
-
-/// The personhood name this claim asks to reserve, if it asks for one.
-fn reserved_name(parsed: &ParsedRegister) -> Option<&str> {
-    parsed.dotns.as_ref()?.reserved_username.as_deref()
 }
 
 /// Validate `Device-Token-iOS`: base64, when present.
@@ -842,467 +722,15 @@ fn is_base64(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
-/// Validate the raw body (see module docs for the three-phase semantics).
-fn validate_register(
-    value: &Value,
-    config: &crate::config::Config,
-) -> Result<ParsedRegister, UsernamesError> {
-    let mut errors: Vec<FieldError> = Vec::new();
-    let object = value.as_object();
-
-    let get = |field: &str| object.and_then(|o| o.get(field));
-
-    // A required string field: missing / non-string is a type error.
-    let required_string = |errors: &mut Vec<FieldError>, field: &str| -> Option<String> {
-        match get(field) {
-            Some(Value::String(s)) => Some(s.clone()),
-            other => {
-                errors.push(FieldError {
-                    message: http_common::error::expected(
-                        "string",
-                        http_common::error::received_name(other),
-                    ),
-                    field: field.to_string(),
-                });
-                None
-            }
-        }
-    };
-
-    let mut refine_skipped = false;
-
-    // --- field phase, in field order ------------------------------------
-    let candidate_account_id = required_string(&mut errors, "candidateAccountId");
-    if candidate_account_id.is_none() {
-        refine_skipped = true;
-    }
-
-    let username = required_string(&mut errors, "username");
-    match &username {
-        None => refine_skipped = true,
-        Some(name) => {
-            if !(name.len() >= 6 && name.bytes().all(|b| b.is_ascii_lowercase())) {
-                errors.push(FieldError {
-                    message: http_common::error::must_match(PATTERN_BASE),
-                    field: "username".to_string(),
-                });
-                refine_skipped = true;
-            }
-        }
-    }
-
-    let preferred_digits = match get("preferredDigits") {
-        None => None,
-        Some(Value::String(s)) => {
-            if !is_preferred_digits(s) {
-                errors.push(FieldError {
-                    message: MSG_DIGITS.to_string(),
-                    field: "preferredDigits".to_string(),
-                });
-            }
-            Some(s.clone())
-        }
-        Some(other) => {
-            errors.push(FieldError {
-                message: http_common::error::expected(
-                    "string",
-                    http_common::error::type_name(other),
-                ),
-                field: "preferredDigits".to_string(),
-            });
-            refine_skipped = true;
-            None
-        }
-    };
-
-    // `0x`-prefixed exact-length hex fields (no abort): a failed check still
-    // lets the refinement run, which then skips the verifier.
-    let fixed_hex = |errors: &mut Vec<FieldError>,
-                     refine_skipped: &mut bool,
-                     field: &str,
-                     hex_digits: usize,
-                     message: &str|
-     -> (Option<String>, bool) {
-        match get(field) {
-            Some(Value::String(s)) => {
-                let ok = is_prefixed_hex(s, hex_digits);
-                if !ok {
-                    errors.push(FieldError {
-                        message: message.to_string(),
-                        field: field.to_string(),
-                    });
-                }
-                (Some(s.clone()), ok)
-            }
-            other => {
-                errors.push(FieldError {
-                    message: http_common::error::expected(
-                        "string",
-                        http_common::error::received_name(other),
-                    ),
-                    field: field.to_string(),
-                });
-                *refine_skipped = true;
-                (None, false)
-            }
-        }
-    };
-
-    let (candidate_signature_raw, candidate_signature_ok) = fixed_hex(
-        &mut errors,
-        &mut refine_skipped,
-        "candidateSignature",
-        128,
-        MSG_HEX_64,
-    );
-
-    let ring_vrf_key = match get("ringVrfKey") {
-        Some(Value::String(s)) => {
-            let stripped = s.strip_prefix("0x").unwrap_or(s);
-            if stripped.is_empty() || !stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
-                errors.push(FieldError {
-                    message: http_common::error::must_match(PATTERN_HEX_STRING),
-                    field: "ringVrfKey".to_string(),
-                });
-                refine_skipped = true;
-                None
-            } else {
-                Some(s.clone())
-            }
-        }
-        other => {
-            errors.push(FieldError {
-                message: http_common::error::expected(
-                    "string",
-                    http_common::error::received_name(other),
-                ),
-                field: "ringVrfKey".to_string(),
-            });
-            refine_skipped = true;
-            None
-        }
-    };
-
-    let (proof_of_ownership_raw, _) = fixed_hex(
-        &mut errors,
-        &mut refine_skipped,
-        "proofOfOwnership",
-        128,
-        MSG_HEX_64,
-    );
-    let (consumer_registration_signature_raw, _) = fixed_hex(
-        &mut errors,
-        &mut refine_skipped,
-        "consumerRegistrationSignature",
-        128,
-        MSG_HEX_64,
-    );
-    let (identifier_key_raw, _) = fixed_hex(
-        &mut errors,
-        &mut refine_skipped,
-        "identifierKey",
-        130,
-        MSG_HEX_65,
-    );
-
-    let dotns = match get("dotns") {
-        None => None,
-        Some(Value::Object(block)) => {
-            let mut signature = None;
-            match block.get("signature") {
-                Some(Value::String(s)) => {
-                    if is_prefixed_hex(s, 128) {
-                        signature = Some(s.clone());
-                    } else {
-                        errors.push(FieldError {
-                            message: MSG_HEX_64.to_string(),
-                            field: "dotns.signature".to_string(),
-                        });
-                    }
-                }
-                other => {
-                    errors.push(FieldError {
-                        message: http_common::error::expected(
-                            "string",
-                            http_common::error::received_name(other),
-                        ),
-                        field: "dotns.signature".to_string(),
-                    });
-                    refine_skipped = true;
-                }
-            }
-            let signed_at = match block.get("signedAt") {
-                Some(Value::Number(n)) => match n.as_f64() {
-                    Some(f) if f.fract() == 0.0 && f >= 0.0 => Some(f as i64),
-                    Some(f) if f.fract() != 0.0 => {
-                        errors.push(FieldError {
-                            message: http_common::error::expected("integer", "number"),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                        refine_skipped = true;
-                        None
-                    }
-                    _ => {
-                        errors.push(FieldError {
-                            message: "must be greater than or equal to 0".to_string(),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                        refine_skipped = true;
-                        None
-                    }
-                },
-                other => {
-                    errors.push(FieldError {
-                        message: http_common::error::expected(
-                            "number",
-                            http_common::error::received_name(other),
-                        ),
-                        field: "dotns.signedAt".to_string(),
-                    });
-                    refine_skipped = true;
-                    None
-                }
-            };
-            let reserved_username = match block.get("reservedUsername") {
-                None => None,
-                Some(Value::String(s)) => {
-                    if s.len() >= 6 && s.bytes().all(|b| b.is_ascii_lowercase()) {
-                        Some(s.clone())
-                    } else {
-                        errors.push(FieldError {
-                            message: http_common::error::must_match(PATTERN_BASE),
-                            field: "dotns.reservedUsername".to_string(),
-                        });
-                        refine_skipped = true;
-                        None
-                    }
-                }
-                Some(other) => {
-                    errors.push(FieldError {
-                        message: http_common::error::expected(
-                            "string",
-                            http_common::error::type_name(other),
-                        ),
-                        field: "dotns.reservedUsername".to_string(),
-                    });
-                    refine_skipped = true;
-                    None
-                }
-            };
-            Some((signature, signed_at, reserved_username))
-        }
-        Some(other) => {
-            errors.push(FieldError {
-                message: http_common::error::expected(
-                    "object",
-                    http_common::error::type_name(other),
-                ),
-                field: "dotns".to_string(),
-            });
-            refine_skipped = true;
-            None
-        }
-    };
-
-    // `lifetimePoUDVoucher` (the INSTANT lane): only recognised when the
-    // voucher feature is on — the wire ignores unknown body fields, so
-    // flag-off requests carrying it validate exactly as before. An empty
-    // string is treated as absent (the Device-Token-iOS precedent).
-    let voucher = if config.registration_vouchers_enabled {
-        match get("lifetimePoUDVoucher") {
-            None => None,
-            Some(Value::String(s)) if s.is_empty() => None,
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(other) => {
-                errors.push(FieldError {
-                    message: http_common::error::expected(
-                        "string",
-                        http_common::error::type_name(other),
-                    ),
-                    field: "lifetimePoUDVoucher".to_string(),
-                });
-                refine_skipped = true;
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // --- refinement phase ----------------------------------------------
-    if !refine_skipped {
-        let account_id = candidate_account_id.as_deref().unwrap_or_default();
-        match subxt::utils::AccountId32::from_str(account_id) {
-            Err(_) => errors.push(FieldError {
-                message: MSG_INVALID_SS58.to_string(),
-                field: "candidateAccountId".to_string(),
-            }),
-            Ok(candidate) => {
-                // A pattern-failed candidateSignature already carries its
-                // 400 field error from the check phase; the verifier is
-                // skipped rather than fed a malformed string.
-                if candidate_signature_ok {
-                    let signature = decode_prefixed_hex(candidate_signature_raw.as_deref());
-                    let ring = decode_prefixed_hex(ring_vrf_key.as_deref());
-                    if !verify_candidate_signature(&candidate.0, &signature, &ring) {
-                        errors.push(FieldError {
-                            message: MSG_INVALID_SIGNATURE.to_string(),
-                            field: "candidateSignature".to_string(),
-                        });
-                    }
-                }
-            }
-        }
-
-        if let Some(name) = &username {
-            if name.len() > MAX_BASE_LEN {
-                errors.push(FieldError {
-                    message: format!("Username sum exceeds the maximum length: ({MAX_BASE_LEN})."),
-                    field: "username".to_string(),
-                });
-            }
-        }
-
-        if let Some((_signature, signed_at, reserved_username)) = &dotns {
-            {
-                if let Some(signed_at) = signed_at {
-                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-                    let skew = config.dotns_max_future_skew_secs as i64;
-                    let max_age = config.dotns_intake_freshness_max_age_secs as i64;
-                    if *signed_at > now + skew {
-                        errors.push(FieldError {
-                            message: format!("signedAt is in the future (tolerance {skew}s)."),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
-                    if now - signed_at > max_age {
-                        errors.push(FieldError {
-                            message: format!(
-                                "signedAt is older than the intake freshness bound ({max_age}s). \
-                                 Re-sign with a fresh timestamp and resubmit."
-                            ),
-                            field: "dotns.signedAt".to_string(),
-                        });
-                    }
-                }
-
-                // `reservedUsername` is relayed verbatim into `reserve_name`'s
-                // `Option<BaseLabel>`, a `BoundedVec<u8, 32>`. A longer value
-                // makes the extrinsic unbuildable. Rejecting it here rather
-                // than letting the writer discover it.
-                if let Some(reserved) = reserved_username {
-                    if reserved.len() > MAX_DOTNS_LABEL_LEN {
-                        errors.push(FieldError {
-                            message: format!(
-                                "reservedUsername exceeds the maximum label length: \
-                                 ({MAX_DOTNS_LABEL_LEN})."
-                            ),
-                            field: "dotns.reservedUsername".to_string(),
-                        });
-                    }
-                }
-
-                // The reservation signature is deliberately **not** verified here, and an
-                // unverifiable one is deliberately not a 400.
-                //
-                // The dotNS half is optional and independent — `ASSIGNED` +
-                // `DOTNS_FAILED_TERMINAL` is a legitimate resting state — so rejecting would
-                // cost the caller its People username over the optional half. The writer runs
-                // `check_dotns_submittable` before spending an extrinsic either way.
-                //
-                // The gates above stay 400s: they reject *malformed* blocks, not unverifiable
-                // signatures.
-            }
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(UsernamesError::InvalidBody(errors));
-    }
-
-    Ok(ParsedRegister {
-        candidate_account_id: candidate_account_id.unwrap_or_default(),
-        username: username.unwrap_or_default(),
-        preferred_digits,
-        candidate_signature: decode_prefixed_hex(candidate_signature_raw.as_deref()),
-        ring_vrf_key: decode_prefixed_hex(ring_vrf_key.as_deref()),
-        proof_of_ownership: decode_prefixed_hex(proof_of_ownership_raw.as_deref()),
-        consumer_registration_signature: decode_prefixed_hex(
-            consumer_registration_signature_raw.as_deref(),
-        ),
-        identifier_key: decode_prefixed_hex(identifier_key_raw.as_deref()),
-        voucher,
-        dotns: dotns.map(|(signature, signed_at, reserved_username)| ParsedDotns {
-            signature: decode_prefixed_hex(signature.as_deref()),
-            signed_at: signed_at.unwrap_or_default(),
-            reserved_username,
-        }),
-    })
-}
-
-/// `^0x[a-fA-F0-9]{n}$`.
-fn is_prefixed_hex(value: &str, hex_digits: usize) -> bool {
-    value
-        .strip_prefix("0x")
-        .is_some_and(|rest| rest.len() == hex_digits && rest.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// `^(0[1-9]|[1-9][0-9])$`.
-fn is_preferred_digits(value: &str) -> bool {
-    matches!(
-        value.as_bytes(),
-        [b'0', b'1'..=b'9'] | [b'1'..=b'9', b'0'..=b'9']
-    )
-}
-
-/// Decode a validated `0x`-optional hex string (empty on `None`).
-fn decode_prefixed_hex(value: Option<&str>) -> Vec<u8> {
-    let value = value.unwrap_or_default();
-    hex::decode(value.strip_prefix("0x").unwrap_or(value)).unwrap_or_default()
-}
-
-/// The message prefix the People Chain reconstructs for `PeopleLite.attest`;
-/// `candidateSignature` (and `proofOfOwnership`) cover
-/// `POP_REGISTER_PREFIX || candidatePubkey || ringVrfKey`.
-const POP_REGISTER_PREFIX: &[u8] = b"pop:people-lite:register using";
-
-/// Verifies the caller controls `candidate_pubkey`.
-///
-/// The candidate's sr25519 key must have signed
-/// `POP_REGISTER_PREFIX || candidatePubkey || ringVrfKey`. Uses `subxt_signer`
-/// (schnorrkel with the Substrate signing context). Symmetric with the shipping
-/// Polkadot wallets and the on-chain verifier.
-fn verify_candidate_signature(
-    candidate_pubkey: &[u8; 32],
-    candidate_signature: &[u8],
-    ring_vrf_key: &[u8],
-) -> bool {
-    let Ok(signature) = <[u8; 64]>::try_from(candidate_signature) else {
-        return false;
-    };
-    let mut message = Vec::with_capacity(POP_REGISTER_PREFIX.len() + 32 + ring_vrf_key.len());
-    message.extend_from_slice(POP_REGISTER_PREFIX);
-    message.extend_from_slice(candidate_pubkey);
-    message.extend_from_slice(ring_vrf_key);
-    subxt_signer::sr25519::verify(
-        &subxt_signer::sr25519::Signature(signature),
-        message,
-        &subxt_signer::sr25519::PublicKey(*candidate_pubkey),
-    )
-}
-
 /// Choose the discriminator: the preferred one if free, else a random free
-/// one. The pool is `01..=99` (`00` is never offered). The preferred string
-/// is regex-validated before this point.
-fn select_digit(taken: &BTreeSet<u8>, preferred: Option<&str>, base: &str) -> UsernamesResult<u8> {
+/// one. The pool is `01..=99` (`00` is never offered, nor parsed as a
+/// preference).
+fn select_digit(taken: &BTreeSet<u8>, preferred: Option<u8>, base: &str) -> UsernamesResult<u8> {
     match preferred {
-        Some(p) => {
-            let d: u8 = p.parse().map_err(|_| {
-                UsernamesError::Internal(anyhow::anyhow!("preferredDigits validated upstream"))
-            })?;
+        Some(d) => {
             if taken.contains(&d) {
                 return Err(UsernamesError::PreferredDigitsTaken {
-                    digits: p.to_string(),
+                    digits: format!("{d:02}"),
                     base: base.to_string(),
                 });
             }
@@ -1324,254 +752,6 @@ fn select_digit(taken: &BTreeSet<u8>, preferred: Option<&str>, base: &str) -> Us
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn config() -> crate::config::Config {
-        crate::config::Config::test_default()
-    }
-
-    fn valid_body() -> serde_json::Value {
-        use std::str::FromStr as _;
-        use subxt_signer::sr25519::Keypair;
-        use subxt_signer::SecretUri;
-
-        let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
-        let candidate = keypair.public_key();
-        let ring = [7u8; 32];
-        let mut message = Vec::new();
-        message.extend_from_slice(POP_REGISTER_PREFIX);
-        message.extend_from_slice(&candidate.0);
-        message.extend_from_slice(&ring);
-        let signature = keypair.sign(&message).0;
-
-        json!({
-            "candidateAccountId": candidate.to_account_id().to_string(),
-            "username": "aliceuser",
-            "candidateSignature": format!("0x{}", hex::encode(signature)),
-            "ringVrfKey": format!("0x{}", hex::encode(ring)),
-            "proofOfOwnership": format!("0x{}", "03".repeat(64)),
-            "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
-            "identifierKey": format!("0x{}", "05".repeat(65))
-        })
-    }
-
-    fn errors_of(value: serde_json::Value) -> Vec<(String, String)> {
-        match validate_register(&value, &config()) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                errors.into_iter().map(|e| (e.field, e.message)).collect()
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
-    }
-
-    #[test]
-    fn accepts_a_genuinely_signed_request() {
-        let parsed = validate_register(&valid_body(), &config()).expect("valid");
-        assert_eq!(parsed.username, "aliceuser");
-        assert_eq!(parsed.candidate_signature.len(), 64);
-    }
-
-    #[test]
-    fn empty_object_reports_every_required_field_in_order() {
-        let pointers: Vec<String> = errors_of(json!({}))
-            .into_iter()
-            .map(|(pointer, _)| pointer)
-            .collect();
-        assert_eq!(
-            pointers,
-            [
-                "candidateAccountId",
-                "username",
-                "candidateSignature",
-                "ringVrfKey",
-                "proofOfOwnership",
-                "consumerRegistrationSignature",
-                "identifierKey",
-            ]
-        );
-    }
-
-    #[test]
-    fn wrong_signature_is_a_400_with_the_captured_message() {
-        let mut body = valid_body();
-        body["candidateSignature"] = json!(format!("0x{}", "ab".repeat(64)));
-        assert_eq!(
-            errors_of(body),
-            [(
-                "candidateSignature".to_string(),
-                "Invalid signature.".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn pattern_failed_signature_is_a_400() {
-        for bad in ["nothex", &format!("0x{}", "ab".repeat(63))] {
-            let mut body = valid_body();
-            body["candidateSignature"] = json!(bad);
-            assert_eq!(
-                errors_of(body),
-                [("candidateSignature".to_string(), MSG_HEX_64.to_string())],
-                "{bad}"
-            );
-        }
-    }
-
-    #[test]
-    fn abort_fields_suppress_the_refinement() {
-        let mut body = valid_body();
-        body["ringVrfKey"] = json!("nothex!");
-        assert_eq!(
-            errors_of(body),
-            [(
-                "ringVrfKey".to_string(),
-                http_common::error::must_match(PATTERN_HEX_STRING)
-            )]
-        );
-
-        let mut body = valid_body();
-        body["username"] = json!("Abcdef");
-        assert_eq!(
-            errors_of(body),
-            [(
-                "username".to_string(),
-                http_common::error::must_match(PATTERN_BASE)
-            )]
-        );
-    }
-
-    #[test]
-    fn type_errors_suppress_the_refinement() {
-        let body = json!({
-            "candidateAccountId": 5, "username": 6, "candidateSignature": 7,
-            "ringVrfKey": 8, "proofOfOwnership": 9,
-            "consumerRegistrationSignature": 10, "identifierKey": 11
-        });
-        let errors = errors_of(body);
-        assert_eq!(errors.len(), 7);
-        assert!(errors
-            .iter()
-            .all(|(_, detail)| detail == "expected string, received number"));
-    }
-
-    #[test]
-    fn refinement_issues_use_the_captured_messages() {
-        let mut body = valid_body();
-        body["candidateAccountId"] = json!("not-an-address");
-        assert_eq!(
-            errors_of(body),
-            [(
-                "candidateAccountId".to_string(),
-                "Invalid ss58 address.".to_string()
-            )]
-        );
-
-        let mut body = valid_body();
-        body["username"] = json!("a".repeat(30));
-        assert_eq!(
-            errors_of(body),
-            [(
-                "username".to_string(),
-                "Username sum exceeds the maximum length: (29).".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn preferred_digits_and_identifier_checks_collect_in_field_order() {
-        let mut body = valid_body();
-        body["preferredDigits"] = json!("00");
-        body["identifierKey"] = json!(format!("0x{}", "ab".repeat(64)));
-        assert_eq!(
-            errors_of(body),
-            [
-                (
-                    "preferredDigits".to_string(),
-                    "Digits must be between 01-99".to_string()
-                ),
-                (
-                    "identifierKey".to_string(),
-                    "Must be a hexadecimal string of exactly 65 bytes.".to_string()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn dotns_freshness_uses_the_captured_messages() {
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        let enabled = config();
-        let mut future = valid_body();
-        future["dotns"] =
-            json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now + 700 });
-        assert_eq!(
-            match validate_register(&future, &enabled) {
-                Err(UsernamesError::InvalidBody(errors)) => errors[0].message.clone(),
-                other => panic!("{other:?}", other = other.err()),
-            },
-            "signedAt is in the future (tolerance 600s)."
-        );
-
-        let mut stale = valid_body();
-        stale["dotns"] =
-            json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now - 700 });
-        assert_eq!(
-            match validate_register(&stale, &enabled) {
-                Err(UsernamesError::InvalidBody(errors)) => errors[0].message.clone(),
-                other => panic!("{other:?}", other = other.err()),
-            },
-            "signedAt is older than the intake freshness bound (600s). \
-             Re-sign with a fresh timestamp and resubmit."
-        );
-
-        let mut valid = valid_body();
-        valid["dotns"] = dotns_block(now, Some("reservedname"), &enabled);
-        let parsed = validate_register(&valid, &enabled).expect("valid dotns");
-        let dotns = parsed.dotns.expect("dotns parsed");
-        assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
-    }
-
-    #[test]
-    fn only_a_claim_that_asks_for_the_full_name_is_preflighted() {
-        let config = config();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-
-        let plain = validate_register(&valid_body(), &config).expect("valid");
-        assert_eq!(
-            reserved_name(&plain),
-            None,
-            "no dotns block means no reservation leg"
-        );
-
-        let mut without = valid_body();
-        without["dotns"] = dotns_block(now, None, &config);
-        assert_eq!(
-            reserved_name(&validate_register(&without, &config).expect("valid")),
-            None
-        );
-
-        let mut with = valid_body();
-        with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
-        assert_eq!(
-            reserved_name(&validate_register(&with, &config).expect("valid")),
-            Some("aliceuser")
-        );
-    }
-
-    /// The name the preflight gates on is the one the runtime reserves, not
-    /// the base of the lite username — `attest` takes them as separate
-    /// arguments and nothing requires them to agree.
-    #[test]
-    fn the_reserved_name_is_read_from_the_dotns_block_not_the_username() {
-        let config = config();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-
-        let mut body = valid_body();
-        assert_eq!(body["username"], json!("aliceuser"));
-        body["dotns"] = dotns_block(now, Some("reservedname"), &config);
-
-        let parsed = validate_register(&body, &config).expect("valid");
-        assert_eq!(reserved_name(&parsed), Some("reservedname"));
-    }
 
     /// Shipped clients match on this exact body to show their "claim
     /// unavailable" screen, so it must stay a bare 200 with nothing else.
@@ -1619,122 +799,12 @@ mod tests {
         );
     }
 
-    fn dotns_block(
-        signed_at: i64,
-        reserved: Option<&str>,
-        config: &crate::config::Config,
-    ) -> serde_json::Value {
-        use subxt_signer::sr25519::Keypair;
-        use subxt_signer::SecretUri;
-
-        let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
-        let message = crate::dotns::reservation_message(
-            &keypair.public_key().0,
-            &config.attester_account,
-            b"aliceuser",
-            &[5u8; 65],
-            reserved.map(str::as_bytes),
-            signed_at as u64,
-        );
-        let mut block = json!({
-            "signature": format!("0x{}", hex::encode(keypair.sign(&message).0)),
-            "signedAt": signed_at,
-        });
-        if let Some(reserved) = reserved {
-            block["reservedUsername"] = json!(reserved);
-        }
-        block
-    }
-
-    #[test]
-    fn an_unverifiable_dotns_signature_still_yields_a_username() {
-        let config = config();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-
-        let mut junk = valid_body();
-        junk["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        let parsed = validate_register(&junk, &config).expect("junk dotns signature is accepted");
-        assert_eq!(parsed.username, "aliceuser");
-        assert!(
-            parsed.dotns.is_some(),
-            "the block is stored, so the writer decides its fate"
-        );
-
-        let mut other_attester = self::config();
-        other_attester.attester_account = [0xbb; 32];
-        let mut wrong = valid_body();
-        wrong["dotns"] = dotns_block(now, None, &other_attester);
-        assert!(validate_register(&wrong, &config).is_ok());
-
-        let mut reserved_mismatch = valid_body();
-        let mut block = dotns_block(now, Some("reservedname"), &config);
-        block.as_object_mut().unwrap().remove("reservedUsername");
-        reserved_mismatch["dotns"] = block;
-        assert!(validate_register(&reserved_mismatch, &config).is_ok());
-    }
-
-    #[test]
-    fn a_malformed_dotns_block_is_still_rejected() {
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-
-        let mut too_long = valid_body();
-        too_long["dotns"] = json!({
-            "signature": format!("0x{}", "ab".repeat(64)),
-            "signedAt": now,
-            "reservedUsername": "x".repeat(MAX_DOTNS_LABEL_LEN + 1),
-        });
-        assert_eq!(
-            errors_of(too_long)
-                .into_iter()
-                .map(|(pointer, _)| pointer)
-                .collect::<Vec<_>>(),
-            ["dotns.reservedUsername".to_string()]
-        );
-
-        let mut stale = valid_body();
-        stale["dotns"] = json!({
-            "signature": format!("0x{}", "ab".repeat(64)),
-            "signedAt": now - 86_400,
-        });
-        assert_eq!(
-            errors_of(stale)
-                .into_iter()
-                .map(|(pointer, _)| pointer)
-                .collect::<Vec<_>>(),
-            ["dotns.signedAt".to_string()]
-        );
-    }
-
-    #[test]
-    fn an_oversized_reserved_username_is_rejected_before_the_signature_check() {
-        let config = config();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        let oversized = "a".repeat(MAX_DOTNS_LABEL_LEN + 1);
-
-        let mut body = valid_body();
-        body["dotns"] = dotns_block(now, Some(&oversized), &config);
-        assert_eq!(
-            errors_of(body),
-            [(
-                "dotns.reservedUsername".to_string(),
-                format!(
-                    "reservedUsername exceeds the maximum label length: ({MAX_DOTNS_LABEL_LEN})."
-                )
-            )]
-        );
-
-        let mut at_bound = valid_body();
-        let exact = "a".repeat(MAX_DOTNS_LABEL_LEN);
-        at_bound["dotns"] = dotns_block(now, Some(&exact), &config);
-        assert!(validate_register(&at_bound, &config).is_ok());
-    }
-
     #[test]
     fn preferred_digit_selection_maps_to_the_frozen_409s() {
         let taken: BTreeSet<u8> = [7u8].into_iter().collect();
-        assert_eq!(select_digit(&taken, Some("08"), "base").unwrap(), 8);
+        assert_eq!(select_digit(&taken, Some(8), "base").unwrap(), 8);
         assert!(matches!(
-            select_digit(&taken, Some("07"), "base"),
+            select_digit(&taken, Some(7), "base"),
             Err(UsernamesError::PreferredDigitsTaken { .. })
         ));
         let all: BTreeSet<u8> = (1..=99u8).collect();
@@ -1742,45 +812,6 @@ mod tests {
             select_digit(&all, None, "base"),
             Err(UsernamesError::NoDigitsAvailable { .. })
         ));
-    }
-
-    #[test]
-    fn voucher_field_is_ignored_when_the_feature_is_off() {
-        let mut body = valid_body();
-        body["lifetimePoUDVoucher"] = json!("some-voucher-key");
-        let parsed = validate_register(&body, &config()).expect("valid");
-        assert_eq!(parsed.voucher, None);
-
-        let mut body = valid_body();
-        body["lifetimePoUDVoucher"] = json!(42);
-        assert!(validate_register(&body, &config()).is_ok());
-    }
-
-    #[test]
-    fn voucher_field_is_recognised_when_the_feature_is_on() {
-        let mut on = config();
-        on.registration_vouchers_enabled = true;
-
-        let mut body = valid_body();
-        body["lifetimePoUDVoucher"] = json!("some-voucher-key");
-        let parsed = validate_register(&body, &on).expect("valid");
-        assert_eq!(parsed.voucher.as_deref(), Some("some-voucher-key"));
-
-        assert_eq!(validate_register(&valid_body(), &on).unwrap().voucher, None);
-        let mut empty = valid_body();
-        empty["lifetimePoUDVoucher"] = json!("");
-        assert_eq!(validate_register(&empty, &on).unwrap().voucher, None);
-
-        let mut bad = valid_body();
-        bad["lifetimePoUDVoucher"] = json!(42);
-        match validate_register(&bad, &on) {
-            Err(UsernamesError::InvalidBody(errors)) => {
-                assert_eq!(errors.len(), 1);
-                assert_eq!(errors[0].field, "lifetimePoUDVoucher");
-                assert_eq!(errors[0].message, "expected string, received number");
-            }
-            other => panic!("expected InvalidBody, got {other:?}", other = other.err()),
-        }
     }
 
     #[test]
@@ -1812,45 +843,5 @@ mod tests {
             HeaderValue::from_str(&encoded).unwrap(),
         );
         assert_eq!(device_token_bytes(&present).as_deref(), Some(&token[..]));
-    }
-
-    #[test]
-    fn candidate_signature_verifies_control_of_beneficiary() {
-        use std::str::FromStr as _;
-        use subxt_signer::sr25519::Keypair;
-        use subxt_signer::SecretUri;
-
-        let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
-        let candidate = keypair.public_key().0;
-        let ring_vrf_key = [7u8; 32];
-
-        let mut message = Vec::new();
-        message.extend_from_slice(POP_REGISTER_PREFIX);
-        message.extend_from_slice(&candidate);
-        message.extend_from_slice(&ring_vrf_key);
-        let signature = keypair.sign(&message).0;
-
-        assert!(verify_candidate_signature(
-            &candidate,
-            &signature,
-            &ring_vrf_key
-        ));
-        assert!(!verify_candidate_signature(
-            &candidate, &signature, &[9u8; 32]
-        ));
-        let other = Keypair::from_uri(&SecretUri::from_str("//Bob").unwrap())
-            .unwrap()
-            .public_key()
-            .0;
-        assert!(!verify_candidate_signature(
-            &other,
-            &signature,
-            &ring_vrf_key
-        ));
-        assert!(!verify_candidate_signature(
-            &candidate,
-            &[0u8; 10],
-            &ring_vrf_key
-        ));
     }
 }

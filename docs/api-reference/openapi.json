@@ -456,7 +456,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
+            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -1207,7 +1207,7 @@
           "signedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix timestamp the reservation was signed at.",
+            "description": "Unix timestamp the reservation was signed at, as a JSON integer: a\nfloat is refused even when it is whole (`1780000000.0`).",
             "example": 1780000000
           },
           "reservedUsername": {
@@ -1319,7 +1319,7 @@
       },
       "RegisterRequest": {
         "type": "object",
-        "description": "The flat registration request (documentation mirror — the handler\nvalidates raw JSON so it can report every failing field).",
+        "description": "The flat registration request. A missing field or a wrong JSON type is a `400` naming that field; past that, every format failure is reported at once.",
         "required": [
           "candidateAccountId",
           "username",
@@ -1373,12 +1373,20 @@
             "description": "`0x`-hex 65-byte identifier key.",
             "example": "0x...65 bytes..."
           },
+          "payloadVersion": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The format of the payloads this claim's signatures cover.\nAn unsupported version is a 400 before anything is stored. Omitted\nmeans `1`, the only format today.",
+            "default": 1,
+            "example": 1,
+            "minimum": 1
+          },
           "lifetimePoUDVoucher": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Ignored unless\n`REGISTRATION_VOUCHERS_ENABLED`.",
+            "description": "Optional single-use registration voucher (the INSTANT lane): bypasses\nthe PoUD gate and the registration queue. Must be a string when\npresent; its value is ignored unless `REGISTRATION_VOUCHERS_ENABLED`.",
             "example": "base64url-voucher-key"
           },
           "attestationChain": {
@@ -1389,7 +1397,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all; ignored unless `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
+            "description": "Optional Android device-uniqueness evidence (Widevine PoUD): leaf-first\nbase64 DER attestation chain, 2-10 entries, whose leaf key was created\nwith `attestationChallenge = SHA-256(domain ‖ deviceChallenge ‖\naccountKey ‖ deviceId)`. All three evidence fields are present\ntogether or not at all. Supplied fields must match their JSON types;\nevidence verification runs only with `WIDEVINE_DEDUP_ENABLED`.\nSent only when the app measured Widevine L1.",
             "example": [
               "base64-der-leaf",
               "base64-der-root"

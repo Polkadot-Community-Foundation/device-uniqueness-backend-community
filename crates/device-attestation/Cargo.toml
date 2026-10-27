@@ -43,6 +43,7 @@ tower-http = { version = "0.6", features = ["trace", "timeout", "request-id"] }
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error = "0.1"
 thiserror.workspace = true
 anyhow.workspace = true
 utoipa.workspace = true
@@ -73,13 +74,13 @@ secrecy = "0.10"
 # Google key-attestation root is RSA).
 ciborium = "0.2"
 x509-parser = "0.17"
-p256 = { version = "0.13", default-features = false, features = [
+p256 = { version = "0.14", default-features = false, features = [
     "ecdsa",
     "std",
     "pkcs8",
     "pem",
 ] }
-p384 = { version = "0.13", default-features = false, features = [
+p384 = { version = "0.14", default-features = false, features = [
     "ecdsa",
     "std",
 ] }
@@ -103,6 +104,8 @@ http-body-util = "0.1"
 subxt-rpcs = { workspace = true, features = ["mock-rpc-client"] }
 # Synthetic Apple-style attestation cert chains for App Attest verify tests.
 rcgen = "0.13"
+# Random test keys (`Generate::generate`); the service itself only verifies.
+p256 = { version = "0.14", default-features = false, features = ["getrandom"] }
 
 [lints]
 workspace = true

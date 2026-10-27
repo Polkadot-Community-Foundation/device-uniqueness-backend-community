@@ -147,6 +147,7 @@ impl Lane for People {
                     id = r.id,
                     attempt,
                     backoff_secs = backoff.whole_seconds(),
+                    payload_version = r.payload_version,
                     reason,
                     "registration retry scheduled"
                 );
@@ -193,7 +194,13 @@ impl Lane for People {
                     );
                 }
                 record_submit_outcome(Self::NAME, "terminal");
-                tracing::warn!(id = r.id, username = %r.full_username, reason, "registration failed terminally");
+                tracing::warn!(
+                    id = r.id,
+                    username = %r.full_username,
+                    payload_version = r.payload_version,
+                    reason,
+                    "registration failed terminally"
+                );
             }
         }
         Ok(())
