@@ -8,6 +8,32 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-27
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3004000      |
+| `polkadot` | `people-polkadot`   | 2005000      |
+
+### Added
+
+- **`POST /usernames` accepts a `payloadVersion`.** It declares the format of
+  the payloads the claim's signatures cover. Omitted means `1`, which is the
+  only format today. An unsupported version is a `400` on `payloadVersion`
+  before anything is stored, not an invalid-signature error. The version is
+  stored with the reservation (migration `0011_payload_version`, applied on
+  boot; existing rows become `1`), and the chain writer's retry and
+  terminal-failure logs include it.
+- **`device-attestation-api` checks the People runtime's `PeopleLite::attest`
+  shape at boot.** Asset Hub's `DotnsGateway::reserve_name` was already
+  checked. If the argument names or types of the connected runtime differ from
+  the vendored metadata, the process refuses to start and the error names
+  both shapes. That happens when `PEOPLE_RPC_URL` points at a different
+  runtime than the build. The Asset Hub metadata is now vendored per network
+  in `chain-types`.
+
 ### Changed
 
 - **Candidate and dotNS reservation signatures follow the runtime's signing
@@ -596,7 +622,9 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.0...HEAD
+
+[0.8.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.0
 
 [0.7.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.7.0
 
