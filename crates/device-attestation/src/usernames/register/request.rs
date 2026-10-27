@@ -10,6 +10,7 @@ use subxt::utils::AccountId32;
 use utoipa::ToSchema;
 
 use crate::config::Config;
+use crate::signature::{candidate_message, verify_account_signature, AccountSignatureForm};
 use crate::usernames::{
     error::{FieldError, UsernamesError},
     MAX_BASE_LEN,
@@ -349,7 +350,11 @@ impl Dotns {
 }
 
 impl RegisterRequest {
-    fn validate(&self, config: &Config) -> Result<ParsedRegister, Vec<FieldError>> {
+    fn validate(
+        &self,
+        config: &Config,
+        signature_form: &AccountSignatureForm,
+    ) -> Result<ParsedRegister, Vec<FieldError>> {
         let mut report = Report::default();
         let r = &mut report;
 
@@ -406,7 +411,13 @@ impl RegisterRequest {
             &ring_vrf_key,
             payload_version,
         ) {
-            if !verify_candidate_signature(version, &candidate.0, &signature.0, &ring.0) {
+            if !verify_candidate_signature(
+                version,
+                &candidate.0,
+                &signature.0,
+                &ring.0,
+                signature_form,
+            ) {
                 r.flag("candidateSignature", MSG_INVALID_SIGNATURE);
             }
         }
@@ -455,41 +466,33 @@ impl RegisterRequest {
 pub(super) fn validate_register(
     body: &Value,
     config: &Config,
+    signature_form: &AccountSignatureForm,
 ) -> Result<ParsedRegister, UsernamesError> {
     let request =
         RegisterRequest::decode(body).map_err(|error| UsernamesError::InvalidBody(vec![error]))?;
     request
-        .validate(config)
+        .validate(config, signature_form)
         .map_err(UsernamesError::InvalidBody)
 }
 
-/// The message prefix the People Chain reconstructs for `PeopleLite.attest`;
-/// `candidateSignature` (and `proofOfOwnership`) cover
-/// `POP_REGISTER_PREFIX || candidatePubkey || ringVrfKey`.
-const POP_REGISTER_PREFIX: &[u8] = b"pop:people-lite:register using";
-
-/// Verifies the caller controls `candidate_pubkey`.
+/// Verifies the caller controls `candidate_pubkey`: the candidate's sr25519
+/// key signed the `version` message in `signature_form`, the form the People
+/// runtime accepts.
 fn verify_candidate_signature(
     version: PayloadVersion,
     candidate_pubkey: &[u8; 32],
     candidate_signature: &[u8],
     ring_vrf_key: &[u8],
+    signature_form: &AccountSignatureForm,
 ) -> bool {
-    let Ok(signature) = <[u8; 64]>::try_from(candidate_signature) else {
-        return false;
-    };
     let message = match version {
-        PayloadVersion::V1 => [
-            POP_REGISTER_PREFIX,
-            candidate_pubkey.as_slice(),
-            ring_vrf_key,
-        ]
-        .concat(),
+        PayloadVersion::V1 => candidate_message(candidate_pubkey, ring_vrf_key),
     };
-    subxt_signer::sr25519::verify(
-        &subxt_signer::sr25519::Signature(signature),
-        message,
-        &subxt_signer::sr25519::PublicKey(*candidate_pubkey),
+    verify_account_signature(
+        candidate_signature,
+        &message,
+        candidate_pubkey,
+        signature_form,
     )
 }
 
@@ -510,11 +513,7 @@ mod tests {
         let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
         let candidate = keypair.public_key();
         let ring = [7u8; 32];
-        let mut message = Vec::new();
-        message.extend_from_slice(POP_REGISTER_PREFIX);
-        message.extend_from_slice(&candidate.0);
-        message.extend_from_slice(&ring);
-        let signature = keypair.sign(&message).0;
+        let signature = keypair.sign(&candidate_message(&candidate.0, &ring)).0;
 
         json!({
             "candidateAccountId": candidate.to_account_id().to_string(),
@@ -527,8 +526,15 @@ mod tests {
         })
     }
 
+    fn validate(
+        value: &serde_json::Value,
+        config: &Config,
+    ) -> Result<ParsedRegister, UsernamesError> {
+        validate_register(value, config, &AccountSignatureForm::Plain)
+    }
+
     fn errors_of(value: serde_json::Value) -> Vec<(String, String)> {
-        match validate_register(&value, &config()) {
+        match validate(&value, &config()) {
             Err(UsernamesError::InvalidBody(errors)) => {
                 errors.into_iter().map(|e| (e.field, e.message)).collect()
             }
@@ -545,7 +551,7 @@ mod tests {
 
     #[test]
     fn accepts_a_genuinely_signed_request() {
-        let parsed = validate_register(&valid_body(), &config()).expect("valid");
+        let parsed = validate(&valid_body(), &config()).expect("valid");
         assert_eq!(parsed.username, "aliceuser");
         assert_eq!(parsed.candidate_signature.len(), 64);
     }
@@ -680,7 +686,7 @@ mod tests {
             if let Some(fields) = evidence.as_object() {
                 body.as_object_mut().unwrap().extend(fields.clone());
             }
-            assert!(validate_register(&body, &config()).is_ok());
+            assert!(validate(&body, &config()).is_ok());
         }
     }
 
@@ -756,7 +762,7 @@ mod tests {
         future["dotns"] =
             json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now + 700 });
         assert_eq!(
-            match validate_register(&future, &enabled) {
+            match validate(&future, &enabled) {
                 Err(UsernamesError::InvalidBody(errors)) => errors[0].message.clone(),
                 other => panic!("{other:?}", other = other.err()),
             },
@@ -767,7 +773,7 @@ mod tests {
         stale["dotns"] =
             json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now - 700 });
         assert_eq!(
-            match validate_register(&stale, &enabled) {
+            match validate(&stale, &enabled) {
                 Err(UsernamesError::InvalidBody(errors)) => errors[0].message.clone(),
                 other => panic!("{other:?}", other = other.err()),
             },
@@ -777,7 +783,7 @@ mod tests {
 
         let mut valid = valid_body();
         valid["dotns"] = dotns_block(now, Some("reservedname"), &enabled);
-        let parsed = validate_register(&valid, &enabled).expect("valid dotns");
+        let parsed = validate(&valid, &enabled).expect("valid dotns");
         let dotns = parsed.dotns.expect("dotns parsed");
         assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
     }
@@ -787,7 +793,7 @@ mod tests {
         let config = config();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        let plain = validate_register(&valid_body(), &config).expect("valid");
+        let plain = validate(&valid_body(), &config).expect("valid");
         assert_eq!(
             reserved_name(&plain),
             None,
@@ -797,14 +803,14 @@ mod tests {
         let mut without = valid_body();
         without["dotns"] = dotns_block(now, None, &config);
         assert_eq!(
-            reserved_name(&validate_register(&without, &config).expect("valid")),
+            reserved_name(&validate(&without, &config).expect("valid")),
             None
         );
 
         let mut with = valid_body();
         with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
         assert_eq!(
-            reserved_name(&validate_register(&with, &config).expect("valid")),
+            reserved_name(&validate(&with, &config).expect("valid")),
             Some("aliceuser")
         );
     }
@@ -818,7 +824,7 @@ mod tests {
         assert_eq!(body["username"], json!("aliceuser"));
         body["dotns"] = dotns_block(now, Some("reservedname"), &config);
 
-        let parsed = validate_register(&body, &config).expect("valid");
+        let parsed = validate(&body, &config).expect("valid");
         assert_eq!(reserved_name(&parsed), Some("reservedname"));
     }
 
@@ -856,7 +862,7 @@ mod tests {
 
         let mut junk = valid_body();
         junk["dotns"] = json!({ "signature": format!("0x{}", "ab".repeat(64)), "signedAt": now });
-        let parsed = validate_register(&junk, &config).expect("junk dotns signature is accepted");
+        let parsed = validate(&junk, &config).expect("junk dotns signature is accepted");
         assert_eq!(parsed.username, "aliceuser");
         assert!(
             parsed.dotns.is_some(),
@@ -867,13 +873,13 @@ mod tests {
         other_attester.attester_account = [0xbb; 32];
         let mut wrong = valid_body();
         wrong["dotns"] = dotns_block(now, None, &other_attester);
-        assert!(validate_register(&wrong, &config).is_ok());
+        assert!(validate(&wrong, &config).is_ok());
 
         let mut reserved_mismatch = valid_body();
         let mut block = dotns_block(now, Some("reservedname"), &config);
         block.as_object_mut().unwrap().remove("reservedUsername");
         reserved_mismatch["dotns"] = block;
-        assert!(validate_register(&reserved_mismatch, &config).is_ok());
+        assert!(validate(&reserved_mismatch, &config).is_ok());
     }
 
     #[test]
@@ -929,14 +935,14 @@ mod tests {
         let mut at_bound = valid_body();
         let exact = "a".repeat(MAX_DOTNS_LABEL_LEN);
         at_bound["dotns"] = dotns_block(now, Some(&exact), &config);
-        assert!(validate_register(&at_bound, &config).is_ok());
+        assert!(validate(&at_bound, &config).is_ok());
     }
 
     #[test]
     fn voucher_field_is_ignored_when_the_feature_is_off() {
         let mut body = valid_body();
         body["lifetimePoUDVoucher"] = json!("some-voucher-key");
-        let parsed = validate_register(&body, &config()).expect("valid");
+        let parsed = validate(&body, &config()).expect("valid");
         assert_eq!(parsed.voucher, None);
 
         let mut body = valid_body();
@@ -951,23 +957,23 @@ mod tests {
 
         let mut body = valid_body();
         body["lifetimePoUDVoucher"] = json!("some-voucher-key");
-        let parsed = validate_register(&body, &on).expect("valid");
+        let parsed = validate(&body, &on).expect("valid");
         assert_eq!(parsed.voucher.as_deref(), Some("some-voucher-key"));
 
-        assert_eq!(validate_register(&valid_body(), &on).unwrap().voucher, None);
+        assert_eq!(validate(&valid_body(), &on).unwrap().voucher, None);
         let mut empty = valid_body();
         empty["lifetimePoUDVoucher"] = json!("");
-        assert_eq!(validate_register(&empty, &on).unwrap().voucher, None);
+        assert_eq!(validate(&empty, &on).unwrap().voucher, None);
     }
 
     #[test]
     fn an_undeclared_payload_version_is_format_one() {
-        let parsed = validate_register(&valid_body(), &config()).expect("valid");
+        let parsed = validate(&valid_body(), &config()).expect("valid");
         assert_eq!(parsed.payload_version, PayloadVersion::V1);
 
         let mut declared = valid_body();
         declared["payloadVersion"] = json!(1);
-        let parsed = validate_register(&declared, &config()).expect("valid");
+        let parsed = validate(&declared, &config()).expect("valid");
         assert_eq!(parsed.payload_version, PayloadVersion::V1);
     }
 
@@ -1010,24 +1016,24 @@ mod tests {
         let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
         let candidate = keypair.public_key().0;
         let ring_vrf_key = [7u8; 32];
+        let signature = keypair
+            .sign(&candidate_message(&candidate, &ring_vrf_key))
+            .0;
 
-        let mut message = Vec::new();
-        message.extend_from_slice(POP_REGISTER_PREFIX);
-        message.extend_from_slice(&candidate);
-        message.extend_from_slice(&ring_vrf_key);
-        let signature = keypair.sign(&message).0;
-
+        let plain = AccountSignatureForm::Plain;
         assert!(verify_candidate_signature(
             PayloadVersion::V1,
             &candidate,
             &signature,
-            &ring_vrf_key
+            &ring_vrf_key,
+            &plain
         ));
         assert!(!verify_candidate_signature(
             PayloadVersion::V1,
             &candidate,
             &signature,
-            &[9u8; 32]
+            &[9u8; 32],
+            &plain
         ));
         let other = Keypair::from_uri(&SecretUri::from_str("//Bob").unwrap())
             .unwrap()
@@ -1037,13 +1043,15 @@ mod tests {
             PayloadVersion::V1,
             &other,
             &signature,
-            &ring_vrf_key
+            &ring_vrf_key,
+            &plain
         ));
         assert!(!verify_candidate_signature(
             PayloadVersion::V1,
             &candidate,
             &[0u8; 10],
-            &ring_vrf_key
+            &ring_vrf_key,
+            &plain
         ));
     }
 }

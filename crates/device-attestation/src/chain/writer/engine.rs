@@ -118,6 +118,23 @@ where
         .map_err(|_| anyhow::anyhow!(FINALIZE_TIMEOUT))?
 }
 
+/// A claimed row, before or after its candidate account is parsed.
+pub(super) trait Row {
+    fn reservation(&self) -> &Reservation;
+}
+
+impl Row for Reservation {
+    fn reservation(&self) -> &Reservation {
+        self
+    }
+}
+
+impl Row for (&Reservation, [u8; 32]) {
+    fn reservation(&self) -> &Reservation {
+        self.0
+    }
+}
+
 /// The only gate reconciliation applies: a row already `SUBMITTING` is past
 /// every other one, and re-running them would fail rows the chain may well have
 /// accepted.
@@ -162,7 +179,7 @@ impl<L: Lane> Drain<L> {
     /// This lane's chain for a one-off read, dialling if it is due a retry.
     /// `None` while the lane is parked.
     pub(super) async fn chain(&mut self) -> Option<L::Chain> {
-        self.link.up().await.map(|(chain, _)| chain)
+        self.link.up().await
     }
 
     /// Drain one claimed set. `Ok(true)` means there was nothing due.
@@ -173,7 +190,7 @@ impl<L: Lane> Drain<L> {
     /// `force_batch` wrapper, and its dispatch result is a genuine per-row
     /// verdict rather than a positional guess.
     pub(super) async fn pass(&mut self, cx: &Cx<'_>) -> Result<bool, WriterError> {
-        let Some((chain, ctx)) = self.link.up().await else {
+        let Some(chain) = self.link.up().await else {
             return Ok(true);
         };
         let due = L::claim(cx.pool, i64::from(self.batch.size)).await?;
@@ -183,6 +200,16 @@ impl<L: Lane> Drain<L> {
         cx.hold().await?;
         let chain = &chain;
         let due = &due[..];
+        // The context is a chain read, so a failure is the set's, not any
+        // row's: re-queued at an unchanged attempt, like a failed owner read.
+        let ctx = match self.link.ctx(chain).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                let reason = format!("lane context read failed: {e:#}");
+                self.retry_batch(cx, due, &reason).await?;
+                return Ok(false);
+            }
+        };
         let submittable = self.triage(cx, chain, ctx, due).await?;
         match submittable.len() {
             0 => {}
@@ -474,7 +501,7 @@ impl<L: Lane> Drain<L> {
     async fn retry_batch(
         &mut self,
         cx: &Cx<'_>,
-        rows: &[(&Reservation, [u8; 32])],
+        rows: &[impl Row],
         reason: &str,
     ) -> Result<(), WriterError> {
         let backoff = self.batch.failed();
@@ -522,18 +549,18 @@ impl<L: Lane> Drain<L> {
     async fn defer(
         &self,
         cx: &Cx<'_>,
-        rows: &[(&Reservation, [u8; 32])],
+        rows: &[impl Row],
         backoff: time::Duration,
         reason: &str,
     ) -> Result<(), WriterError> {
         let until = OffsetDateTime::now_utc() + backoff;
-        for (r, _) in rows {
+        for r in rows {
             let outcome = Outcome::Defer {
                 until,
                 reason,
                 cause: Defer::Batch,
             };
-            L::record(cx.pool, cx.guard, r, outcome).await?;
+            L::record(cx.pool, cx.guard, r.reservation(), outcome).await?;
         }
         Ok(())
     }
@@ -560,7 +587,7 @@ impl<L: Lane> Drain<L> {
     /// Rows in a chunk that could not be read stay `SUBMITTING`: unknown is
     /// never read as not-yet-landed.
     pub(super) async fn reconcile_submitting(&mut self, cx: &Cx<'_>) -> Result<(), WriterError> {
-        let Some((chain, _)) = self.link.up().await else {
+        let Some(chain) = self.link.up().await else {
             return Ok(());
         };
         let chain = &chain;

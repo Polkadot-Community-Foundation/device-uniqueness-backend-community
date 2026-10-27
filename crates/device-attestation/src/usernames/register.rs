@@ -23,10 +23,11 @@ use crate::{
     eligibility,
     http::state::AppState,
     queue,
+    signature::PEOPLE_PALLET,
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state, reservation_state};
+use super::{available_digits, base_state_at, reservation_state};
 
 mod request;
 
@@ -158,9 +159,17 @@ pub async fn register(
     validate_device_token_header(&headers)?;
 
     let value = super::parse_json_body(&body)?;
-    let mut parsed = validate_register(&value, &state.config)?;
+    // One block handle serves the signature form and the base-state read.
+    let at = state
+        .chain
+        .online()
+        .at_current_block()
+        .await
+        .map_err(|e| UsernamesError::from(anyhow::Error::from(e)))?;
+    let signature_form = crate::signature::account_signature_form(at.metadata_ref(), PEOPLE_PALLET);
+    let mut parsed = validate_register(&value, &state.config, &signature_form)?;
 
-    let base = base_state(&state, &parsed.username).await?;
+    let base = base_state_at(&state, &parsed.username, &at).await?;
     if let Some(reserved) = reserved_name(&parsed) {
         let reservation = if reserved == parsed.username {
             base.reservation()

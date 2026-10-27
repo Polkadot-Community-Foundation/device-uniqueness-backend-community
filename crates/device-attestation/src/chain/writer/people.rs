@@ -21,13 +21,18 @@ use crate::chain::{
     outbox::{self, Guard, Reservation},
     people::PeopleChain,
 };
+use crate::signature::{verify_candidate_signature, AccountSignatureForm};
+
+/// The gate's verdict on a candidate signature the runtime would reject as
+/// `InvalidAttestationSignature`. Terminal: only the client can re-sign.
+const BAD_CANDIDATE_SIGNATURE: &str = "candidate signature does not verify";
 
 pub(super) struct People;
 
 impl Lane for People {
     type Link = PeopleLink;
     type Chain = PeopleChain;
-    type Ctx = ();
+    type Ctx = AccountSignatureForm;
 
     const NAME: &'static str = "people";
     const OWNED_ELSEWHERE: &'static str = "username owned by another account";
@@ -46,8 +51,15 @@ impl Lane for People {
         outbox::submitting(pool).await
     }
 
-    fn gate(r: &Reservation, _ctx: (), _now: i64) -> Result<[u8; 32], Gate> {
-        parse_candidate(r)
+    /// Checks the candidate signature offline, in the form the runtime accepts
+    /// at this pass, so a row the chain would reject never spends an attempt
+    /// or a fee.
+    fn gate(r: &Reservation, form: AccountSignatureForm, _now: i64) -> Result<[u8; 32], Gate> {
+        let candidate = parse_candidate(r)?;
+        if !verify_candidate_signature(&candidate, &r.candidate_signature, &r.ring_vrf_key, &form) {
+            return Err(Gate::Failed(BAD_CANDIDATE_SIGNATURE.to_string()));
+        }
+        Ok(candidate)
     }
 
     fn tx(
@@ -238,4 +250,60 @@ async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str, nonce: u64) -> Result
         return Err(WriterError::LeaseLost(Op::Submitting));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::writer::fixtures::{reservation, signed_people_reservation};
+
+    fn failure(gate: Result<[u8; 32], Gate>) -> String {
+        match gate {
+            Err(Gate::Failed(reason)) => reason,
+            Ok(_) => panic!("gate passed"),
+            Err(_) => panic!("gate did not fail terminally"),
+        }
+    }
+
+    #[test]
+    fn a_genuinely_signed_registration_passes_the_gate() {
+        // Candidate signed the attest message over the plain form.
+        let (r, candidate) = signed_people_reservation();
+
+        // The People runtime accepts the plain form.
+        assert_eq!(
+            People::gate(&r, AccountSignatureForm::Plain, 0).ok(),
+            Some(candidate)
+        );
+    }
+
+    #[test]
+    fn a_registration_the_runtime_would_reject_fails_before_submission() {
+        let (r, _) = signed_people_reservation();
+
+        // The runtime moved to the signing context; the plain signature no
+        // longer verifies.
+        assert_eq!(
+            failure(People::gate(
+                &r,
+                AccountSignatureForm::InContext([9; 32]),
+                0
+            )),
+            BAD_CANDIDATE_SIGNATURE
+        );
+
+        // A tampered signature fails in the form it was made for.
+        let mut tampered = r.clone();
+        tampered.candidate_signature[0] ^= 1;
+        assert_eq!(
+            failure(People::gate(&tampered, AccountSignatureForm::Plain, 0)),
+            BAD_CANDIDATE_SIGNATURE
+        );
+
+        // A row without a parseable candidate fails on that first.
+        assert_eq!(
+            failure(People::gate(&reservation(), AccountSignatureForm::Plain, 0)),
+            "invalid candidate SS58"
+        );
+    }
 }

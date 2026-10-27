@@ -11,6 +11,12 @@ use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
 use crate::{check_pallet_call_args, extract_call_fields, Pallet};
 
+/// The People Chain client pinned to one block.
+pub type PeopleAt = subxt::client::ClientAtBlock<
+    PeopleConfig,
+    subxt::client::OnlineClientAtBlockImpl<PeopleConfig>,
+>;
+
 const DISCRIMINATORS: u8 = 100;
 
 const PALLET: &str = "PeopleLite";

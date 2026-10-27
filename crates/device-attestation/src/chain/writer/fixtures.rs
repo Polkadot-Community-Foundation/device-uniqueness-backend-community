@@ -6,8 +6,9 @@ use std::str::FromStr as _;
 use time::OffsetDateTime;
 
 use crate::{
-    chain::{asset_hub::ValidityWindow, outbox::Reservation},
+    chain::{asset_hub::ValidityWindow, outbox::Reservation, writer::link::Window},
     dotns,
+    signature::AccountSignatureForm,
 };
 
 pub(super) const WINDOW: u64 = 259_200;
@@ -20,6 +21,16 @@ pub(super) const BOUNDS: ValidityWindow = ValidityWindow {
     max_validity_secs: WINDOW,
     max_future_skew_secs: SKEW,
 };
+
+/// The lane context for `attester` within [`BOUNDS`]. The fixture reservation
+/// is signed over the plain message.
+pub(super) fn ctx(attester: [u8; 32]) -> Window {
+    Window {
+        window: BOUNDS,
+        attester,
+        signature_form: AccountSignatureForm::Plain,
+    }
+}
 
 pub(super) fn reservation() -> Reservation {
     Reservation {
@@ -53,6 +64,27 @@ pub(super) fn other_reservation() -> Reservation {
         reserved_username: Some("second".to_string()),
         ..reservation()
     }
+}
+
+/// A reservation whose candidate signed the `PeopleLite.attest` message over
+/// the plain form, with the candidate's account.
+pub(super) fn signed_people_reservation() -> (Reservation, [u8; 32]) {
+    let keypair = subxt_signer::sr25519::Keypair::from_uri(
+        &subxt_signer::SecretUri::from_str("//people-writer-test").expect("valid uri"),
+    )
+    .expect("keypair");
+    let candidate = keypair.public_key().0;
+
+    let mut r = reservation();
+    r.candidate_account_id = subxt::utils::AccountId32(candidate).to_string();
+    r.candidate_signature = keypair
+        .sign(&crate::signature::candidate_message(
+            &candidate,
+            &r.ring_vrf_key,
+        ))
+        .0
+        .to_vec();
+    (r, candidate)
 }
 
 pub(super) fn signed_reservation() -> (Reservation, [u8; 32], [u8; 32]) {

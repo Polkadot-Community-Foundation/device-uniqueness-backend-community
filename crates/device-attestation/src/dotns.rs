@@ -3,6 +3,8 @@
 
 use subxt::ext::codec::Encode as _;
 
+use crate::signature::{verify_account_signature, AccountSignatureForm};
+
 /// Message prefix, matching `RESERVE_MSG_PREFIX` in the gateway pallet.
 pub const RESERVE_MSG_PREFIX: &[u8] = b"pop:dotns-gateway:reserve";
 
@@ -45,7 +47,9 @@ pub fn reservation_message(
     out
 }
 
-/// Verifies a stored `dotns.signature` against the reservation payload.
+/// Verifies a stored `dotns.signature` against the reservation payload in
+/// `signature_form`, the form the Asset Hub runtime accepts (see
+/// [`crate::signature`]).
 ///
 /// Returns `false` for anything the pallet would reject as
 /// `InvalidAttestationSignature`. That includes a signature that is not 64
@@ -59,10 +63,8 @@ pub fn verify_reservation_signature(
     chat_key: &[u8],
     reserved_base_label: Option<&[u8]>,
     signed_at: u64,
+    signature_form: &AccountSignatureForm,
 ) -> bool {
-    let Ok(signature) = <[u8; 64]>::try_from(signature) else {
-        return false;
-    };
     let message = reservation_message(
         candidate,
         attester,
@@ -71,11 +73,7 @@ pub fn verify_reservation_signature(
         reserved_base_label,
         signed_at,
     );
-    subxt_signer::sr25519::verify(
-        &subxt_signer::sr25519::Signature(signature),
-        message,
-        &subxt_signer::sr25519::PublicKey(*candidate),
-    )
+    verify_account_signature(signature, &message, candidate, signature_form)
 }
 
 /// Whether a reservation signature has aged out of the pallet's validity
@@ -150,6 +148,7 @@ mod tests {
                 &chat_key(),
                 reserved,
                 SIGNED_AT,
+                &AccountSignatureForm::Plain,
             ));
         }
     }
@@ -163,7 +162,14 @@ mod tests {
 
         let verify = |attester: &[u8; 32], base: &[u8], reserved, signed_at| {
             verify_reservation_signature(
-                &signature, &good, attester, base, &chat_key, reserved, signed_at,
+                &signature,
+                &good,
+                attester,
+                base,
+                &chat_key,
+                reserved,
+                signed_at,
+                &AccountSignatureForm::Plain,
             )
         };
 
@@ -180,6 +186,7 @@ mod tests {
             &chat_key,
             None,
             SIGNED_AT,
+            &AccountSignatureForm::Plain,
         ));
     }
 

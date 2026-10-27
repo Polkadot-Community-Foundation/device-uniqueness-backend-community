@@ -27,7 +27,7 @@ use utoipa::ToSchema;
 use crate::{
     chain::{
         outbox,
-        people::{BaseState, ReservationState},
+        people::{BaseState, PeopleAt, ReservationState},
     },
     http::state::AppState,
 };
@@ -60,11 +60,26 @@ fn merge_discriminators(mut chain: BTreeSet<u8>, outbox: BTreeSet<u8>) -> BTreeS
 }
 
 pub(crate) async fn base_state(state: &AppState, base: &str) -> UsernamesResult<BaseState> {
+    let at = state
+        .chain
+        .online()
+        .at_current_block()
+        .await
+        .map_err(|e| UsernamesError::from(anyhow::Error::from(e)))?;
+    base_state_at(state, base, &at).await
+}
+
+/// [`base_state`] read at `at`, for a caller that already holds a block handle.
+pub(crate) async fn base_state_at(
+    state: &AppState,
+    base: &str,
+    at: &PeopleAt,
+) -> UsernamesResult<BaseState> {
     let (chain, pending) = tokio::try_join!(
         async {
             state
                 .chain
-                .base_state(base)
+                .base_state_at(base, at)
                 .await
                 .map_err(UsernamesError::from)
         },

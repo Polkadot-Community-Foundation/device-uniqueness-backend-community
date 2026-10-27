@@ -10,6 +10,20 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **Candidate and dotNS reservation signatures follow the runtime's signing
+  context rule.** An individuality runtime that checks these account signatures
+  over `context ++ message` (paritytech/individuality-community#196) exposes
+  the context as the `SigningContext` constant of the verifying pallet
+  (`PeopleLite` on People, `DotnsGateway` on Asset Hub). Intake
+  (`candidateSignature`) and the chain writer's gates read the constant from the
+  runtime metadata at the block they work against: the message in that context
+  when it is there, the plain message when it is not. A release works on any
+  network, before and after the runtime upgrade, and switches as soon as the
+  upgrade is enacted.
+- **The People lane verifies the candidate signature before submitting.** A
+  row whose `candidateSignature` the runtime would reject as
+  `InvalidAttestationSignature` is failed at the gate, like a dotNS reservation
+  with a bad signature, instead of spending attempts and fees on-chain.
 - **`dotns.signedAt` must be a JSON integer.** `POST /usernames` used to accept
   a whole-valued float (`1780000000.0`) there; it is now a `400` on
   `dotns.signedAt`, like a fractional one.
