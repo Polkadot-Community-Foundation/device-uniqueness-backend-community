@@ -421,8 +421,8 @@ mod tests {
     ];
 
     /// PCF fork: what the public `people-paseo` 2005002 (the PCF products
-    /// devnet, Paseo runtimes v2.5.2) declares, in order. `metadata.paseo.scale`
-    /// is generated from this runtime.
+    /// devnet, Paseo runtimes v2.5.2) declares, in order. 2005004 declares the
+    /// same list; `metadata.paseo.scale` is generated from 2005004.
     const PEOPLE_DEVNET_V252_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "VerifyMultiSignature",
@@ -452,6 +452,30 @@ mod tests {
     /// PCF fork: what the public `asset-hub-paseo` 2005002 declares, in order.
     const ASSET_HUB_DEVNET_V252_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
+    /// PCF fork: what the public `asset-hub-paseo` 2005004 declares, in order:
+    /// 2005002 with `AsScarcity` in slot 1. `ah.paseo.scale` is generated from
+    /// this runtime.
+    const ASSET_HUB_DEVNET_2005004_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "AsScarcity",
         "AuthorizeCall",
         "AsPgas",
         "AsDotnsGateway",
@@ -644,6 +668,20 @@ mod tests {
             spec_version: 2_005_002,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
             extensions: ASSET_HUB_DEVNET_V252_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "products-devnet",
+            spec_name: "people-paseo",
+            spec_version: 2_005_004,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_DEVNET_V252_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "products-devnet asset hub",
+            spec_name: "asset-hub-paseo",
+            spec_version: 2_005_004,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_DEVNET_2005004_EXTENSIONS,
         },
         KnownRuntime {
             env: "polkadot-test",
@@ -950,7 +988,7 @@ mod tests {
     #[cfg(dub_network = "testnet")]
     const VENDORED_VERSION: (u32, u32) = (3_004_000, 6);
     #[cfg(dub_network = "paseo")]
-    const VENDORED_VERSION: (u32, u32) = (2_005_002, 3);
+    const VENDORED_VERSION: (u32, u32) = (2_005_004, 3);
 
     fn people_metadata() -> subxt::ArcMetadata {
         subxt::Metadata::decode_from(METADATA_BYTES)
