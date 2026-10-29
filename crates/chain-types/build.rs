@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Selects the network this build targets from `DUB_NETWORK`. Two values,
-//! because two People runtimes: `testnet` covers previewnet and paseo-next-v2,
-//! which differ only in their endpoints.
+//! because two People runtimes: `testnet` is paseo-next-v2, `polkadot` is
+//! polkadot-test.
 //!
 //! PCF fork: a third, `paseo`, is the PCF products devnet (the public
 //! `people-paseo` / `asset-hub-paseo`).

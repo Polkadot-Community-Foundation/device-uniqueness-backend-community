@@ -30,22 +30,6 @@ scrape_configs:
         labels:
           env_id: paseo-next-v2
 
-  # PreviewNet runs a deliberate subset — the six services listed in
-  # docs/deploy.md ("Start only the services that environment needs"), of which
-  # four export metrics. `registration-queue` is absent (QUEUE_ENABLED=false),
-  # the ticket services are not deployed there, and `notify-relay` is shared.
-  # Listing an undeployed target here would only produce a permanent `down`.
-  - job_name: previewnet
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - device-attestation-api-previewnet:9090
-          - device-attestation-chain-writer-previewnet:9090
-          - username-indexer-previewnet:9090
-          - turn-api-previewnet:9090
-        labels:
-          env_id: previewnet
-
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]

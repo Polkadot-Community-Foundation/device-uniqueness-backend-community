@@ -37,6 +37,7 @@ async fn every_outbox_status_remains_allocated() {
             dotns_signature: None,
             dotns_signed_at: None,
             reserved_username: None,
+            payload_version: 1,
         };
         outbox::insert(&pool, &reservation).await.expect("insert");
         sqlx::query("UPDATE username_reservations SET status = $1 WHERE full_username = $2")

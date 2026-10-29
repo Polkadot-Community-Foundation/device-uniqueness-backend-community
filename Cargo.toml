@@ -6,7 +6,7 @@ members = ["crates/*"]
 # The released version, and the only place it is written down: release.yml
 # refuses a `v*` tag that disagrees with it, so a release is always a commit
 # that bumped this line. Pre-1.0, breaking changes bump the minor.
-version = "0.6.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.95"
 license = "GPL-3.0-only"
@@ -31,6 +31,7 @@ subxt-signer = { version = "0.51.1", default-features = false, features = [
     "sr25519",
     "std",
 ] }
+scale-info = { version = "2.11.4", default-features = false }
 
 # Ring-VRF personhood-proof verification. Pinned to the revision the People
 # Chain runtime pins (the 288-byte `MembersCommitment` encoding); verify-only
