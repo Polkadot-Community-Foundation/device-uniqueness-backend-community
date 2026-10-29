@@ -12,7 +12,7 @@ use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use crate::dotns;
+use crate::{check_pallet_call_args, extract_call_fields, Pallet};
 
 const PALLET: &str = "DotnsGateway";
 
@@ -60,19 +60,23 @@ impl AssetHub {
     }
 
     async fn check_reserve_name_shape(&self) -> anyhow::Result<()> {
-        let metadata = self.client.at_current_block().await?.metadata();
-        let pallet = metadata
-            .pallet_by_name(PALLET)
-            .with_context(|| format!("runtime declares no {PALLET} pallet"))?;
-        let call = pallet
-            .call_variant_by_name("reserve_name")
-            .with_context(|| format!("{PALLET} declares no reserve_name call"))?;
-        let fields: Vec<&str> = call
-            .fields
-            .iter()
-            .map(|field| field.name.as_deref().unwrap_or("<unnamed>"))
-            .collect();
-        dotns::check_reserve_name_shape(&fields)?;
+        let vendored_call = extract_call_fields(
+            chain_types::asset_hub::metadata_arc(),
+            PALLET,
+            "reserve_name",
+            true,
+        )?;
+        let call = extract_call_fields(
+            self.client.at_current_block().await?.metadata(),
+            PALLET,
+            "reserve_name",
+            false,
+        )?;
+        check_pallet_call_args(
+            vendored_call.fields.as_slice(),
+            Pallet::DotnsGateway,
+            call.fields.as_slice(),
+        )?;
         Ok(())
     }
 

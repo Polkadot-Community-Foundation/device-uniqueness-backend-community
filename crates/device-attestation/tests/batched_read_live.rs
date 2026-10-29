@@ -15,7 +15,7 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn rpc_url() -> String {
     std::env::var("PEOPLE_RPC_URL")
-        .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string())
+        .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string())
 }
 
 async fn step<T>(what: &str, future: impl Future<Output = T>) -> T {

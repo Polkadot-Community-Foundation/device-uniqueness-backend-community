@@ -209,7 +209,7 @@ jobs:
           # they pin, DUB_NETWORK, COMPOSE_PROFILES — `polkadot` has no
           # invite-tickets roles, so starting that profile against its image
           # would crash-loop three services — and the chain endpoints. The
-          # testnet bundle keeps the repository's previewnet defaults; the
+          # testnet bundle keeps the repository's paseo-next-v2 defaults; the
           # polkadot one must point at polkadot-test, or its binary signs
           # against a runtime whose metadata it was not built for.
           for network in testnet polkadot; do
@@ -327,7 +327,7 @@ jobs:
           }
 
           {
-            printf 'Every asset comes in two builds, one per People runtime: **testnet** (previewnet and paseo-next-v2) and **polkadot** (polkadot-test). The runtime is fixed when the binary is built — it selects the vendored metadata, and the polkadot build has no invite-tickets roles — so pick the one matching the chain you point at. `dub --help` prints the network a binary was built for.\n\n'
+            printf 'Every asset comes in two builds, one per People runtime: **testnet** (paseo-next-v2) and **polkadot** (polkadot-test). The runtime is fixed when the binary is built — it selects the vendored metadata, and the polkadot build has no invite-tickets roles — so pick the one matching the chain you point at. `dub --help` prints the network a binary was built for.\n\n'
             printf '```bash\n'
             printf '# the whole stack, for one network (testnet shown):\n'
             printf 'tar xzf dub-compose-%s-testnet.tar.gz && cp .env.example .env\n' "$VERSION"

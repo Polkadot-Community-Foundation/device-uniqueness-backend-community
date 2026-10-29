@@ -83,17 +83,21 @@ accepted:
   - id: dev_turn_secret
     paths:
       - .env.example
-    finding: TURN_SECRET ships a real base64 value rather than a placeholder.
+    finding: >-
+      A dev TURN_SECRET is committed in .env.example, and also remains in
+      history.
     reason: >-
-      turn-api refuses to boot on invalid base64, so the previous
-      `<base64-secret>` placeholder crash-looped a fresh `docker compose up` —
-      a real defect for a repository whose quickstart is
-      `cp .env.example .env`. The committed value is base64 of the literal
-      string "dev-only-turn-secret-change-me". It is published on purpose, the
-      file says so in capitals, and it authenticates against no real relay.
+      It is base64 of the literal string "dev-only-turn-secret-change-me",
+      published on purpose and authenticating against no real relay. turn-api
+      reads it only under TURN_PROVIDER=coturn, which .env.example selects
+      because that provider computes credentials locally and so lets the
+      quickstart stack boot with no account anywhere; under the default
+      cloudflare provider Cloudflare Realtime TURN mints both halves per
+      request and the service holds no relay-shared secret at all. A real
+      deployment replaces it along with every other dev credential in the file.
     action: >-
-      fixed in the snapshot (was a broken placeholder upstream); allowlisted by
-      regex in .gitleaks.toml
+      kept as a documented dev placeholder and allowlisted by regex in
+      .gitleaks.toml, which covers the historical occurrence too
 
   - id: unfixable_advisories
     paths:
@@ -131,16 +135,18 @@ accepted:
       should not depend on; anyone running their own substitutes their domain.
     action: kept, documented in README
 
-  - id: previewnet_rpc
+  - id: paseo_next_rpc
     paths:
       - .env.example
       - docker-compose.yml
-    finding: wss://previewnet.substrate.dev is the default People Chain RPC.
+    finding: >-
+      wss://paseo-people-next-system-rpc.polkadot.io and
+      wss://paseo-asset-hub-next-rpc.polkadot.io are the default chain RPCs.
     reason: >-
-      A public, volunteer-run test network endpoint. The stack cannot start
-      without an RPC URL, so a default is more useful than an empty value.
-      PreviewNet is wiped and re-spawned routinely — documented in the
-      operations guide, along with how to point at a different chain.
+      Public test network endpoints. The stack cannot start without an RPC URL,
+      so a default is more useful than an empty value. Paseo Next v2 is wiped
+      and re-spawned routinely — documented in the operations guide, along with
+      how to point at a different chain.
     action: kept, documented in docs/operations.md
 
   - id: verifiable_git_dep

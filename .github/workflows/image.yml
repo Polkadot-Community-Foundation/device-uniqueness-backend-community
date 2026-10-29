@@ -1,127 +1,366 @@
-name: Image
-
-# Builds THE service image (one image, every service a `--role`) for
-# production from a release tag on the `production` branch, and pushes it to
-# the production registry tagged with that release tag.
+# Builds THE service image. One image holds the `dub` binary, and a container
+# becomes a given service through its `--role` argument. Every image this
+# repository publishes comes from here; release.yml only consumes the result.
 #
-# Gated by the `production` GitHub environment. Credentials are keyless
-# (GitHub OIDC -> Workload Identity Federation) and only issued to jobs in
-# that environment. Registry and identity come from production environment
-# variables, so a missing value fails the run instead of falling back to the
-# repository-level devnet secrets. Registry tags are immutable: a tag is built
-# once. Built for DUB_NETWORK=polkadot.
+# One build graph, four lanes. `plan` reads the event and decides which networks
+# and architectures to build, under which tag, and whether to push; `build` runs
+# every network × architecture combination on a native runner and pushes by
+# digest; `manifest` joins each network's digests into its tag and inspects
+# what was published.
+#
+#   pull_request  →  build testnet/amd64, push nothing. A fork or an untrusted
+#                    branch cannot publish.
+#   push main     →  the COMMIT image, `YYYYMMDD-HHMMSS-<shortsha>`, testnet,
+#                    amd64 + arm64. Kargo picks the image to promote with a lexical
+#                    sort over that shape, so an unordered tag such as `<sha>`
+#                    or `latest` leaves "newest build" undefined. The timestamp
+#                    is the commit date, not the run clock, so re-running an
+#                    old commit reproduces its tag instead of minting one that
+#                    sorts ahead of everything built since.
+#   push tag v*   →  the RELEASE images, `<tag>-<network>` for both networks,
+#                    amd64 + arm64. release.yml pins the compose bundle to them
+#                    when they are pullable, so let this run finish before
+#                    dispatching the release. One image per network: an
+#                    image carries a binary built for one runtime, so a bare
+#                    `<tag>` could only be one of them and nothing in the
+#                    manifest would say which.
+#   dispatch      →  any ref, either network, amd64 + arm64, under a tag of the
+#                    operator's choosing. It may NOT use the commit-image
+#                    shape: that is what Kargo promotes, and a branch build
+#                    sorting ahead of main would be deployed as if it were main.
+name: Image
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag on the production branch
+        description: >-
+          Image tag to push, e.g. my-branch-test. Must not look like a commit
+          image (YYYYMMDD-HHMMSS-<shortsha>) — those are reserved for main.
         required: true
         type: string
-
-permissions:
-  contents: read
+      ref:
+        description: >-
+          Branch, tag or SHA to build. Defaults to the branch this workflow is
+          dispatched from.
+        required: false
+        type: string
+      network:
+        description: The People runtime the image is built for (DUB_NETWORK).
+        required: false
+        type: choice
+        default: testnet
+        options: [testnet, polkadot]
 
 concurrency:
-  group: image-production-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: false
+  # Supersede an older run on the same pull request. Never cancel a main or tag
+  # build: the tag it publishes is the only artifact that carries that commit.
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release-tag:
+  # Everything event-dependent is decided here, once, so `build` and `manifest`
+  # are the same steps on every lane.
+  plan:
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - id: tag
-        name: Require a tag on the production branch
-        env:
-          TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          if ! git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
-            echo "::error::${TAG} is not a tag in this repository"
-            exit 1
-          fi
-          if ! git merge-base --is-ancestor "refs/tags/${TAG}^{commit}" origin/production; then
-            echo "::error::${TAG} is not on the production branch"
-            exit 1
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-  check:
-    needs: release-tag
-    uses: ./.github/workflows/check.yml
-
-  push:
-    needs: [release-tag, check]
-    runs-on: ubuntu-latest
-    environment: production
     permissions:
       contents: read
-      id-token: write
-    env:
-      IMAGE_REPO: ${{ vars.IMAGE_REGISTRY }}/device-uniqueness-backend
-      IMAGE_TAG: ${{ needs.release-tag.outputs.tag }}
-      # The People runtime baked into the image (docker-bake.hcl reads it).
-      DUB_NETWORK: polkadot
+    outputs:
+      lane: ${{ steps.plan.outputs.lane }}
+      repo: ${{ steps.plan.outputs.repo }}
+      tag: ${{ steps.plan.outputs.tag }}
+      push: ${{ steps.plan.outputs.push }}
+      cache_to: ${{ steps.plan.outputs.cache_to }}
+      # JSON arrays; `build` runs their cross product.
+      networks: ${{ steps.plan.outputs.networks }}
+      archs: ${{ steps.plan.outputs.archs }}
     steps:
-      - name: Require production configuration
-        env:
-          IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY }}
-          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
-        run: |
-          missing=0
-          for name in IMAGE_REGISTRY GCP_WORKLOAD_IDENTITY_PROVIDER GCP_SERVICE_ACCOUNT; do
-            if [ -z "${!name}" ]; then
-              echo "::error::$name is not set in the production environment"
-              missing=1
-            fi
-          done
-          exit "$missing"
-
       - uses: actions/checkout@v7
         with:
-          ref: refs/tags/${{ needs.release-tag.outputs.tag }}
+          # Empty on push and pull_request, so checkout takes the event's own
+          # ref. On dispatch an explicit ref builds something other than the
+          # branch the workflow file was taken from.
+          ref: ${{ inputs.ref }}
 
+      - id: plan
+        name: Resolve the lane, the tag and what to build
+        env:
+          # The variable release.yml probes with, so the bundle pins to where
+          # the image actually went.
+          MIRROR: ${{ vars.PUBLIC_IMAGE_REPO }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          REQUESTED_NETWORK: ${{ inputs.network }}
+        run: |
+          repo="${MIRROR:-docker.io/paritytech/device-uniqueness-backend}"
+          commit_shape='^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$'
+          # Docker's tag grammar. A bad tag would fail inside bake with a less
+          # useful message, after the compile.
+          docker_tag='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+
+          case "$EVENT:$REF" in
+            pull_request:*)            lane='pr' ;;
+            push:refs/heads/main)      lane='commit' ;;
+            # The same shape release.yml accepts, so the two never disagree on
+            # what a release tag is.
+            push:refs/tags/v[0-9]*)    lane='release' ;;
+            workflow_dispatch:*)       lane='dispatch' ;;
+            *) echo "::error::no image lane for a $EVENT on $REF"; exit 1 ;;
+          esac
+
+          push=true
+          cache_to=false
+          networks='["testnet"]'
+          archs='["amd64","arm64"]'
+          case "$lane" in
+            pr|commit)
+              stamp="$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d-%H%M%S)"
+              tag="$stamp-$(git rev-parse --short=8 HEAD)"
+              # Stop here rather than publish a tag the Warehouse filters out.
+              # That failure is silent: the deployment stays pinned to the
+              # previous build.
+              echo "$tag" | grep -Eq "$commit_shape" || {
+                echo "::error::computed tag '$tag' is not the shape Kargo selects on"
+                exit 1
+              }
+              # Only main refreshes the registry cache: a pull request must not
+              # replace main's layers with its own.
+              if [ "$lane" = pr ]; then
+                push=false
+                archs='["amd64"]'
+              else
+                cache_to=true
+              fi
+              ;;
+            release)
+              tag="${REF#refs/tags/}"
+              echo "$tag" | grep -Eq "$docker_tag" || {
+                echo "::error::git tag '$tag' is not a valid image tag"
+                exit 1
+              }
+              networks='["testnet","polkadot"]'
+              ;;
+            dispatch)
+              tag="$REQUESTED_TAG"
+              echo "$tag" | grep -Eq "$docker_tag" || {
+                echo "::error::'$tag' is not a valid image tag"
+                exit 1
+              }
+              # The commit-image shape is Kargo's promotion key: a dispatched
+              # build of an arbitrary ref must never sort ahead of main.
+              if echo "$tag" | grep -Eq "$commit_shape"; then
+                echo "::error::'$tag' has the commit-image shape, which is reserved for pushes to main"
+                exit 1
+              fi
+              case "$tag" in
+                buildcache-*)
+                  echo "::error::'$tag' would overwrite a build cache ref"
+                  exit 1 ;;
+              esac
+              # A `choice` input: GitHub already restricted it to the options,
+              # and the default is testnet.
+              networks="[\"${REQUESTED_NETWORK:-testnet}\"]"
+              ;;
+          esac
+
+          {
+            echo "lane=$lane"
+            echo "repo=$repo"
+            echo "tag=$tag"
+            echo "push=$push"
+            echo "cache_to=$cache_to"
+            echo "networks=$networks"
+            echo "archs=$archs"
+          } >> "$GITHUB_OUTPUT"
+          echo "lane=$lane repo=$repo tag=$tag push=$push networks=$networks archs=$archs"
+
+  # One job per network × architecture. Pushing lanes push by digest only (no
+  # tag); `manifest` joins the digests into the tagged image. The pull-request
+  # lane builds the same way and keeps the result in the builder.
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        network: ${{ fromJSON(needs.plan.outputs.networks) }}
+        arch: ${{ fromJSON(needs.plan.outputs.archs) }}
+    # Native runners: QEMU emulation took over an hour for arm64 alone.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    env:
+      IMAGE_REPO: ${{ needs.plan.outputs.repo }}
+      # Baked into the binary (vendored metadata, invite-tickets roles).
+      DUB_NETWORK: ${{ matrix.network }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      # A full workspace compile inside bake; the hosted runner's disk is thin.
       - name: Reclaim runner disk
         run: |
+          df -h /
+          # Preinstalled toolchains this workspace never uses. `|| true`: the
+          # image's contents change, and a missing directory is not a failure.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           df -h /
 
       - uses: docker/setup-buildx-action@v4
 
-      - uses: google-github-actions/auth@v2
+      - uses: docker/login-action@v4
+        if: needs.plan.outputs.push == 'true'
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      # Reads the cache anonymously. The Docker Hub repository is public, so a
+      # pull request needs no credential. One cache ref per network and arch:
+      # those builds share no compiled layer, so a shared ref would have each
+      # evict the other's.
+      - name: Build
+        if: needs.plan.outputs.push != 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.tag }}
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
+        run: docker buildx bake all --set "*.platform=$PLATFORM"
 
-      - run: gcloud auth configure-docker "${IMAGE_REPO%%/*}" --quiet
-
-      # Registry tags are immutable, so the build cache lives in GitHub Actions, not the registry.
-      - name: Build and push
-        run: >-
-          docker buildx bake --push all
-          --set '*.cache-from=type=gha,scope=production'
-          --set '*.cache-to=type=gha,scope=production,mode=max'
-
-      - name: Summary
+      - name: Build and push by digest
+        if: needs.plan.outputs.push == 'true'
+        env:
+          # Digest mode: bake clears `tags` and names the repo in the exporter.
+          # buildkit refuses to push a tagged ref by digest, so this cannot be a
+          # `--set "*.output=..."` override — the tags would still be there.
+          PUSH_BY_DIGEST: "true"
+          CACHE_FROM: ${{ needs.plan.outputs.repo }}:buildcache-main-${{ matrix.network }}-${{ matrix.arch }}
+          CACHE_TO: ${{ needs.plan.outputs.cache_to == 'true' && format('{0}:buildcache-main-{1}-{2}', needs.plan.outputs.repo, matrix.network, matrix.arch) || '' }}
         run: |
-          digest=$(docker buildx imagetools inspect "${IMAGE_REPO}:${IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
-          {
-            echo "## Pushed"
-            echo
-            echo '```'
-            echo "${IMAGE_REPO}:${IMAGE_TAG}"
-            echo "${IMAGE_REPO}@${digest}"
-            echo '```'
-            echo "Roll it: pin this tag in the production deployment."
-          } >> "$GITHUB_STEP_SUMMARY"
+          docker buildx bake all \
+            --set "*.platform=$PLATFORM" \
+            --metadata-file "$RUNNER_TEMP/metadata.json"
+
+      # Collapse bake's metadata to the one digest. Keys without a digest are
+      # bake's own bookkeeping, not targets.
+      - name: Export the digest
+        if: needs.plan.outputs.push == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          jq -r 'to_entries[]
+                 | select(.value["containerimage.digest"])
+                 | .value["containerimage.digest"]' \
+            "$RUNNER_TEMP/metadata.json" > "$RUNNER_TEMP/digests/$ARCH.txt"
+          test "$(wc -l < "$RUNNER_TEMP/digests/$ARCH.txt")" -eq 1 ||
+            { echo "::error::expected exactly 1 digest"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        if: needs.plan.outputs.push == 'true'
+        with:
+          name: digests-${{ matrix.network }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Joins each network's per-arch digests into one tagged manifest list, so a
+  # tag serves every architecture it was built for and Docker picks the right
+  # one per host. Then reads the image that was published, not the Dockerfile.
+  manifest:
+    needs: [plan, build]
+    if: needs.plan.outputs.push == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        network: ${{ fromJSON(needs.plan.outputs.networks) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE_REPO: ${{ needs.plan.outputs.repo }}
+      # Only the release lane suffixes the network: the other lanes build one
+      # network, and the commit image must keep its exact shape.
+      REF: ${{ needs.plan.outputs.repo }}:${{ needs.plan.outputs.tag }}${{ needs.plan.outputs.lane == 'release' && format('-{0}', matrix.network) || '' }}
+      ARCHS: ${{ needs.plan.outputs.archs }}
+      NETWORK: ${{ matrix.network }}
+    # No checkout: every step works out of the downloaded digests or against
+    # the registry.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.network }}-*
+          merge-multiple: true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Create and push the manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          args=(-t "$REF")
+          count=0
+          for arch_file in *.txt; do
+            digest="$(cat "$arch_file")"
+            [ -n "$digest" ] || { echo "::error::$arch_file is empty"; exit 1; }
+            args+=("$IMAGE_REPO@$digest")
+            count=$((count + 1))
+          done
+          expected="$(jq length <<<"$ARCHS")"
+          [ "$count" -eq "$expected" ] ||
+            { echo "::error::expected $expected per-arch digests for $NETWORK, got $count"; exit 1; }
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Verify the image has every architecture it was built for
+        run: |
+          platforms="$(docker buildx imagetools inspect "$REF" \
+            --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
+          echo "$REF: $platforms"
+          for arch in $(jq -r '.[]' <<<"$ARCHS"); do
+            echo "$platforms" | grep -qw "linux/$arch" ||
+              { echo "::error::$REF is missing linux/$arch"; exit 1; }
+          done
+
+      # What shipped, not what the Dockerfile says: one binary, a `dub`
+      # entrypoint, no CMD that would default to a role, and the role set of the
+      # network this image was built for. Starting a role would block on a
+      # database or chain RPC, so the checks stop at the binary's own flags.
+      - name: Verify the published image
+        run: |
+          docker pull --quiet "$REF"
+          binaries="$(docker run --rm --entrypoint ls "$REF" /usr/local/bin | tr -d '\r')"
+          [ "$binaries" = "dub" ] ||
+            { echo "::error::$REF contains [${binaries//$'\n'/ }] — exactly one binary, dub, is the whole point"; exit 1; }
+          entrypoint="$(docker inspect --format '{{join .Config.Entrypoint " "}}' "$REF")"
+          [ "$entrypoint" = "dub" ] ||
+            { echo "::error::$REF has entrypoint '$entrypoint' (expected 'dub')"; exit 1; }
+          shipped_cmd="$(docker inspect --format '{{join .Config.Cmd " "}}' "$REF")"
+          [ -z "$shipped_cmd" ] ||
+            { echo "::error::$REF ships CMD '$shipped_cmd'; it must not default to a role"; exit 1; }
+
+          # testnet carries the invite-tickets roles, polkadot does not.
+          case "$NETWORK" in
+            testnet)  expected=8 ;;
+            polkadot) expected=6 ;;
+            *) echo "::error::unknown network '$NETWORK'"; exit 1 ;;
+          esac
+          roles="$(docker run --rm "$REF" --list-roles)"
+          count="$(echo "$roles" | wc -l)"
+          [ "$count" -eq "$expected" ] ||
+            { echo "::error::$REF lists $count roles, expected $expected for $NETWORK:"; echo "$roles"; exit 1; }
+          # An argument-less container must fail, not serve.
+          ! docker run --rm "$REF" >/dev/null 2>&1 ||
+            { echo "::error::$REF starts with no arguments; it must exit non-zero listing the roles"; exit 1; }
+
+          echo "$REF: one binary, no default role, $count roles"
+          echo "published \`$REF\` ($(jq -r 'map("linux/" + .) | join(", ")' <<<"$ARCHS"), DUB_NETWORK=$NETWORK)" >> "$GITHUB_STEP_SUMMARY"

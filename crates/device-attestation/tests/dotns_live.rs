@@ -37,6 +37,7 @@ fn reservation(base: &str, digits: &str, with_dotns: bool) -> NewReservation {
         dotns_signature: with_dotns.then(|| vec![6; 64]),
         dotns_signed_at: with_dotns.then_some(1_750_000_000),
         reserved_username: None,
+        payload_version: 1,
     }
 }
 

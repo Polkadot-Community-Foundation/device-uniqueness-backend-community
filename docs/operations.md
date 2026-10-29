@@ -50,9 +50,11 @@ it and a "simplification" here is a real downgrade:
 > The `invite-tickets` services exist only on a `testnet` build — see
 > [Choosing a network](#choosing-a-network). On `polkadot`, ignore every mention
 > of them here; that image has no such roles.
-- `turn-api` additionally holds `TURN_SECRET`, the HMAC key shared with the TURN
-  relay (coturn `--use-auth-secret`). Relay and issuer rotate together, and no
-  other service sees it.
+- `turn-api` additionally holds whichever credential secret its `TURN_PROVIDER`
+  selects — `TURN_API_TOKEN` (Cloudflare) or `TURN_SECRET` (a coturn relay) —
+  and never both. No other service sees either. `TURN_KEY_ID` and the other
+  selectors are not secrets but are still service-scoped: a copy elsewhere means
+  another service was meant to mint credentials.
 - Push credentials (`APNS_*` / `FCM_*`) live only in `notify-relay`.
 
 Compose uses the root `.env` for interpolation only, and gives every application
@@ -120,10 +122,12 @@ The values you must decide, at minimum:
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
 | `JWT_ED25519_PUBLIC_KEY` or `JWT_JWKS_JSON` | The verify-only half, for the other services. |
 | `INVITE_INVITER_SIGNER_SURI` | `testnet` only: the invite pool's own account — **not** the writer's. Unused on `polkadot`. |
-| `TURN_SECRET` | Shared with your coturn relay; must match it exactly. |
+| `TURN_PROVIDER` | `cloudflare` (the code default) or `coturn`. Picks which of the two rows below is required. `.env.example` selects `coturn`, because that provider needs no account anywhere and so lets the quickstart stack boot offline. |
+| `TURN_API_TOKEN` + `TURN_KEY_ID` | `cloudflare` only. The token is the secret; the key id is not, but both are `turn-api` only — and `verify_compose_boundaries.sh` fails if either appears on another service. |
+| `TURN_SECRET` + `TURN_REALM` + `ICE_SERVERS` | `coturn` only, all three required. The secret and algorithm must match your relay's `--use-auth-secret` config exactly, and `ICE_SERVERS` must name at least one relay: nothing upstream supplies it on this provider, so an empty list would mint credentials with nothing to use them against. |
 
 The defaults in `.env.example` point at a public test network
-(`wss://previewnet.substrate.dev`) and use well-known dev keys (`//Alice`,
+(`wss://paseo-people-next-system-rpc.polkadot.io`) and use well-known dev keys (`//Alice`,
 `//Bob`). They exist so `docker compose up` works on a laptop. **Replace every
 one of them before a deployment anyone else can reach.**
 
@@ -136,12 +140,8 @@ runtime, and changing it means rebuilding.
 
 | `DUB_NETWORK` | People runtime | Deployments | Vendored metadata | invite-tickets |
 | --- | --- | --- | --- | --- |
-| `testnet` (default) | `next-people-paseo` | previewnet, paseo-next-v2 | `metadata.testnet.scale` | yes |
+| `testnet` (default) | `next-people-paseo` | paseo-next-v2 | `metadata.testnet.scale` | yes |
 | `polkadot` | `people-polkadot` | polkadot-test | `metadata.polkadot.scale` | no — the runtime has no `Game` / `ProofOfInk` |
-
-previewnet and paseo-next-v2 are **one** build: same runtime, same metadata.
-What separates them is `ENV_ID` and their endpoints. Split the flag again only
-if their runtimes diverge.
 
 - **Build — the one trap worth reading twice.** `docker compose build` reads
   `DUB_NETWORK` from `.env` and is correct with nothing else set. **`docker
@@ -205,11 +205,14 @@ anonymously pullable at that tag; when none is, it ships the compose file
 with its `build:` stanzas, and the release notes say so — that case needs a
 source checkout beside the bundle.
 
-Do **not** point `IMAGE_REPO` / `IMAGE_TAG` at
-`docker.io/paritytech/device-uniqueness-backend` yourself. That image is not
-published from this repository and its tags do not correspond to this
-repository's tags — see "About the container image" in the
-[README](../README.md).
+To pin the image by hand instead, set `IMAGE_REPO=docker.io/paritytech/device-uniqueness-backend`
+and `IMAGE_TAG=<tag>-<network>` (for example `v0.7.0-polkadot`) in `.env`
+and `up -d --no-build`. Only the `<tag>-<network>` release tags are meant to be
+run: an image carries a binary built for one runtime, so the tag must name the
+same network as `DUB_NETWORK`. The `YYYYMMDD-HHMMSS-<shortsha>` tags are
+unreleased `main` builds for Parity's own pipeline, and `v0.5.0`, `stable` and
+everything earlier were pushed from a different tree — see "About the container
+image" in the [README](../README.md).
 
 Recreate the **whole project**, never a single service — `up -d <service>` on its
 own leaves the rest on the previous image, and a stack split across two builds
@@ -305,8 +308,8 @@ WantedBy=multi-user.target
 
 The per-role file is where the secret boundaries are rebuilt by hand: keep
 `JWT_ED25519_SECRET` in `device-attestation-api.env` and nowhere else, the
-writer's SURI in `device-attestation-chain-writer.env`, `TURN_SECRET` in
-`turn-api.env`, and give every other role the verify-only
+writer's SURI in `device-attestation-chain-writer.env`, the TURN credential
+secret (`TURN_API_TOKEN` or `TURN_SECRET`) in `turn-api.env`, and give every other role the verify-only
 `JWT_ED25519_PUBLIC_KEY` instead. The `environment:` block of each service in
 [`docker-compose.yml`](../docker-compose.yml) is the authoritative list of what
 that role should receive.
@@ -402,7 +405,7 @@ choosing, not after.
 **The standard topology is the default**, and it is what the compose file here
 runs. Choosing the small one is a security decision, not a configuration change:
 one process ends up holding `JWT_ED25519_SECRET` (mint a token for any subject),
-`POC_HMAC_SECRET`, `TURN_SECRET` and all three database URLs, in the same address
+`POC_HMAC_SECRET`, the TURN credential secret and all three database URLs, in the same address
 space that serves the unauthenticated public
 `GET /api/v1/usernames/search`. `all-in-one` is deliberately absent from
 `dub --list-roles` for that reason.
@@ -471,7 +474,12 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 ```
 
 - `RETRY_AFTER` retries automatically, up to 8 attempts.
-- `FAILED_TERMINAL` never retries — inspect `last_error`.
+- `FAILED_TERMINAL` never retries — inspect `last_error`. A signature rejection
+  (`PeopleLite.InvalidAttestationSignature`) that clusters on one client build
+  is usually a payload-format change: the row's `payload_version` (also a field
+  on the writer's retry and terminal logs) is the format that claim declared, so
+  `group by payload_version` separates a client that signs a new format under an
+  old declaration from individually bad signatures.
 - **Not every failure spends one of those 8.** A refusal that belongs to the
   *signer* rather than the row — its next nonce still held by an earlier
   transaction of ours waiting in the node's pool, or a submission the writer
@@ -492,8 +500,9 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 
 ### Batch size is adaptive
 
-`CHAIN_WRITER_BATCH_SIZE` (default 25) is the *maximum*.
-`dub_chain_batch_size{lane="people"|"dotns"}` is the size actually in use: it
+`CHAIN_WRITER_BATCH_SIZE` (default 25, the People lane) and
+`CHAIN_WRITER_DOTNS_BATCH_SIZE` (default 3, the dotNS lane) are *maxima*, one
+per lane. `dub_chain_batch_size{lane="people"|"dotns"}` is the size actually in use: it
 halves on every whole-batch failure (floor 1) and climbs back one per successful
 submission, but never back into the smallest size it has seen fail — that one is
 retried only after 20 consecutive successful submissions. A chain that rejects
@@ -506,8 +515,17 @@ of 1 rather than alternating 1 → 2 → fail and paying a fee on every other pa
   carries the reason and the next size. The usual cause is the block's weight
   budget (each `attest` verifies two sr25519 signatures and writes storage),
   which the halving search resolves on its own within a few passes. If it settles
-  much lower than 25, lower `CHAIN_WRITER_BATCH_SIZE` to near it so a fresh
+  much lower than its maximum, lower that lane's maximum to near it so a fresh
   writer does not re-run the search on every restart.
+- The dotNS lane's maximum is 3 for exactly that reason: `reserve_name`
+  dispatches through the DotNS contract on `pallet_revive`, and Asset Hub
+  refuses a `force_batch` of four or more at submission with `Transaction would
+  exhaust the block limits` — the declared weight of the single extrinsic does
+  not fit a block. That refusal is handled (the set is re-queued at an unchanged
+  `attempt` and the lane halves), so the only cost is a few minutes of delay per
+  burst; starting at 3 avoids paying it after every restart, wipe or queue
+  promotion. Raise it only against a runtime whose `reserve_name` got cheaper,
+  and watch `dub_chain_batch_failed_total{lane="dotns"}` when you do.
 - A whole-batch failure does **not** advance any row toward `FAILED_TERMINAL`:
   `attempt` is unchanged and the set is deferred on one shared backoff. Rows
   piling up in `RETRY_AFTER` with a low `attempt` is the batch failing, not the
@@ -605,7 +623,8 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 | --- | --- |
 | `JWT_ED25519_SECRET` | Invalidates outstanding JWTs; clients re-authenticate. Update the verify-only half everywhere in the same change. |
 | the writer key | Must be an authorized attester or proxy, and funded, **before** the switch. |
-| `TURN_SECRET` | Invalidates outstanding TURN credentials (up to `TURN_TTL_SECS` old). Update the coturn relay and every `turn-api` together, then recreate each service. |
+| `TURN_API_TOKEN` (`cloudflare`) | Does **not** invalidate credentials already issued — Cloudflare honours those until they expire (up to `TURN_TTL_SECS`). Roll the token in Cloudflare, update every `turn-api`, then recreate each service. A stale token only stops *new* issuance: Cloudflare answers 4xx, which is treated as permanent rather than transient, so it is **not** served out of the outage cache — issuance goes to 503 at once and the `cloudflare rejected TURN issuance` log line names it. Rolling with the old token still live avoids the gap. |
+| `TURN_SECRET` (`coturn`) | **Does** invalidate outstanding credentials (up to `TURN_TTL_SECS` old), because the relay recomputes the HMAC. Update the relay and every `turn-api` together, then recreate each service — a mismatch means the relay rejects everything this service mints. |
 | `POC_HMAC_SECRET` | Invalidates outstanding puzzles (≤90s old); in-flight solvers get a `402` and request a new one. Safe to rotate any time. |
 
 ## After a chain wipe
@@ -746,7 +765,12 @@ you expect.
 | `QUEUED` rows draining with the advancer down, or stranded-queue warnings while intake goes direct | `QUEUE_ENABLED` is split between api and writer. Writer off + api on = the janitor silently drains a queue the api is still filling, and the throttle is gone. Writer on + api off = warnings about leftovers no new claim joins. The values must match; `scripts/verify_compose_boundaries.sh` pins both. |
 | Rows stuck in `RETRY_AFTER` with wasm-trap errors | Invalid payload for `PeopleLite.attest`, or attester/proxy authorization missing on-chain. |
 | At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write or a silent invite-ticket pool. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
+<<<<<<< Updated upstream
 | `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/metadata.<network>.scale` (the one this build's `DUB_NETWORK` names — the boot warning logs it as `vendored_metadata`) with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
+=======
+| `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/people.scale` with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
+| Every extrinsic rejected by the node with a wasm trap in `validate_transaction` (no `Invalid::…` reason at all) | The transaction did not **decode**, so the runtime panicked before validating anything — the extension payload is the wrong shape for the extrinsic format. A v4 signed extrinsic carries no extension-version byte and must be encoded with extension version **0**, which on these runtimes is a shorter list than the highest version they declare. subxt 0.50 encoded the highest and produced exactly this trap; 0.51 fixed it, and `chain-types`' `a_v4_extrinsic_resolves_to_extension_version_zero` fails in CI if a dependency bump regresses it. Seeing this in the wild means either that regression or a tuple that cannot satisfy a name version 0 declares. Distinguish from the row below: a *bad signature* decoded fine and failed a check. |
+>>>>>>> Stashed changes
 | Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0 | The chain was reset: the process still holds the old genesis hash, captured when its client connected. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
 | Writer exits at boot | Bad `CHAIN_WRITER_SIGNER_SURI`, or Postgres unreachable. |
 | `device-attestation-api` never healthy | It blocks on the People Chain RPC at startup. Check connectivity to `PEOPLE_RPC_URL`. |
@@ -757,7 +781,10 @@ you expect.
 | A username appeared in search and then vanished | Expected, and rare: a speculative row whose block was discarded at the tip. `dub_indexer_speculative_retracted_total` counts them. It re-appears once the registration lands on the canonical chain — usually, but not always: the registration is re-submitted against a chain where the name may since have been taken, and a name is owned by one account forever. If the rate is high, the endpoint's fork rate is high — check `dub_chain_finality_trail_blocks`, or set `SPECULATIVE_INDEXING_ENABLED=false` to serve finalized state only. `dub_indexer_speculative_failed_total` climbing instead means the window could not be read at all; the finalized projection is unaffected, but nothing is being admitted early. |
 | `unfinalized window too wide; admitting nothing new` | The best head has run more than `MAX_SPECULATIVE_WINDOW` (64) blocks ahead of finality, so the chain's finality is stalled rather than merely trailing. The indexer stops admitting new speculative rows and search goes back to finalized-only latency for anything new — but rows already held are still re-checked against the best head every pass, so nothing gets stranded for the length of the stall. Investigate finality on the chain, not the indexer. `dub_indexer_speculative_stood_down_total` counts it. |
 | `turn-api` exits: `TURN_PROOF_PRODUCTS: must list at least one product id` | The proof route is enabled with no accepted product. Every proof is made under a product-scoped context, so the list is required — set it, or turn the feature off. |
-| TURN 201s minted but the relay rejects the credentials | `TURN_SECRET` / `TURN_AUTH_ALGORITHM` drifted from the relay's coturn config. They must match exactly; rotate together. `turn-api` is stateless, so `readyz` never gates on this. |
+| `/api/v1/turn/issue` returns 503 | Only possible on `TURN_PROVIDER=cloudflare`: Cloudflare could not issue *and* no cached credential is usable. Two distinct log lines say which. `cloudflare rejected TURN issuance` (`error`) is Cloudflare answering 4xx — a wrong, revoked or mis-scoped `TURN_API_TOKEN`, or a `TURN_KEY_ID` it cannot mint against; that answer is never absorbed by the cache, so it surfaces on the first request rather than when the cache runs out. `cloudflare unreachable` is the transient path: a `warn` means callers are being served the cached credential, an `error` means there is nothing left to serve. The 503 does not consume the caller's rate-limit slot. `turn-api` is stateless, so `readyz` never gates on this. |
+| TURN 201s minted but the relay rejects the credentials | `TURN_PROVIDER=coturn` only: `TURN_SECRET` or `TURN_AUTH_ALGORITHM` has drifted from the relay's config. They must match exactly; rotate together. `turn-api` computes locally and cannot detect this, so `readyz` never gates on it either. |
+| `turn-api` exits: `TURN_SECRET is set but the provider is cloudflare` | A relay deployment upgraded without naming its provider. Set `TURN_PROVIDER=coturn` to keep the relay, or remove `TURN_SECRET` to move to Cloudflare. Deliberately fatal: booting on Cloudflare defaults would fail at request time instead. |
+| Every caller gets the same TURN username | `TURN_PROVIDER=cloudflare` only: the cached credential is being served because Cloudflare is down, which suspends the per-request unlinkability until it returns. Expected during an outage; if it persists, fix issuance — the log line naming the cache is `warn`-level and repeats on every request. |
 | Public search suddenly returning `402` | The proof-of-compute gate is on. Expected for anonymous callers; if *authenticated* clients see it, the indexer's verify-only JWT material is wrong — compare it against `device-attestation-api`'s `/.well-known/jwks.json`. |
 | `402 puzzle has already been used` on a first attempt | The client is reusing a puzzle (one solve = one request), or a proxy is retrying. Each request needs a fresh `POST /api/v1/poc/issue`. |
 | `spent_puzzles` growing without bound | The pruner is failing (`pruning expired spent puzzles failed`). Rows are harmless but unbounded until it recovers. |

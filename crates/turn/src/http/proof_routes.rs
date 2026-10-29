@@ -11,6 +11,8 @@ use crate::proof::message::FreshnessError;
 use crate::proof::roots::PersonhoodCollection;
 use crate::proof::verify::{self, VerifyError};
 
+use super::now_unix;
+
 /// Proof-redemption request.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct IssueWithProofBody {
@@ -51,8 +53,10 @@ pub(crate) struct IssueWithProofBody {
     tag = "TURN",
     request_body = IssueWithProofBody,
     responses(
-        (status = 201, description = "Proof accepted; returns servers, username, password, and the \
-configured TTL. Credentials expire `ttl` seconds after issuance; no alias appears in the response.",
+        (status = 201, description = "Proof accepted; returns the servers and an opaque \
+username/password pair from the configured `TURN_PROVIDER`, and `ttl`, the seconds of life \
+remaining on them. No alias appears in the response, and nothing recoverable from the proof is \
+derivable from the credential.",
          body = crate::openapi::IssueResponse),
         (status = 400, description = "Unparseable body, invalid hex, a collection outside the \
 canonical People Lite/People allowlist, a proof that is not a single-context ring-VRF signature, \
@@ -64,7 +68,9 @@ this deployment still holds (deliberately unspecific)."),
 `Retry-After`)."),
         (status = 503, description = "Verification unavailable: no ring-root snapshot yet (chain \
 unreachable since boot), the bounded waiter queue is full, or all verification slots remained busy \
-for the bounded wait. Saturation responses include `Retry-After`."),
+for the bounded wait. Also returned when the proof verified but the credential provider could not \
+issue and no cached credential was usable, which only the Cloudflare provider can do. Saturation and \
+provider responses include `Retry-After`."),
     )
 )]
 pub(crate) async fn issue_with_proof(
@@ -146,36 +152,43 @@ pub(crate) async fn issue_with_proof(
     })?;
 
     // Keep the alias confined to private throttle and keyed-derivation inputs.
-    let () = proof_state
+    let throttle_key = hex::encode(alias);
+    let paid = proof_state
         .alias_limiter
-        .allow(hex::encode(alias))
+        .allow(throttle_key.clone())
         .await
         .map_err(|err| AppError::RateLimited {
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })?;
 
-    let credentials = state
-        .issuer
-        .issue_for_proof(now_unix(), &body.product_id, alias.as_ref());
+    // The alias reaches the source and stops there: on the coturn path it is an
+    // input to a keyed digest, on the Cloudflare path it is not used at all.
+    // Either way nothing recoverable from it reaches the response.
+    let issued_at = now_unix();
+    let issued = match state
+        .source
+        .issue_for_proof(issued_at, &body.product_id, alias.as_ref())
+        .await
+    {
+        Ok(issued) => issued,
+        Err(_) => {
+            proof_state.alias_limiter.refund(throttle_key, paid);
+            return Err(AppError::UpstreamUnavailable);
+        }
+    };
 
     tracing::info!(
-        ttl_secs = state.config.ttl_secs,
+        ttl_secs = issued.ttl,
+        provider = state.source.name(),
         "TURN credentials issued via proof"
     );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "servers": state.config.ice_servers,
-            "username": credentials.username,
-            "password": credentials.password,
-            "ttl": state.config.ttl_secs,
+            "servers": issued.servers,
+            "username": issued.username,
+            "password": issued.password,
+            "ttl": issued.ttl,
         })),
     ))
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
 }
