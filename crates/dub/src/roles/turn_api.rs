@@ -11,9 +11,8 @@ pub async fn run() -> anyhow::Result<()> {
     let config = Config::from_env().context("invalid configuration")?;
     tracing::info!(
         bind = %config.bind_addr,
-        algorithm = config.algorithm.as_str(),
         ttl_secs = config.ttl_secs,
-        servers = config.ice_servers.len(),
+        provider = config.provider.name(),
         "starting turn-api"
     );
 

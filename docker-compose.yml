@@ -1,8 +1,8 @@
 name: dub-paseo-next-v2
 
 # Local/dev topology: Postgres + the device-attestation binaries, plus the username-indexer
-# The People Chain RPC is external (a public PreviewNet endpoint by default,
-# paired with PreviewNet's Asset Hub so the dotNS lane can run), so
+# The People Chain RPC is external (a public Paseo Next v2 endpoint by default,
+# paired with that network's Asset Hub so the dotNS lane can run), so
 # `docker compose up` needs outbound internet to reach it.
 #
 # Secrets below use dev-only defaults so `docker compose up` works out of the
@@ -58,7 +58,7 @@ services:
       # pointing at localhost for host-side `cargo run`. Interpolating that name
       # here would aim every container at its own loopback.
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
       # Dev-only 32-byte Ed25519 seed (0x + 64 hex). Replace in prod.
       JWT_ED25519_SECRET: ${JWT_ED25519_SECRET:-0x0101010101010101010101010101010101010101010101010101010101010101}
       # Dev default = //Alice, matching the writer SURI below (signer ==
@@ -77,9 +77,29 @@ services:
       ANDROID_PACKAGE_NAMES: ${ANDROID_PACKAGE_NAMES:-}
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
+      # Play Integrity: the self-managed key pair (set both or neither), or the
+      # temporary GOOGLE_CREDENTIALS fallback. Blank = not configured.
+      PLAY_INTEGRITY_MODE: ${PLAY_INTEGRITY_MODE:-strict}
+      PLAY_INTEGRITY_DECRYPTION_KEY: ${PLAY_INTEGRITY_DECRYPTION_KEY:-}
+      PLAY_INTEGRITY_VERIFICATION_KEY: ${PLAY_INTEGRITY_VERIFICATION_KEY:-}
+      GOOGLE_CREDENTIALS: ${GOOGLE_CREDENTIALS:-}
+      # Apple DeviceCheck. Enabled, the team id, key id and key are required.
+      # The URL keeps a non-blank default: the config reads a blank one as-is.
+      DEVICE_CHECK_IOS_ENABLED: ${DEVICE_CHECK_IOS_ENABLED:-false}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
+      DEVICE_CHECK_KEY_ID: ${DEVICE_CHECK_KEY_ID:-}
+      DEVICE_CHECK_PRIVATE_KEY: ${DEVICE_CHECK_PRIVATE_KEY:-}
+      DEVICE_CHECK_URL: ${DEVICE_CHECK_URL:-https://api.devicecheck.apple.com/v1}
+      # Widevine dedup. Enabled, the HMAC key is required.
+      WIDEVINE_DEDUP_ENABLED: ${WIDEVINE_DEDUP_ENABLED:-false}
+      WIDEVINE_DEDUP_ENFORCE: ${WIDEVINE_DEDUP_ENFORCE:-false}
+      WIDEVINE_DEDUP_HMAC_KEY: ${WIDEVINE_DEDUP_HMAC_KEY:-}
+      REGISTRATION_VOUCHERS_ENABLED: ${REGISTRATION_VOUCHERS_ENABLED:-false}
+      # ANDROID_ATTESTATION_CRL_* are left out on purpose: the built-in
+      # defaults are correct and .env.example forbids overriding them outside tests.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
       # The PEOPLE_RPC_URL and ASSET_HUB_RPC_URL
-      # defaults both name PreviewNet, and that pairing IS the safety property:
+      # defaults both name Paseo Next v2, and that pairing IS the safety property:
       # split across two networks, the writer would claim LiteLabelOwner on one
       # for usernames attested on another — a global claim, and unrecoverable,
       # because only the client can re-sign. An environment that overrides
@@ -131,7 +151,7 @@ services:
     # also contains service-owned signing secrets.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
       # Dev signer. In prod the least-privilege proxy key; the writer proxies
       # whenever ATTESTER_ACCOUNT is not this key.
       CHAIN_WRITER_SIGNER_SURI: ${CHAIN_WRITER_SIGNER_SURI:-//Alice}
@@ -142,6 +162,7 @@ services:
       CHAIN_WRITER_LEASE_TTL_SECS: ${CHAIN_WRITER_LEASE_TTL_SECS:-30}
       CHAIN_WRITER_POLL_SECS: ${CHAIN_WRITER_POLL_SECS:-2}
       CHAIN_WRITER_BATCH_SIZE: ${CHAIN_WRITER_BATCH_SIZE:-25}
+      CHAIN_WRITER_DOTNS_BATCH_SIZE: ${CHAIN_WRITER_DOTNS_BATCH_SIZE:-3}
       CHAIN_WRITER_FINALIZE_SECS: ${CHAIN_WRITER_FINALIZE_SECS:-120}
       CHAIN_WRITER_MAX_ATTEMPTS: ${CHAIN_WRITER_MAX_ATTEMPTS:-8}
       # dotNS gateway lane (Asset Hub). Not optional: no ASSET_HUB_RPC_URL is a
@@ -153,8 +174,8 @@ services:
       # signing origin by construction.
       # The URL below must name the Asset Hub of the same network PEOPLE_RPC_URL
       # points at, or the writer claims labels on the wrong chain. Both default
-      # to PreviewNet; an environment that moves one moves the other.
-      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://previewnet.substrate.dev/asset-hub}
+      # to Paseo Next v2; an environment that moves one moves the other.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://paseo-asset-hub-next-rpc.polkadot.io}
       # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
       # drained here (stranded-queue warning only); off = janitor drain.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
@@ -200,7 +221,7 @@ services:
     # balances and flips queue rows in the device-attestation DB.
     environment:
       DEVICE_ATTESTATION_DATABASE_URL: postgres://${DEVICE_ATTESTATION_DB_USER:-device_attestation}:${DEVICE_ATTESTATION_DB_PASSWORD:-device_attestation}@postgres:5432/${DEVICE_ATTESTATION_DB_NAME:-device_attestation}
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
       QUEUE_ADVANCE_INTERVAL_SECS: ${QUEUE_ADVANCE_INTERVAL_SECS:-6}
       QUEUE_LEASE_TTL_SECS: ${QUEUE_LEASE_TTL_SECS:-30}
       # Prometheus exporter, scraped on the private metrics network only.
@@ -253,7 +274,7 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       INDEXER_DATABASE_URL: postgres://username_indexer:username_indexer@username-indexer-postgres:5432/username_indexer
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
       STORAGE_PAGE_SIZE: ${STORAGE_PAGE_SIZE:-1000}
       SYNC_INTERVAL_SECS: ${SYNC_INTERVAL_SECS:-30}
       SPECULATIVE_INDEXING_ENABLED: ${SPECULATIVE_INDEXING_ENABLED:-true}
@@ -386,7 +407,7 @@ services:
         condition: service_healthy
     environment:
       INVITE_TICKETS_DATABASE_URL: postgres://invite_tickets:invite_tickets@invite-tickets-postgres:5432/invite_tickets
-      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://previewnet.substrate.dev/people}
+      PEOPLE_RPC_URL: ${PEOPLE_RPC_URL:-wss://paseo-people-next-system-rpc.polkadot.io}
       PEOPLE_NETWORK: ${PEOPLE_NETWORK:-paseo}
       # Dev signer (unfunded: batches finalize with ItemFailed and no tickets
       # insert). In prod: the hot invite-inviter key, or a delegate that
@@ -414,10 +435,12 @@ services:
       replicas: 1
 
   # TURN credential issuer: stateless (no DB; read-only People Chain root cache
-  # when proof issuance is enabled). The only secret is the HMAC key shared
-  # with the TURN relay (coturn `--use-auth-secret` mode must use the SAME
-  # secret and algorithm, or minted credentials will not authenticate). Safe
-  # to scale within one environment; each environment pins its own RPC/genesis.
+  # when proof issuance is enabled). TURN_PROVIDER picks the credential source —
+  # Cloudflare Realtime TURN (default; one credential fetched per request) or a
+  # self-hosted coturn relay (credential computed from a shared secret). Only
+  # the selected provider's variables are read, so a deployment holds one
+  # provider's secret and not the other's. Safe to scale within one environment;
+  # each environment pins its own RPC/genesis.
   turn-api:
     build:
       context: .
@@ -431,14 +454,30 @@ services:
     restart: unless-stopped
     environment:
       BIND_ADDR: 0.0.0.0:8080
-      # Dev secret (base64 of 32×0x42 — the golden-capture secret). In prod
-      # this MUST be the relay-shared secret; rotate by restarting relay and
-      # issuer together.
-      TURN_SECRET: ${TURN_SECRET:-QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=}
-      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
       TURN_TTL_SECS: ${TURN_TTL_SECS:-1800}
-      TURN_REALM: ${TURN_REALM:-example.org}
-      ICE_SERVERS: ${ICE_SERVERS:-stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp}
+      # Which credential source to use: cloudflare | coturn. The code default is
+      # cloudflare; the default HERE is coturn for the same reason .env.example
+      # selects it — cloudflare needs real account credentials, so a checkout
+      # with no .env would crash-loop this container at boot rather than run.
+      TURN_PROVIDER: ${TURN_PROVIDER:-coturn}
+      # TURN_PROVIDER=cloudflare. The key id names the app (not a secret: it is
+      # in the request path); the token is service-owned, from the server's
+      # chmod-600 .env. No dev default — no fake value can mint a working
+      # credential, so turn-api fails at boot rather than at request time.
+      TURN_KEY_ID: ${TURN_KEY_ID:-}
+      TURN_API_TOKEN: ${TURN_API_TOKEN:-}
+      # TURN_PROVIDER=coturn. Ignored unless that provider is selected, and
+      # setting TURN_SECRET while the provider is cloudflare is refused at boot
+      # rather than silently ignored. The secret and algorithm MUST match the
+      # relay's `--use-auth-secret` configuration; rotate relay and issuer
+      # together. ICE_SERVERS is what the relay answers on.
+      # The dev defaults are the ones documented in .env.example: a published
+      # placeholder secret that authenticates against no real relay, and a
+      # loopback ICE server. Both are overridden from .env in any deployment.
+      TURN_SECRET: ${TURN_SECRET:-ZGV2LW9ubHktdHVybi1zZWNyZXQtY2hhbmdlLW1l}
+      TURN_AUTH_ALGORITHM: ${TURN_AUTH_ALGORITHM:-SHA1}
+      TURN_REALM: ${TURN_REALM:-dub.local}
+      ICE_SERVERS: ${ICE_SERVERS:-turn:127.0.0.1:3478?transport=udp}
       # Verifies device-attestation JWTs. Dev default = the public half of
       # device-attestation-api's dev JWT_ED25519_SECRET above; in prod prefer
       # JWT_JWKS_JSON from device-attestation's /.well-known/jwks.json.

@@ -217,16 +217,20 @@ const CEILING_PROBE_RUN: u16 = 20;
 pub(super) struct BatchLane {
     lane: &'static str,
     pub(super) size: u16,
+    /// The ceiling this lane's size climbs back to. Per-lane, like the size.
+    max: u16,
     failures: u16,
     ceiling: Option<u16>,
     clean: u16,
 }
 
 impl BatchLane {
-    pub(super) fn new(lane: &'static str, size: u16) -> Self {
+    pub(super) fn new(lane: &'static str, max: u16) -> Self {
+        let max = max.max(1);
         let lane = Self {
             lane,
-            size,
+            size: max,
+            max,
             failures: 0,
             ceiling: None,
             clean: 0,
@@ -235,7 +239,8 @@ impl BatchLane {
         lane
     }
 
-    pub(super) fn succeeded(&mut self, max: u16) {
+    pub(super) fn succeeded(&mut self) {
+        let max = self.max;
         self.failures = 0;
         self.clean = self.clean.saturating_add(1);
         if self.clean >= CEILING_PROBE_RUN {
@@ -250,7 +255,8 @@ impl BatchLane {
         self.record_size();
     }
 
-    pub(super) fn failed(&mut self, max: u16) -> time::Duration {
+    pub(super) fn failed(&mut self) -> time::Duration {
+        let max = self.max;
         let attempted = self.size;
         self.size = settle_batch_size(self.size, max, false);
         if self.size < attempted {
@@ -302,22 +308,22 @@ mod tests {
         let mut lane = BatchLane::new("test", 25);
         assert_eq!(lane.size, 25);
 
-        assert_eq!(lane.failed(25), time::Duration::seconds(2));
+        assert_eq!(lane.failed(), time::Duration::seconds(2));
         assert_eq!(lane.size, 12);
-        assert_eq!(lane.failed(25), time::Duration::seconds(4));
+        assert_eq!(lane.failed(), time::Duration::seconds(4));
         assert_eq!(lane.size, 6);
 
-        lane.succeeded(25);
+        lane.succeeded();
         assert_eq!(lane.size, 7);
-        assert_eq!(lane.failed(25), time::Duration::seconds(2));
+        assert_eq!(lane.failed(), time::Duration::seconds(2));
 
         let mut floored = BatchLane::new("test", 25);
         for _ in 0..10 {
-            floored.failed(25);
+            floored.failed();
         }
         assert_eq!(floored.size, 1);
 
-        assert_eq!(floored.failed(25), time::Duration::seconds(64));
+        assert_eq!(floored.failed(), time::Duration::seconds(64));
     }
 
     #[test]
@@ -325,14 +331,14 @@ mod tests {
         let mut lane = BatchLane::new("test", 25);
 
         while lane.size > 1 {
-            lane.failed(25);
+            lane.failed();
         }
         assert_eq!(lane.size, 1);
         assert_eq!(lane.ceiling, Some(3));
 
-        lane.succeeded(25);
+        lane.succeeded();
         assert_eq!(lane.size, 2);
-        lane.failed(25);
+        lane.failed();
         assert_eq!(lane.size, 1);
         assert_eq!(
             lane.ceiling,
@@ -341,18 +347,18 @@ mod tests {
         );
 
         for _ in 0..(CEILING_PROBE_RUN - 1) {
-            lane.succeeded(25);
+            lane.succeeded();
             assert_eq!(lane.size, 1);
         }
 
-        lane.succeeded(25);
+        lane.succeeded();
         assert_eq!(lane.ceiling, Some(3));
         assert_eq!(lane.size, 2);
 
         let mut healthy = BatchLane::new("test", 25);
         healthy.size = 1;
         for _ in 0..5 {
-            healthy.succeeded(25);
+            healthy.succeeded();
         }
         assert_eq!(healthy.size, 6);
         assert_eq!(healthy.ceiling, None);

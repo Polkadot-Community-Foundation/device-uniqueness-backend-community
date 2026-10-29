@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Reset an environment's chain-derived database state after the chain it points
-# at has been wiped (PreviewNet is re-spawned routinely) or repointed.
+# at has been wiped (the test networks are re-spawned routinely) or repointed.
 #
 # Scope, and why it is not "drop everything":
 #
@@ -38,11 +38,12 @@
 #   scripts/reset_env_state.sh --project <name> --confirm <name> [--include-indexer] [--dry-run]
 #
 #   --project          compose project to act on (`dub-paseo-next-v2` for the
-#                      primary stack, `dub-previewnet` for PreviewNet).
+#                      primary stack).
 #   --confirm          must repeat --project exactly. The whole guardrail: this
-#                      command is destructive and both environments run from the
-#                      same compose file on one host, so naming the target twice
-#                      is what stops a reset landing on the wrong stack.
+#                      command is destructive and several environments can run
+#                      from the same compose file on one host, so naming the
+#                      target twice is what stops a reset landing on the wrong
+#                      stack.
 #   --include-indexer  also clear the username-indexer projection + checkpoint.
 #   --dry-run          report the row counts that would be deleted, delete
 #                      nothing, and leave every service running.
@@ -177,8 +178,9 @@ fi
 # Stop the writers before deleting. The chain writer's claim scan and the queue
 # advancer both mutate `username_reservations` continuously; deleting underneath
 # them races a row into SUBMITTING after the delete and leaves a half-reset
-# outbox. `stop` on a service the environment does not run (PreviewNet has no
-# registration-queue) is a no-op, so both are unconditional.
+# outbox. `stop` on a service the environment does not run (an environment with
+# QUEUE_ENABLED=false has no registration-queue) is a no-op, so both are
+# unconditional.
 echo
 echo "stopping writers…"
 compose stop device-attestation-chain-writer registration-queue >/dev/null 2>&1 || true
@@ -212,4 +214,4 @@ echo
 echo "done. The writer re-registers from an empty outbox; the indexer rebuilds"
 echo "its projection from the current chain. Re-check the on-chain prerequisites"
 echo "(attester allowance, proxy delegation, signer funding) before expecting"
-echo "registrations to land — see docs/plans/active/previewnet-env.md."
+echo "registrations to land — see docs/operations.md."

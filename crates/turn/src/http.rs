@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use http_common::error::not_found;
+use http_common::rate_limiter::Paid;
 use http_common::{health, layers, AuthSubject};
 
 use self::error::{AppError, AppResult, FieldError};
@@ -97,7 +98,14 @@ pub async fn readiness(_state: AppState) -> health::Readiness {
     Ok(&[])
 }
 
-async fn check_rate_limit(state: &AppState, subject: String) -> Result<(), AppError> {
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+async fn check_rate_limit(state: &AppState, subject: String) -> Result<Paid, AppError> {
     state
         .limiter
         .allow(subject)
@@ -133,10 +141,10 @@ fn validate_body(body: &serde_json::Value) -> Result<(), Vec<FieldError>> {
     security(("bearer_jwt" = [])),
     request_body = crate::openapi::IssueRequest,
     responses(
-        (status = 201, description = "Credentials minted: `username` is \
-`{unixExpiry}:{hexId}` (expiry = now + TTL), `password` is the base64 HMAC over `username` \
-under the secret shared with the TURN relay (the coturn REST-API construction), `servers` \
-echoes the configured ICE server list.",
+        (status = 201, description = "Credentials issued: `username` and `password` are an \
+opaque pair from the deployment's configured `TURN_PROVIDER` — do not parse either — `servers` \
+is the ICE server list to use them against, and `ttl` is the seconds of life remaining on the \
+credential.",
          body = crate::openapi::IssueResponse),
         (status = 400, description = "Body validation failed (with per-field `fields`), or \
 `Malformed JSON in request body` when a body is present but not JSON. An empty body is \
@@ -152,6 +160,11 @@ verification.",
          })),
         (status = 429, description = "Per-subject rate limit exceeded (with `Retry-After`).",
          example = json!({ "error": "Rate limit exceeded. Please retry after 60 seconds." })),
+        (status = 503, description = "The credential provider could not issue and no cached \
+credential was usable (with `Retry-After`). Only reachable on the Cloudflare provider, which \
+depends on an upstream call; a coturn deployment computes credentials locally and never returns \
+this.",
+         example = json!({ "error": "Credentials are temporarily unavailable." })),
     )
 )]
 pub(crate) async fn issue_credentials(
@@ -167,24 +180,29 @@ pub(crate) async fn issue_credentials(
         validate_body(&body).map_err(AppError::InvalidBody)?;
     }
 
-    let () = check_rate_limit(&state, auth.subject).await?;
+    let paid = check_rate_limit(&state, auth.subject.clone()).await?;
 
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs();
-    let mut id = [0u8; 8];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
-    let credentials = state.issuer.issue(now_unix, id);
+    let now_unix = now_unix();
+    let issued = match state.source.issue(now_unix).await {
+        Ok(issued) => issued,
+        Err(_) => {
+            state.limiter.refund(auth.subject, paid);
+            return Err(AppError::UpstreamUnavailable);
+        }
+    };
 
-    tracing::info!(ttl_secs = state.config.ttl_secs, "TURN credentials issued");
+    tracing::info!(
+        ttl_secs = issued.ttl,
+        provider = state.source.name(),
+        "TURN credentials issued"
+    );
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "servers": state.config.ice_servers,
-            "username": credentials.username,
-            "password": credentials.password,
-            "ttl": state.config.ttl_secs,
+            "servers": issued.servers,
+            "username": issued.username,
+            "password": issued.password,
+            "ttl": issued.ttl,
         })),
     ))
 }

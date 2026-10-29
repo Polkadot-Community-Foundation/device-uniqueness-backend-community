@@ -130,6 +130,7 @@ pub async fn handle(
         .limiter
         .allow(rate_key)
         .await
+        .map(|_| ())
         .map_err(|err| AppError::RateLimited {
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })?;

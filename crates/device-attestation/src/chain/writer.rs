@@ -33,9 +33,13 @@ use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
 use people::People;
 
-/// The claim size a writer uses when `CHAIN_WRITER_BATCH_SIZE` is unset or
-/// unusable. Also the AIMD ceiling every lane climbs back to.
+/// The claim size the People lane uses when `CHAIN_WRITER_BATCH_SIZE` is unset
+/// or unusable. Also the AIMD ceiling that lane climbs back to.
 const DEFAULT_BATCH_SIZE: u16 = 25;
+
+/// The same, for the dotNS (Asset Hub) lane and `CHAIN_WRITER_DOTNS_BATCH_SIZE`.
+/// Deliberately small.
+const DEFAULT_DOTNS_BATCH_SIZE: u16 = 3;
 
 /// Chain-writer configuration, loaded from the environment.
 #[derive(Debug, Clone)]
@@ -60,6 +64,9 @@ pub struct WriterConfig {
     /// size climbs back to. Not a fixed claim size: a whole-batch failure
     /// halves the size in use, a success grows it by one, floor 1.
     pub batch_size: u16,
+    /// The same, for the dotNS (Asset Hub) lane, whose per-extrinsic weight
+    /// budget is a different and much tighter one
+    pub dotns_batch_size: u16,
     /// Per-submit finalization timeout.
     pub finalize_timeout: Duration,
     /// Max submit attempts before a row is failed terminally.
@@ -91,7 +98,7 @@ impl WriterConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = http_common::config::required_var("DEVICE_ATTESTATION_DATABASE_URL")?;
         let people_rpc_url = std::env::var("PEOPLE_RPC_URL")
-            .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string());
+            .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
         let signer_suri = http_common::config::required_var("CHAIN_WRITER_SIGNER_SURI")?;
         let attester = crate::config::attester_account_from_env()?;
         let holder_id = match std::env::var("CHAIN_WRITER_HOLDER_ID") {
@@ -114,6 +121,7 @@ impl WriterConfig {
             lease_ttl: Duration::from_secs(env_u64("CHAIN_WRITER_LEASE_TTL_SECS", 30)),
             poll_interval: Duration::from_secs(env_u64("CHAIN_WRITER_POLL_SECS", 2)),
             batch_size: env_u16("CHAIN_WRITER_BATCH_SIZE", DEFAULT_BATCH_SIZE),
+            dotns_batch_size: env_u16("CHAIN_WRITER_DOTNS_BATCH_SIZE", DEFAULT_DOTNS_BATCH_SIZE),
             finalize_timeout: Duration::from_secs(env_u64("CHAIN_WRITER_FINALIZE_SECS", 120)),
             max_attempts: env_u64("CHAIN_WRITER_MAX_ATTEMPTS", 8) as i32,
             queue_enabled: crate::config::env_bool("QUEUE_ENABLED", false)?,
@@ -168,6 +176,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     );
 
     let batch_max = config.batch_size;
+    let dotns_batch_max = config.dotns_batch_size;
     let chain_for_lane = chain.clone();
     let config_attester = config.attester;
     let asset_hub_rpc = config.asset_hub_rpc_url.clone();
@@ -180,7 +189,10 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         proxy_for,
         config,
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
-        dotns: Drain::new(batch_max, DotnsLink::new(asset_hub_rpc, config_attester)),
+        dotns: Drain::new(
+            dotns_batch_max,
+            DotnsLink::new(asset_hub_rpc, config_attester),
+        ),
         passes,
     };
     writer.run_forever().await
@@ -373,7 +385,6 @@ fn cx_of<'a>(
         signer_account,
         proxy_for,
         max_attempts: config.max_attempts,
-        batch_max: config.batch_size,
         finalize_timeout: config.finalize_timeout,
         lease_ttl: config.lease_ttl,
     }
@@ -393,6 +404,7 @@ mod tests {
         "CHAIN_WRITER_LEASE_TTL_SECS",
         "CHAIN_WRITER_POLL_SECS",
         "CHAIN_WRITER_BATCH_SIZE",
+        "CHAIN_WRITER_DOTNS_BATCH_SIZE",
         "CHAIN_WRITER_FINALIZE_SECS",
         "CHAIN_WRITER_MAX_ATTEMPTS",
         "QUEUE_ENABLED",
@@ -447,6 +459,7 @@ mod tests {
             ("CHAIN_WRITER_LEASE_TTL_SECS", "45"),
             ("CHAIN_WRITER_POLL_SECS", "3"),
             ("CHAIN_WRITER_BATCH_SIZE", "50"),
+            ("CHAIN_WRITER_DOTNS_BATCH_SIZE", "5"),
             ("CHAIN_WRITER_FINALIZE_SECS", "90"),
             ("CHAIN_WRITER_MAX_ATTEMPTS", "4"),
             ("QUEUE_ENABLED", "yes"),
@@ -471,6 +484,7 @@ mod tests {
         assert_eq!(config.lease_ttl, Duration::from_secs(45));
         assert_eq!(config.poll_interval, Duration::from_secs(3));
         assert_eq!(config.batch_size, 50);
+        assert_eq!(config.dotns_batch_size, 5);
         assert_eq!(config.finalize_timeout, Duration::from_secs(90));
         assert_eq!(config.max_attempts, 4);
         assert!(config.queue_enabled);
@@ -482,7 +496,7 @@ mod tests {
         let config = from_env_with(REQUIRED_ENV).unwrap();
         assert_eq!(
             config.people_rpc_url,
-            "wss://previewnet.substrate.dev/people"
+            "wss://paseo-people-next-system-rpc.polkadot.io"
         );
         assert!(
             config
@@ -495,6 +509,10 @@ mod tests {
         assert_eq!(config.lease_ttl, Duration::from_secs(30));
         assert_eq!(config.poll_interval, Duration::from_secs(2));
         assert_eq!(config.batch_size, 25);
+        assert_eq!(
+            config.dotns_batch_size, 3,
+            "the dotNS lane's default is its own, and far below the People lane's"
+        );
         assert_eq!(config.finalize_timeout, Duration::from_secs(120));
         assert_eq!(config.max_attempts, 8);
         assert!(!config.queue_enabled);

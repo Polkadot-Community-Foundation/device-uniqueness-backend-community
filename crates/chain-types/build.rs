@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Selects the network this build targets from `DUB_NETWORK`. Two values,
-//! because two People runtimes: `testnet` covers previewnet and paseo-next-v2,
-//! which differ only in their endpoints.
+//! because two People runtimes: `testnet` is paseo-next-v2, `polkadot` is
+//! polkadot-test.
 
 /// Every accepted network, and whether its runtime has `Game` / `ProofOfInk`.
 const NETWORKS: &[(&str, bool)] = &[("testnet", true), ("polkadot", false)];
