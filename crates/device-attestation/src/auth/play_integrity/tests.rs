@@ -5,6 +5,7 @@ use aes_gcm::aead::{Aead as _, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 use base64::Engine as _;
 use p256::ecdsa::signature::hazmat::PrehashSigner as _;
+use p256::elliptic_curve::Generate as _;
 use p256::pkcs8::EncodePublicKey as _;
 use sha2::{Digest as _, Sha256};
 
@@ -27,7 +28,7 @@ struct TestKeys {
 
 impl TestKeys {
     fn new() -> Self {
-        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let signing_key = p256::ecdsa::SigningKey::generate();
         let verification_key_der = p256::PublicKey::from(signing_key.verifying_key())
             .to_public_key_der()
             .expect("spki der")

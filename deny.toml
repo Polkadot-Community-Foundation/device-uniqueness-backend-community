@@ -42,13 +42,15 @@ ignore = [
   # unrelated.) Upstream has no fixed release.
   "RUSTSEC-2023-0071",
 
-  # Unmaintained, not vulnerable. All three are transitive build-time or
+  # Unmaintained, not vulnerable. All four are transitive build-time or
   # decoding dependencies we do not select:
   #   paste             <- ark-ff, via the ring-VRF stack
   #   proc-macro-error2 <- subxt-macro
   #   smallstr          <- scale-info-legacy, via subxt
+  #   unsafe-libyaml    <- serde_yaml, via frame-decode, via subxt
   # Nothing to upgrade to; they leave when their parents replace them.
   "RUSTSEC-2024-0436",
+  "RUSTSEC-2024-0449",
   "RUSTSEC-2026-0173",
   "RUSTSEC-2026-0215",
 ]

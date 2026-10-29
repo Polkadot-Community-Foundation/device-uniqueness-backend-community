@@ -307,6 +307,7 @@ fn verify_cert(
 #[cfg(test)]
 mod tests {
     use p256::ecdsa::signature::Signer as _;
+    use p256::elliptic_curve::Generate as _;
     use rcgen::{BasicConstraints, Certificate, CertificateParams, CustomExtension, IsCa, KeyPair};
 
     use super::*;
@@ -648,10 +649,10 @@ mod tests {
 
     #[test]
     fn assertion_verifies_and_rejects_tampering() {
-        let signing = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let signing = p256::ecdsa::SigningKey::generate();
         let public_key = signing
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec();
 
@@ -695,10 +696,10 @@ mod tests {
     fn assertion_rejects_prehash_signed_nonce() {
         use p256::ecdsa::signature::hazmat::PrehashSigner as _;
 
-        let signing = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let signing = p256::ecdsa::SigningKey::generate();
         let public_key = signing
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec();
 

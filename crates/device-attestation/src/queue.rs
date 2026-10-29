@@ -278,7 +278,7 @@ impl AdvancerConfig {
         Ok(Self {
             database_url,
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
-                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+                .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string()),
             interval,
             lease_ttl,
             // Unique per boot: in a container the PID is always 1, and equal

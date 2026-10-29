@@ -68,6 +68,7 @@ async fn check_rate_limit(state: &AppState, subject: String) -> Result<(), AppEr
         .limiter
         .allow(subject)
         .await
+        .map(|_| ())
         .map_err(|err| AppError::RateLimited {
             retry_after_secs: err.wait_time_from(state.limiter.current_time()).as_secs(),
         })

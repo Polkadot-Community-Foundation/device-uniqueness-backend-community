@@ -7,7 +7,8 @@ license.workspace = true
 publish.workspace = true
 autobins = false
 
-# turn is a library (domain: coturn REST-API ephemeral credential minting +
+# turn is a library (domain: TURN credential issuance over a selectable
+# provider — Cloudflare Realtime TURN or a self-hosted coturn relay — plus
 # proof-authorized issuance). Its
 # one deployable service, the stateless N-replica `turn-api`, is a role of the
 # `dub` binary (`crates/dub`), entered through this crate's `routes()`. No
@@ -33,6 +34,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 utoipa.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 
 blake2 = "0.10"
 hmac = "0.12"

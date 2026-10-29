@@ -4,7 +4,7 @@
 //! Generated People Chain types for the network this build targets.
 //!
 //! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
-//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `testnet` (the default — paseo-next-v2) or
 //! `polkadot` (polkadot-test). Each has its own vendored blob,
 //! `metadata/metadata.<network>.scale`. Refresh one with:
 //! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
@@ -12,7 +12,6 @@
 //! plus `Game,ProofOfInk` on `testnet`; the `polkadot` runtime dropped them.
 
 use subxt::config::transaction_extensions as tx_ext;
-
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[cfg_attr(
     dub_network = "testnet",
@@ -23,6 +22,30 @@ use subxt::config::transaction_extensions as tx_ext;
     subxt::subxt(runtime_metadata_path = "metadata/metadata.polkadot.scale")
 )]
 pub mod people {}
+
+pub mod asset_hub {
+
+    static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/metadata/ah.",
+        env!("DUB_NETWORK"),
+        ".scale"
+    ));
+
+    /// The vendored metadata [`people`] is generated from, decoded once.
+    static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Arc::new(
+                subxt::Metadata::decode_from(METADATA_BYTES)
+                    .expect("vendored People Chain metadata decodes"),
+            )
+        });
+
+    /// subxt's own error-decoding entry point
+    pub fn metadata_arc() -> subxt::metadata::ArcMetadata {
+        METADATA.clone()
+    }
+}
 
 pub use subxt;
 
@@ -230,7 +253,7 @@ delegating_config! {
 pub type AssetHubTransactionExtensions<T> = (
     Noop<UnitTransactionExtension>,
     Noop<AuthorizeValueTransfer>,
-    Noop<VerifyMultiSignature>,
+    tx_ext::VerifySignature<T>,
     Noop<AuthorizeCall>,
     Noop<AsPgas>,
     Noop<AsRingAlias>,
@@ -421,9 +444,33 @@ mod tests {
         extensions: &'static [&'static str],
     }
 
-    /// What `next-people-paseo` 3000000 declares, in order. paseo-next-v2 and
-    /// previewnet upgraded together and their metadata is identical, so one
-    /// list covers both.
+    const PEOPLE_V3004_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsPerson",
+        "AsProofOfInkParticipant",
+        "ScoreAsParticipant",
+        "GameAsInvited",
+        "PeopleLiteAuth",
+        "AsMember",
+        "AsCoinage",
+        "AsResources",
+        "HonourAuth",
+        "AuthorizeCall",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "CheckMetadataHash",
+        "StorageWeightReclaim",
+    ];
+
+    /// What `next-people-paseo` 3000000 declares, in order.
     const PEOPLE_V3_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "VerifyMultiSignature",
@@ -521,6 +568,28 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
+    const ASSET_HUB_V3004_EXTENSIONS: &[&str] = &[
+        "UnitTransactionExtension",
+        "VerifyMultiSignature",
+        "AsScarcity",
+        "AuthorizeCall",
+        "AsPgas",
+        "AsDotnsGateway",
+        "RestrictOrigins",
+        "CheckNonZeroSender",
+        "CheckSpecVersion",
+        "CheckTxVersion",
+        "CheckGenesis",
+        "CheckMortality",
+        "CheckNonce",
+        "CheckWeight",
+        "ChargeAssetTxPayment",
+        "PrevalidateAttests",
+        "CheckMetadataHash",
+        "EthSetOrigin",
+        "StorageWeightReclaim",
+    ];
+
     /// Every runtime a deployment is known to have talked to. The tuples are
     /// the union of these sets, not a snapshot of the newest one: an entry
     /// stays here — and its gate stays in the tuple — so that a binary
@@ -541,14 +610,35 @@ mod tests {
             extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
         },
         KnownRuntime {
-            env: "paseo-next-v2 / previewnet",
+            env: "paseo-next-v2",
             spec_name: "next-people-paseo",
-            spec_version: 3_000_000,
+            spec_version: 3_004_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 / previewnet asset hub",
+            spec_name: "next-asset-hub-paseo",
+            spec_version: 3_004_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2",
+            spec_name: "next-people-paseo",
+            spec_version: 3_003_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_V3_EXTENSIONS,
         },
         KnownRuntime {
-            env: "paseo-next-v2 / previewnet asset hub",
+            env: "paseo-next-v2",
+            spec_name: "next-people-paseo",
+            spec_version: 3_002_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 asset hub",
             spec_name: "next-asset-hub-paseo",
             spec_version: 3_000_000,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
@@ -585,67 +675,12 @@ mod tests {
             ],
         },
         KnownRuntime {
-            env: "previewnet",
-            spec_name: "next-people-paseo",
-            spec_version: 1_000_032,
-            tuple: TUPLE_EXTENSIONS,
-            extensions: &[
-                "UnitTransactionExtension",
-                "VerifyMultiSignature",
-                "AsPerson",
-                "AsProofOfInkParticipant",
-                "ScoreAsParticipant",
-                "GameAsInvited",
-                "PeopleLiteAuth",
-                "AsMember",
-                "AsCoinage",
-                "AsResources",
-                "HonourAuth",
-                "AuthorizeCall",
-                "RestrictOrigins",
-                "CheckNonZeroSender",
-                "CheckSpecVersion",
-                "CheckTxVersion",
-                "CheckGenesis",
-                "CheckMortality",
-                "CheckNonce",
-                "CheckWeight",
-                "ChargeAssetTxPayment",
-                "StorageWeightReclaim",
-            ],
-        },
-        KnownRuntime {
             env: "paseo-next-v2 asset hub",
             spec_name: "next-asset-hub-paseo",
             spec_version: 2_000_033,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
             extensions: &[
                 "AuthorizeValueTransfer",
-                "AuthorizeCall",
-                "AsPgas",
-                "AsRingAlias",
-                "AsDotnsGateway",
-                "RestrictOrigins",
-                "CheckNonZeroSender",
-                "CheckSpecVersion",
-                "CheckTxVersion",
-                "CheckGenesis",
-                "CheckMortality",
-                "CheckNonce",
-                "CheckWeight",
-                "ChargeAssetTxPayment",
-                "CheckMetadataHash",
-                "EthSetOrigin",
-                "StorageWeightReclaim",
-            ],
-        },
-        KnownRuntime {
-            env: "previewnet asset hub",
-            spec_name: "next-asset-hub-paseo",
-            spec_version: 2_000_034,
-            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
-            extensions: &[
-                "UnitTransactionExtension",
                 "AuthorizeCall",
                 "AsPgas",
                 "AsRingAlias",
@@ -698,6 +733,41 @@ mod tests {
             assert!(
                 TUPLE_EXTENSIONS.contains(name),
                 "vendored metadata declares extension {name}, which the tuple cannot satisfy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_v4_extrinsic_resolves_to_extension_version_zero() {
+        assert_eq!(
+            metadata_arc()
+                .extrinsic()
+                .transaction_extension_version_to_use_for_decoding(),
+            0,
+            "subxt must read a versionless (v4) extrinsic as extension \
+             version 0; anything else signs bytes the runtime cannot decode"
+        );
+    }
+
+    #[test]
+    fn version_zero_extensions_are_all_in_the_tuple() {
+        let metadata = metadata_arc();
+        let declared: Vec<&str> = metadata
+            .extrinsic()
+            .transaction_extensions_by_version(0)
+            .expect("version 0 is always declared")
+            .map(|extension| extension.identifier())
+            .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "version 0 must declare transaction extensions"
+        );
+        for name in &declared {
+            assert!(
+                TUPLE_EXTENSIONS.contains(name),
+                "version 0 declares extension {name}, which the tuple cannot \
+                 satisfy — a v4 extrinsic would not encode it"
             );
         }
     }
@@ -773,7 +843,7 @@ mod tests {
     #[cfg(dub_network = "polkadot")]
     const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
     #[cfg(not(dub_network = "polkadot"))]
-    const VENDORED_VERSION: (u32, u32) = (3_000_000, 5);
+    const VENDORED_VERSION: (u32, u32) = (3_004_000, 6);
 
     fn people_metadata() -> subxt::ArcMetadata {
         subxt::Metadata::decode_from(METADATA_BYTES)
