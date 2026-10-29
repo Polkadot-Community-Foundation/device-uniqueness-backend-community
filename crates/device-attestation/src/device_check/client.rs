@@ -260,11 +260,12 @@ fn classify_query_response(body: &[u8]) -> Result<Option<BitState>, DeviceCheckE
 mod tests {
     use super::*;
     use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+    use p256::elliptic_curve::Generate as _;
     use p256::pkcs8::EncodePrivateKey as _;
     use sha2::{Digest as _, Sha256};
 
     fn test_client() -> (Client, p256::ecdsa::VerifyingKey) {
-        let secret = p256::SecretKey::random(&mut rand::rngs::OsRng);
+        let secret = p256::SecretKey::generate();
         let pem = secret
             .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
             .expect("pem");

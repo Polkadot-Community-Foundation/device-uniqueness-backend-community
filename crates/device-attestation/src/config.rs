@@ -204,7 +204,7 @@ impl Config {
             jwt_secret: SecretBox::new(Box::new(jwt_secret)),
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "polkadot-app".to_string()),
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
-                .unwrap_or_else(|_| "wss://previewnet.substrate.dev/people".to_string()),
+                .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string()),
             attester_account: attester_account_from_env()?,
             access_ttl: Duration::from_secs(parse_var("ACCESS_TOKEN_TTL_SECS", "86400")?),
             refresh_ttl: Duration::from_secs(parse_var("REFRESH_TOKEN_TTL_SECS", "2592000")?),

@@ -47,10 +47,10 @@ ignore = [
   #   paste             <- ark-ff, via the ring-VRF stack
   #   proc-macro-error2 <- subxt-macro
   #   smallstr          <- scale-info-legacy, via subxt
-  #   unsafe-libyaml    <- serde_yaml <- frame-decode legacy types, via subxt
+  #   unsafe-libyaml    <- serde_yaml, via frame-decode, via subxt
   # Nothing to upgrade to; they leave when their parents replace them.
   "RUSTSEC-2024-0436",
+  "RUSTSEC-2024-0449",
   "RUSTSEC-2026-0173",
   "RUSTSEC-2026-0215",
-  "RUSTSEC-2024-0449",
 ]

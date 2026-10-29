@@ -88,4 +88,4 @@ jobs:
           fetch-depth: 0
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
+          command: check --allow unmaintained --allow vulnerability

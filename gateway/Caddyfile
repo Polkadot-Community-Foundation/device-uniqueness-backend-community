@@ -9,14 +9,14 @@
 # `dub-edge` network, resolved by docker DNS, so adding an environment is a
 # new alias rather than a new port.
 #
-# One site block per environment, both importing the same `routes` snippet, so
+# One site block per environment, each importing the same `routes` snippet, so
 # the ownership map exists once no matter how many environments run. An
 # environment is only ever reachable through its own hostname — there is no
 # header, no path prefix, and therefore no default to fall through to when a
 # caller names the wrong one.
 #
 # Every {$VAR:default} default matches the production layout, so the edge
-# project starts with no environment at all. For a local run set both addresses
+# project starts with no environment at all. For a local run set the address
 # to `http://<hostname>` (the scheme keeps Caddy off HTTPS and off ACME) and
 # publish the container's port 80 elsewhere with EDGE_HTTP_PORT — see the header
 # of gateway/docker-compose.yml.
@@ -89,23 +89,5 @@
  {$USERNAME_INDEXER_UPSTREAM:username-indexer-paseo-next-v2:8080} \
  {$INVITE_TICKETS_UPSTREAM:invite-tickets-api-paseo-next-v2:8080} \
  {$TURN_UPSTREAM:turn-api-paseo-next-v2:8080} \
- {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
-}
-
-# --- PreviewNet ----------------------------------------------------------
-# Same routes, this environment's upstreams. TURN is local because proof
-# verification pins one People Chain RPC and genesis; notify remains shared and
-# verifies both environments' tokens from a merged JWKS. invite-tickets is not
-# deployed here, so its route points at this environment's device-attestation-api
-# and answers its 404 rather than a 502.
-#
-# This environment's own upstreams are literals: they follow from ENV_ID, and
-# nothing sets a per-environment override — only the hostname is a variable.
-{$PREVIEW_GATEWAY_ADDRESS:identity-previewnet.dotspark.app} {
-	import routes \
- device-attestation-api-previewnet:8080 \
- username-indexer-previewnet:8080 \
- device-attestation-api-previewnet:8080 \
- turn-api-previewnet:8080 \
  {$NOTIFY_UPSTREAM:notify-relay-paseo-next-v2:8080}
 }

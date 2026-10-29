@@ -36,7 +36,7 @@ pub enum VerifyError {
 ///
 /// `(ring_index, ring_revision)` names one held root; a pair the server does not
 /// hold is rejected without verifying anything. The alias is a throttle key only
-/// — keep it out of responses, coturn usernames, logs, and metrics.
+/// — keep it out of responses, credentials, logs, and metrics.
 pub async fn verify(
     snapshot: Snapshot,
     proof_bytes: Vec<u8>,

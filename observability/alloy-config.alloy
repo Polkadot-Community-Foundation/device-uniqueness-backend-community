@@ -30,7 +30,7 @@ discovery.relabel "containers" {
   // `env_id` is the label the dashboard filters on, and it must mean the same
   // thing in Loki as it does in Prometheus — the ecosystem's network id, which
   // the compose project carries in meaning but not in spelling. Containers
-  // outside the two environments (the edge, this project) get no `env_id` and
+  // outside the environment (the edge, this project) get no `env_id` and
   // stay queryable by `project`. The shared `notify-relay` runs in the primary
   // project and is labelled with it: a container log has no per-request
   // environment to read. TURN runs once per environment because its proof root
@@ -39,13 +39,6 @@ discovery.relabel "containers" {
     source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
     regex         = "dub-paseo-next-v2"
     replacement   = "paseo-next-v2"
-    target_label  = "env_id"
-  }
-
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
-    regex         = "dub-previewnet"
-    replacement   = "previewnet"
     target_label  = "env_id"
   }
 

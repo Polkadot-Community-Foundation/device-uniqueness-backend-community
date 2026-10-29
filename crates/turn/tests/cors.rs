@@ -7,7 +7,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt as _;
 use turn::config::{Config, ProofConfig};
-use turn::credentials::Algorithm;
 use turn::AppState;
 
 const PRODUCT: &str = "dim2.paseo";
@@ -16,11 +15,12 @@ fn app(proof: bool) -> axum::Router {
     let key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
     turn::routes(AppState::new(Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid addr"),
-        turn_secret: b"cors-turn-secret".to_vec(),
-        algorithm: Algorithm::Sha1,
         ttl_secs: 1800,
-        realm: "example.org".to_string(),
-        ice_servers: vec!["turn:turn.example.org:3478?transport=udp".to_string()],
+        provider: turn::config::ProviderConfig::Cloudflare {
+            key_id: "test-key-id".to_string(),
+            api_token: "test-api-token".to_string(),
+            base_url: Some(spawn_cloudflare_stub()),
+        },
         jwt_verifier: jwt_verify::Verifier::from_public_key(None, key.verifying_key().as_bytes()),
         rate_limit: 100,
         rate_window: Duration::from_secs(60),
@@ -209,4 +209,35 @@ async fn the_preflight_does_not_answer_for_a_route_that_is_not_mounted() {
     .await;
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// A stand-in for Cloudflare Realtime TURN, bound on a loopback port.
+fn spawn_cloudflare_stub() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let addr = listener.local_addr().expect("stub addr");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    let router = axum::Router::new().route(
+        "/turn/keys/{key_id}/credentials/generate-ice-servers",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "iceServers": [
+                    { "urls": ["stun:stun.cloudflare.com:3478"] },
+                    {
+                        "urls": [
+                            "turn:turn.cloudflare.com:3478?transport=udp",
+                            "turns:turn.cloudflare.com:5349?transport=tcp"
+                        ],
+                        "username": "stub-username",
+                        "credential": "stub-credential"
+                    }
+                ],
+                "ttl": 1800
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.ok();
+    });
+    format!("http://{addr}")
 }

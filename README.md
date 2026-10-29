@@ -1,16 +1,16 @@
 # Device Uniqueness Backend
 
 > [!WARNING]
-> The following is a proof-of-concept. This open source code is provided for
-> research, experimentation, and developer education only. This code has not been
-> audited, is actively experimental, and may contain bugs, vulnerabilities, or
-> incomplete features. Use at your own risk.
-
-Parity doesn’t deploy the code but may update it based on community feedback.
-
-If you experience problems with any product or service that was built on or
-deployed from this code, you should contact the third party who deployed the code
-in its amended form, not Parity.
+> This open source code is provided for research, experimentation,
+> and developer education only. This code has not been audited,
+> is actively experimental, and may contain bugs, vulnerabilities, or incomplete
+> features. Use at your own risk and obtain legal advice as appropriate - DYOR.
+>
+> Parity doesn’t deploy the code but may update it based on community feedback.
+>
+> If you experience problems with any product or service that was built
+> on or deployed from this code, you should contact the third party who
+> deployed the code in its amended form, not Parity.
 
 A Rust backend that proves a device is a distinct physical device, and registers
 a username for it on Polkadot's People Chain — plus the sibling services a
@@ -40,7 +40,7 @@ each of which deploys independently behind a single-URL
   a new registration is searchable a finality trail sooner.
 - **`invite-tickets-api`** / **`invite-tickets-pool`** — synchronous
   invitation-ticket claim, and the keypair pool that keeps it stocked.
-- **`turn-api`** — a stateless TURN credential issuer (coturn REST API).
+- **`turn-api`** — a stateless TURN credential issuer (Cloudflare Realtime TURN, or a self-hosted coturn relay).
 - **`notify-relay`** — a stateless APNs / FCM push relay.
 
 Plus **`voucher-mint`**, an operator CLI for minting registration vouchers
@@ -105,10 +105,11 @@ with environment from `.env.example`.
 
 ### The network you are starting from
 
-Out of the box `.env.example` points at **PreviewNet**
-(`wss://previewnet.substrate.dev`), a public test network that is wiped and
-re-spawned routinely, and uses the well-known development keys `//Alice` and
-`//Bob`. That is enough for the stack to start and for the read paths to work.
+Out of the box `.env.example` points at **Paseo Next v2**
+(`wss://paseo-people-next-system-rpc.polkadot.io` and its Asset Hub), a public
+test network that is wiped and re-spawned routinely, and uses the well-known
+development keys `//Alice` and `//Bob`. That is enough for the stack to start
+and for the read paths to work.
 
 For anything past that you need, on whichever network you target:
 
@@ -117,15 +118,14 @@ For anything past that you need, on whichever network you target:
 - for invites, an inviter account holding `AvailableInvites` quota.
 
 The binary is **built for one People runtime**: `DUB_NETWORK` is `testnet` (the
-default — previewnet and paseo-next-v2) or `polkadot` (polkadot-test). It picks
+default — paseo-next-v2) or `polkadot` (polkadot-test). It picks
 the vendored People metadata and, on `polkadot` — whose runtime has no `Game` /
 `ProofOfInk` — leaves the invite-tickets services out. Set it in `.env` before
 building, together with `COMPOSE_PROFILES` and the RPC endpoints; see
 [Choosing a network](docs/operations.md#choosing-a-network).
 
-Paseo's People Chain is
-`wss://paseo-people-next-system-rpc.polkadot.io` — point `ASSET_HUB_RPC_URL` at
-an Asset Hub on the same network running the `signed_at` `reserve_name`. The
+If you repoint `PEOPLE_RPC_URL`, point `ASSET_HUB_RPC_URL` at an Asset Hub on
+the same network running the `signed_at` `reserve_name` in the same edit. The
 dotNS lane is not optional; where the shape does not match, the writer parks the
 lane rather than submitting.
 
@@ -166,12 +166,13 @@ test in `just check` fails if either is stale. Never hand-edit them.
 
 ## Releases
 
-**This repository publishes binaries.** Releases are cut manually from a
-`vX.Y.Z` tag via the [release workflow](.github/workflows/release.yml). Each one
-attaches:
+**This repository publishes binaries and the container image.** Pushing a
+`vX.Y.Z` tag builds the image (see "About the container image" below); the
+[release workflow](.github/workflows/release.yml), dispatched manually for that
+tag once the image is up, creates a GitHub Release. Each one attaches:
 
-Every asset is built twice, once per People runtime — `testnet` (previewnet and
-paseo-next-v2) and `polkadot` (polkadot-test) — because `DUB_NETWORK` is fixed
+Every asset is built twice, once per People runtime — `testnet` (paseo-next-v2)
+and `polkadot` (polkadot-test) — because `DUB_NETWORK` is fixed
 when the binary is built. Take the pair matching the chain you point at;
 `dub --help` prints the network a binary was built for.
 
@@ -190,19 +191,31 @@ build them yourself: `docker buildx bake all` compiles the very same
 
 ### About the container image
 
-There is a public image at `docker.io/paritytech/device-uniqueness-backend`, but
-it is **not published from this repository** — Parity builds and pushes it from
-its own working tree, and **its tags do not line up with this repository's
-tags**. At the time of first publish it carries `v0.3.0`, built from source
-older than this release. Treat it as a convenience, not as the artifact
-corresponding to a tag here.
+The public image at `docker.io/paritytech/device-uniqueness-backend` is
+published from this repository by the [image workflow](.github/workflows/image.yml),
+which builds the same `Dockerfile` stage the release tarballs are exported
+from:
 
-Because of that, the compose bundle does not blindly pin to it. The release
-workflow checks whether an image exists at `<tag>-<network>` and is anonymously
-pullable — one image per network, since an image carries a binary built for one
-runtime; if it is, that network's bundle pins to it, and if it is not, the
-bundle keeps its `build:` stanzas and the release notes say so. Either way the
-bundle works — the second case just needs a source checkout beside it:
+- **Release images**: pushing a `vX.Y.Z` tag builds `<tag>-<network>`
+  (`v0.7.0-testnet`, `v0.7.0-polkadot`) for `linux/amd64` and `linux/arm64`;
+  let that run finish before dispatching the release workflow, which pins the
+  compose bundle to them. One image per network, because an image carries a
+  binary built for one runtime; there is deliberately no bare `<tag>`,
+  `stable` or `latest` — pin the exact version for your network.
+- **Commit images**: every push to `main` builds `YYYYMMDD-HHMMSS-<shortsha>`
+  (`linux/amd64` + `linux/arm64`, `testnet`). These track unreleased work and exist for
+  Parity's own deployment pipeline; a release tag is what to run.
+
+Tags that predate this arrangement — `v0.5.0` and earlier, `stable` (last moved
+then, and never moved by this workflow), and the commit images before it —
+were pushed from Parity's private tree and do not correspond to tags here.
+
+The compose bundle still does not blindly pin to the image. The release
+workflow checks that `<tag>-<network>` is anonymously pullable; if it is, that
+network's bundle pins to it, and if it is not (the image run has not finished,
+or the Docker Hub repository is private), the bundle keeps its `build:` stanzas
+and the release notes say so. Either way the bundle works — the second case
+just needs a source checkout beside it:
 
 ```bash
 tar xzf dub-compose-<version>-<network>.tar.gz && cp .env.example .env

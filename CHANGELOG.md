@@ -8,6 +8,183 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-27
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3004000      |
+| `polkadot` | `people-polkadot`   | 2005000      |
+
+### Added
+
+- **`POST /usernames` accepts a `payloadVersion`.** It declares the format of
+  the payloads the claim's signatures cover. Omitted means `1`, which is the
+  only format today. An unsupported version is a `400` on `payloadVersion`
+  before anything is stored, not an invalid-signature error. The version is
+  stored with the reservation (migration `0011_payload_version`, applied on
+  boot; existing rows become `1`), and the chain writer's retry and
+  terminal-failure logs include it.
+- **`device-attestation-api` checks the People runtime's `PeopleLite::attest`
+  shape at boot.** Asset Hub's `DotnsGateway::reserve_name` was already
+  checked. If the argument names or types of the connected runtime differ from
+  the vendored metadata, the process refuses to start and the error names
+  both shapes. That happens when `PEOPLE_RPC_URL` points at a different
+  runtime than the build. The Asset Hub metadata is now vendored per network
+  in `chain-types`.
+
+### Changed
+
+- **Candidate and dotNS reservation signatures follow the runtime's signing
+  context rule.** An individuality runtime that checks these account signatures
+  over `context ++ message` (paritytech/individuality-community#196) exposes
+  the context as the `SigningContext` constant of the verifying pallet
+  (`PeopleLite` on People, `DotnsGateway` on Asset Hub). Intake
+  (`candidateSignature`) and the chain writer's gates read the constant from the
+  runtime metadata at the block they work against: the message in that context
+  when it is there, the plain message when it is not. A release works on any
+  network, before and after the runtime upgrade, and switches as soon as the
+  upgrade is enacted.
+- **The People lane verifies the candidate signature before submitting.** A
+  row whose `candidateSignature` the runtime would reject as
+  `InvalidAttestationSignature` is failed at the gate, like a dotNS reservation
+  with a bad signature, instead of spending attempts and fees on-chain.
+- **`dotns.signedAt` must be a JSON integer.** `POST /usernames` used to accept
+  a whole-valued float (`1780000000.0`) there; it is now a `400` on
+  `dotns.signedAt`, like a fractional one.
+
+## [0.7.0] - 2026-09-16
+
+### Added
+
+- **The container image is published from this repository.** Until now
+  `docker.io/paritytech/device-uniqueness-backend` was pushed from Parity's
+  private tree and its tags did not correspond to tags here. One image
+  workflow now publishes it from this repository, from the same `Dockerfile`
+  stage the release tarballs are exported from:
+  - **Release images**, `<tag>-<network>` (e.g. `v0.7.0-testnet`,
+    `v0.7.0-polkadot`), multi-arch (`linux/amd64` + `linux/arm64`), built when
+    the `vX.Y.Z` tag is pushed; the release workflow, dispatched after that,
+    pins the compose bundle to them. No bare `<tag>`, `stable` or `latest`: an
+    image carries a binary built for one runtime, so a tag must name its
+    network, and pinning an exact version is the only supported mode.
+  - **Commit images**, `YYYYMMDD-HHMMSS-<shortsha>` (`linux/amd64` + `linux/arm64`, `testnet`),
+    one per push to `main`. Pull requests build the image without pushing.
+  - A manual run of the image workflow builds any ref for either network under
+    a tag of the operator's choosing; the commit-image shape is refused there,
+    since it is the key the internal deployment promotes on.
+
+### Changed
+
+- **`turn-api` gains a credential provider, and defaults to Cloudflare Realtime
+  TURN.** The relay this service was built against is decommissioned, and
+  Cloudflare does not do shared-secret HMAC credentials: it mints both halves
+  itself and returns the ICE server list with them. `TURN_PROVIDER` now selects
+  the source — `cloudflare` (the new default) fetches one credential per request
+  from `generate-ice-servers`, and `coturn` keeps the previous behaviour of
+  computing the credential locally from a secret shared with a relay you run.
+  Only the selected provider's variables are read, so a deployment holds one
+  provider's secret and not the other's.
+
+  **Operators on a self-hosted relay: set `TURN_PROVIDER=coturn` and nothing else
+  changes.** `TURN_SECRET`, `TURN_AUTH_ALGORITHM`, `TURN_REALM` and `ICE_SERVERS`
+  keep their meanings under that provider. Leaving `TURN_SECRET` set without
+  naming the provider is refused at boot with a message saying what to set, so
+  the upgrade cannot silently land on Cloudflare and fail at request time.
+  Operators moving to Cloudflare set `TURN_KEY_ID` and `TURN_API_TOKEN`, which
+  are required by that provider and have no defaults.
+
+  **Clients need no release**, but the 201 body's `username` and `password`
+  should be treated as opaque: on `cloudflare` they are unstructured Cloudflare
+  values, so anything parsing `username` as `{unixExpiry}:{hexId}` must stop.
+  `ttl` is now the life remaining on the credential rather than the configured
+  TTL (identical on `coturn`, which mints to order; lower on `cloudflare` only
+  when a cached credential is served). Both routes can answer `503` on
+  `cloudflare` when it is unreachable and nothing is cached — unreachable on
+  `coturn`, which computes locally.
+
+  On `cloudflare`, each request getting its own credential is what keeps callers
+  mutually unlinkable; the last good response is cached and served during an
+  outage, and after three consecutive failures the client serves that cache
+  directly for 30s rather than making every caller wait out a timeout. The proof
+  route's alias-derived credential id remains on `coturn`, where the HMAC keying
+  it still exists; on `cloudflare` the alias is purely an in-memory throttle key,
+  since nothing derived from the prover reaches a Cloudflare-minted credential.
+
+- **The dotNS lane has its own batch-size ceiling, `CHAIN_WRITER_DOTNS_BATCH_SIZE`
+  (default 3).** Both writer lanes used to climb back to `CHAIN_WRITER_BATCH_SIZE`
+  (25), but `reserve_name` dispatches through the DotNS contract on
+  `pallet_revive` and declares enough weight that Asset Hub refuses a
+  `force_batch` of four or more at submission (`Transaction would exhaust the
+  block limits`). The lane already recovered — it re-queued the set without
+  spending an attempt and halved its way down — but it paid a few minutes of
+  delay for that search after every restart and on every burst. It now starts at
+  the size that fits. `CHAIN_WRITER_BATCH_SIZE` no longer caps the dotNS lane.
+
+- **PreviewNet is gone; `testnet` means paseo-next-v2.** The default endpoints
+  are now `wss://paseo-people-next-system-rpc.polkadot.io` and
+  `wss://paseo-asset-hub-next-rpc.polkadot.io` in `.env.example`, compose and
+  the built-in fallbacks. `DUB_NETWORK=testnet` still selects the same
+  `next-people-paseo` metadata — the runtime did not change, only the deployment
+  it names — so no rebuild is required, but an environment relying on the old
+  `wss://previewnet.substrate.dev` defaults must now set `PEOPLE_RPC_URL` and
+  `ASSET_HUB_RPC_URL` explicitly. The previewnet Prometheus job, the Alloy
+  `dub-previewnet` log label, the `identity-previewnet.dotspark.app` gateway
+  site block and its `PREVIEW_GATEWAY_ADDRESS` variable are removed, as are the
+  two previewnet-only entries in `KNOWN_RUNTIMES` (the signing extension tuples
+  are unchanged — they were already the union).
+
+### Fixed
+
+- **The quickstart stack boots again.** `.env.example` and compose selected the
+  `cloudflare` provider with no credentials to go with it — no placeholder can
+  stand in for a real Cloudflare account — so `cp .env.example .env && docker
+  compose up` crash-looped `turn-api` at boot, and so did `--role all-in-one`.
+  Both now default to `coturn`, which computes credentials locally and needs
+  nothing off the machine, with the documented dev-only secret and a loopback
+  `ICE_SERVERS`. The code default is unchanged: `TURN_PROVIDER` unset is still
+  `cloudflare`, which is what a deployment wants.
+
+- **`ICE_SERVERS` is required under `TURN_PROVIDER=coturn`.** It was optional
+  and defaulted to empty, so a relay deployment that forgot it booted clean and
+  answered every request `201 {"servers": []}` — a credential with no relay to
+  use it against, failing at the client rather than at boot.
+
+- **A Cloudflare 4xx is no longer served out of the outage cache.** Every
+  non-2xx was classified retryable, so a revoked, wrong or mis-scoped
+  `TURN_API_TOKEN` was indistinguishable from an outage: the stale credential
+  went to every caller at `warn` level for up to `TURN_TTL_SECS` while the
+  breaker suppressed the calls that would have surfaced it. 4xx other than 408
+  and 429 now fail immediately with `cloudflare rejected TURN issuance`.
+
+- **A short `TURN_TTL_SECS` no longer empties the Cloudflare outage cache.** The
+  floor on a cached credential's remaining life was a fixed 60s, so any TTL at
+  or under a minute rejected each credential the instant it was stored and every
+  Cloudflare blip became a 503. The floor is now derived from the TTL.
+
+- **An upstream 503 no longer spends the caller's rate-limit slot.** Both TURN
+  routes admit against the limit before issuing; the slot is now handed back if
+  issuance then fails upstream. It mattered most on `/turn/issue-with-proof`,
+  where the budget is per person and per product and a ring-VRF proof for a
+  given second is one fixed value, so a caller could not cheaply retry until the
+  window rolled.
+
+- **`verify_compose_boundaries.sh` enforces the TURN secret boundary it
+  documents.** `TURN_API_TOKEN` and `TURN_SECRET` were forbidden only on a
+  named handful of services, so `device-attestation-*` or `invite-tickets-*`
+  could have gained a billable Cloudflare minting credential with the gate
+  still passing. Both are now forbidden on every service but `turn-api`.
+
+- **Compose now passes device-attestation-api its attestation settings.** The
+  service's environment allowlist was missing the Play Integrity
+  (`PLAY_INTEGRITY_*`, `GOOGLE_CREDENTIALS`), DeviceCheck (`DEVICE_CHECK_*`,
+  `APPLE_TEAM_ID`), Widevine dedup (`WIDEVINE_DEDUP_*`) and
+  `REGISTRATION_VOUCHERS_ENABLED` variables. Values set in `.env` never reached
+  the container, so these features stayed off under Docker. The Android CRL
+  variables stay out on purpose. `verify_compose_boundaries.sh` now requires the
+  verification keys on the api and forbids them on every other service.
+
 ## [0.6.0] - 2026-09-16
 
 ### Added
@@ -27,10 +204,10 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
   Runtime versions this release targets:
 
-  | build | People runtime | spec_version |
-  | --- | --- | --- |
-  | `testnet` | `next-people-paseo-v2` | 3000000 |
-  | `polkadot` | `people-polkadot` | 2005000 |
+  | build      | People runtime         | spec_version |
+  | ---------- | ---------------------- | ------------ |
+  | `testnet`  | `next-people-paseo-v2` | 3000000      |
+  | `polkadot` | `people-polkadot`      | 2005000      |
 
 - **Widevine device dedup for Android username claims.**
   `POST /api/v1/usernames` accepts three optional evidence fields,
@@ -140,6 +317,48 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   and deferred for 6s instead of 30s, still without spending an attempt.
 
 ### Changed
+
+- **Vendored People metadata refreshed to `next-people-paseo` 3004000, and both
+  signing tuples gained the gates that runtime added.** Pulled from Paseo Next
+  v2 (`wss://paseo-people-next-system-rpc.polkadot.io`), which PreviewNet is now
+  byte-identical to. Unlike the 3003000 refresh this one changes how we sign:
+  `transactionVersion` moved 5 → 6, the runtime publishes a versioned extension
+  set, and the encoding set now declares **`CheckMetadataHash`** — which had no
+  slot in `PeopleTransactionExtensions`, so signing against the upgraded chain
+  would have failed. It is subxt's real extension, not a `Noop`: its value is
+  one byte but its implicit is `Option<[u8; 32]>`, and encoding nothing there is
+  a signer-payload mismatch. The individuality Asset Hubs moved to 3004000 too
+  and now declare **`VerifyMultiSignature`** (the same `pallet_verify_signature`
+  gate People has always had) and **`PrevalidateAttests`**;
+  `AssetHubTransactionExtensions` gained both, so the dotNS gateway write lane
+  keeps signing. Every earlier runtime stays in the known-runtime list, so a
+  binary pointed at a node that has not upgraded yet still signs. In the trimmed
+  pallet surface, `Game` gained a `product_name` constant, `Members` a
+  `RetiredIdentifiers` storage entry, and `System::Events` plus the
+  call-wrapping extrinsics (`Utility::batch`/`force_batch`, `Proxy::proxy`,
+  `People::under_alias`, `PeopleLite::dispatch_as_signer`) re-shaped around the
+  new calls; nothing this workspace constructs changed name or arity.
+
+- **subxt 0.50.3 → 0.51.1, which is required for the runtime above.** subxt
+  0.50 builds a **v4** extrinsic whenever the chain advertises version 4, but
+  encodes the transaction extensions from the runtime's **highest** extension
+  version. Those were the same thing until `next-people-paseo` /
+  `next-asset-hub-paseo` 3004000 split them into version 0 (the short legacy
+  list) and version 1 (the full one). A v4 extrinsic carries no
+  extension-version byte and is defined to use version 0, so one holding
+  version 1's bytes does not decode at all: the node traps inside
+  `validate_transaction` before it ever checks the signature. **Every write to
+  an upgraded chain would have failed**, whatever the metadata said. 0.51
+  resolves a versionless extrinsic to version 0 and fixes it; no workspace code
+  changed to adopt it. Verified against all four live runtimes by handing each
+  node's own `TaggedTransactionQueue_validate_transaction` a transaction built
+  by the unchanged writer path: `Valid` on People and Asset Hub, paseo-next-v2
+  and previewnet alike, where the same calls on 0.50.3 did not decode on any of
+  them. Two `chain-types` tests pin the behaviour — one that a versionless
+  extrinsic resolves to extension version 0, one that the tuple satisfies every
+  name that version declares — so a bump that regressed it fails in CI rather
+  than on chain. The runbook gains a row for the trap, which looks nothing like
+  a bad signature.
 
 - **`username-indexer` indexes the unfinalized window speculatively.** The sync
   loop now subscribes to **best** block headers rather than finalized ones, and
@@ -403,7 +622,11 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.0...HEAD
+
+[0.8.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.0
+
+[0.7.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.7.0
 
 [0.6.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.6.0
 

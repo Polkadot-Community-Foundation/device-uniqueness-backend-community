@@ -1,0 +1,28 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "GPL-3.0-only",
+    # verifiable (git dep): ring-VRF personhood-proof verification.
+    "GPL-3.0-or-later WITH Classpath-exception-2.0",
+    # Public-domain dedication; permissive inbound to GPL-3.0.
+    # bip39, bitcoin_hashes, hex-conservative, tiny-keccak (via subxt-signer).
+    "CC0-1.0",
+    # Permissive data licence on the bundled root-certificate sets.
+    # webpki-roots / webpki-root-certs (via reqwest and sqlx-core).
+    "CDLA-Permissive-2.0",
+]
+
+workarounds = ["ring", "rustls"]
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+]

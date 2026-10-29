@@ -29,6 +29,9 @@ pub enum AppError {
     ProofBusy,
     #[error("proof verification failed internally")]
     ProofInternal,
+    /// Cloudflare could not be reached and no cached credential was usable
+    #[error("credential upstream unavailable")]
+    UpstreamUnavailable,
 }
 
 impl IntoResponse for AppError {
@@ -55,6 +58,16 @@ impl IntoResponse for AppError {
                 response
                     .headers_mut()
                     .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+                response
+            }
+            AppError::UpstreamUnavailable => {
+                let mut response = http_common::error::message(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Credentials are temporarily unavailable.",
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from_static("5"));
                 response
             }
             AppError::ProofInternal => http_common::error::message(

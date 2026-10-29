@@ -22,6 +22,7 @@ fn reservation(base: &str, digits: &str) -> NewReservation {
         dotns_signature: None,
         dotns_signed_at: None,
         reserved_username: None,
+        payload_version: 1,
     }
 }
 

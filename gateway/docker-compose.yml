@@ -11,7 +11,6 @@
 # Production:  docker compose -f gateway/docker-compose.yml -p edge up -d
 # Local:
 #              GATEWAY_ADDRESS=http://identity.dotspark.app \
-#              PREVIEW_GATEWAY_ADDRESS=http://identity-previewnet.dotspark.app \
 #              EDGE_HTTP_PORT=8000 EDGE_HTTPS_PORT=8443 \
 #                docker compose -f gateway/docker-compose.yml -p edge up -d
 #              curl -H 'Host: identity.dotspark.app' http://127.0.0.1:8000/readyz
@@ -30,11 +29,10 @@ services:
     restart: unless-stopped
     # Pass-through, not defaulted: every default lives in the Caddyfile, and an
     # unset variable is simply not passed, so the two files can never disagree.
-    # A local plain-HTTP edge sets the hostnames with an http:// prefix (see the
+    # A local plain-HTTP edge sets the hostname with an http:// prefix (see the
     # header of this file) rather than changing a port here.
     environment:
       - GATEWAY_ADDRESS
-      - PREVIEW_GATEWAY_ADDRESS
       - GATEWAY_DOCS_ROOT
       - DEVICE_ATTESTATION_UPSTREAM
       - USERNAME_INDEXER_UPSTREAM

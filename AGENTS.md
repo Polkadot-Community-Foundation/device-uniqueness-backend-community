@@ -52,7 +52,7 @@ Twelve crates today (plans may add more independently-deployable service crates)
   `metadata/metadata.<network>.scale` that `DUB_NETWORK` selects. Its `build.rs` is **the** network
   switch: `invite-tickets`, `dub` and `apidoc-gen` name it as their own `build =` script, and it
   emits `cfg(dub_network = "…")` plus `cfg(invite_tickets)` (`testnet`, not `polkadot`). Two values,
-  because two People runtimes — previewnet and paseo-next-v2 share one, so they share one build. Gate
+  because two People runtimes — `testnet` is paseo-next-v2, `polkadot` is polkadot-test. Gate
   network-specific code on those cfgs; never read `DUB_NETWORK` at runtime.
 - `chain-client` — reconnecting People Chain connection + the chain-writer signing key (`WriterSigner`); product-agnostic transport shared by the services.
 - `jwt-verify` — the cross-service auth contract: JWKS parsing, Ed25519 signing and verification, claims. It holds **both** halves, but only `device-attestation` is given `JWT_ED25519_SECRET`, so it is the only process that can construct the issuer; every other service builds a verifier from public key material alone. (The crate name predates the issuer moving in.)
@@ -60,7 +60,7 @@ Twelve crates today (plans may add more independently-deployable service crates)
 - `device-attestation` — the device attestation service (lib + the `voucher-mint` CLI; roles `device-attestation-api`, `device-attestation-chain-writer`, and the `registration-queue` advancer — with `QUEUE_ENABLED` on, its promotion is the only queue exit: down, claims park as `QUEUED` and the writer raises a stranded-queue warning).
 - `username-indexer` — username indexer + search service.
 - `invite-tickets` — synchronous invitation-credential claim service, the route the shipping apps call (lib; roles `invite-tickets-api` and `invite-tickets-pool`).
-- `turn` — stateless TURN credential issuer (coturn REST-API HMAC construction over a relay-shared secret; lib; role `turn-api`). No DB; when proof issuance is enabled, each environment's process maintains a read-only root cache from its own People Chain.
+- `turn` — stateless TURN credential issuer over a selectable provider (`TURN_PROVIDER`): **Cloudflare Realtime TURN** (default — one credential fetched per request, last good response cached for the duration of an outage) or a self-hosted **coturn** relay (credential computed locally from a shared HMAC secret). Only the selected provider's env vars are read, and setting `TURN_SECRET` while the provider is `cloudflare` is refused at boot. Lib; role `turn-api`. No DB; when proof issuance is enabled, each environment's process maintains a read-only root cache from its own People Chain.
 - `notifications` — thin `/api/v1/notify` relay (verify-only Ed25519 JWT, stateless, DB-free, per-subject rate limited; role `notify-relay`) with optional iOS APNs + Android FCM providers.
 - `apidoc-gen` — dev-only tool (not deployed) that renders the committed API reference from the service crates' `#[utoipa::path]` annotations. Run via `just openapi`.
 - `routegen` — dev-only tool (not deployed) that renders the committed edge config from `dub`'s route table. Run via `just routes`.
@@ -91,12 +91,26 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
   `dub --list-roles` does not accept, if a role is claimed by more than one or by none, if a
   service name and its role disagree, if the services drift onto different image references, or if a
   `CMD` reappears in the Dockerfile.
+  **Publishing** is `image.yml` alone, to `docker.io/paritytech/device-uniqueness-backend`
+  (overridable with the `PUBLIC_IMAGE_REPO` repository variable, which `release.yml` also probes;
+  `DOCKERHUB_USER`/`DOCKERHUB_PASSWORD` secrets). Its `plan` job picks the lane from the event: a
+  PR builds `testnet`/amd64 and pushes nothing; a push to `main` pushes the **commit image**
+  `YYYYMMDD-HHMMSS-<shortsha>` (`testnet`, amd64 + arm64) — that shape is what Parity's internal
+  deployment promotes on, so nothing else may mint it; a `v*` tag push pushes the **release
+  images** `<tag>-<network>` for both networks and both architectures; a `workflow_dispatch`
+  (`tag`, `ref`, `network`) builds any ref under any other tag. Every pushing lane pushes by digest
+  and joins a manifest list per network, then inspects what was published (one binary, `dub`
+  entrypoint, no `CMD`, the network's role count). The registry build cache lives at
+  `buildcache-main-<network>-<arch>` and only `main` writes it.
 - Config gates, both in `check.yml` and reachable as `just verify-config`:
   `verify_compose_boundaries.sh` (compose secret allowlists) and `verify_role_split.sh` (one image,
   every service's `--role`, plus the release exporter shape).
 - Releasing: bump `[workspace.package] version` in `Cargo.toml`, add the matching `## [X.Y.Z]`
   section to `CHANGELOG.md`, merge, tag `vX.Y.Z`, then dispatch `release.yml` manually. The workflow
-  refuses a tag that disagrees with either the manifest or the changelog.
+  refuses a tag that disagrees with either the manifest or the changelog. Pushing the tag (with
+  git — a tag created through the API starts no workflow) starts `image.yml`, which publishes the
+  `<tag>-<network>` images; let it finish before dispatching `release.yml`, which pins the compose
+  bundle to them only when they are pullable and otherwise ships a bundle that builds from source.
   **Record the runtime versions in that changelog section** — one row per network
   (`testnet` → `next-people-paseo`, `polkadot` → `people-polkadot`, with each blob's
   `spec_version`) — because a release ships a build per network and the notes are generated from

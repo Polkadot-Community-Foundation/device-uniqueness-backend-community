@@ -6,15 +6,16 @@ use std::sync::Arc;
 use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 
 use crate::config::{Config, ProofConfig};
-use crate::credentials::Issuer;
 use crate::proof::roots::RootCaches;
+use crate::source::Source;
 
 /// No database; the only chain-facing state is the proof root cache, refreshed
 /// by a background task and absent when the proof feature is off.
 #[derive(Clone)]
 pub struct AppState {
-    /// The credential minter (holds the relay-shared HMAC secret).
-    pub issuer: Arc<Issuer>,
+    /// The credential source named by `TURN_PROVIDER`: Cloudflare Realtime
+    /// TURN, or a self-hosted coturn relay's shared secret.
+    pub source: Arc<Source>,
     pub verifier: Arc<jwt_verify::Verifier>,
     pub config: Arc<Config>,
     /// Per-subject rate limiter for the authenticated route.
@@ -78,11 +79,9 @@ impl AppState {
         )
         .expect("rate limiter config validated during startup");
 
-        let issuer = Issuer::new(
-            config.turn_secret.clone(),
-            config.algorithm,
-            config.ttl_secs,
-        );
+        // Only a reqwest builder failure can fail here, which would mean a
+        // broken TLS backend — not something a running process recovers from.
+        let source = Source::new(&config.provider, config.ttl_secs).expect("HTTP client builds");
         let proof = if let Some(ref proof_config) = config.proof {
             Some(Arc::new(ProofState::new(
                 proof_config,
@@ -94,7 +93,7 @@ impl AppState {
             None
         };
         Self {
-            issuer: Arc::new(issuer),
+            source: Arc::new(source),
             verifier: Arc::new(config.jwt_verifier.clone()),
             config: Arc::new(config),
             limiter,

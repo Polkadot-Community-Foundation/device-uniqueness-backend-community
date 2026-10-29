@@ -4,7 +4,7 @@
 //! Generated People Chain types for the network this build targets.
 //!
 //! The network is chosen at **build time** by `DUB_NETWORK` (see `build.rs`):
-//! `testnet` (the default — previewnet and paseo-next-v2, one runtime) or
+//! `testnet` (the default — paseo-next-v2) or
 //! `polkadot` (polkadot-test). Each has its own vendored blob,
 //! `metadata/metadata.<network>.scale`. Refresh one with:
 //! `subxt metadata --url <people-rpc> --pallets <pallets> -f bytes -o crates/chain-types/metadata/metadata.<network>.scale`
@@ -15,7 +15,6 @@
 //! `people-paseo` (e.g. `--url wss://people-paseo.rotko.net`), with `Game,ProofOfInk`.
 
 use subxt::config::transaction_extensions as tx_ext;
-
 #[allow(clippy::all, missing_docs, rustdoc::all)]
 #[cfg_attr(
     dub_network = "testnet",
@@ -30,6 +29,30 @@ use subxt::config::transaction_extensions as tx_ext;
     subxt::subxt(runtime_metadata_path = "metadata/metadata.paseo.scale")
 )]
 pub mod people {}
+
+pub mod asset_hub {
+
+    static METADATA_BYTES: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/metadata/ah.",
+        env!("DUB_NETWORK"),
+        ".scale"
+    ));
+
+    /// The vendored metadata [`people`] is generated from, decoded once.
+    static METADATA: std::sync::LazyLock<subxt::metadata::ArcMetadata> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Arc::new(
+                subxt::Metadata::decode_from(METADATA_BYTES)
+                    .expect("vendored People Chain metadata decodes"),
+            )
+        });
+
+    /// subxt's own error-decoding entry point
+    pub fn metadata_arc() -> subxt::metadata::ArcMetadata {
+        METADATA.clone()
+    }
+}
 
 pub use subxt;
 
@@ -528,9 +551,7 @@ mod tests {
         "StorageWeightReclaim",
     ];
 
-    /// What `next-people-paseo` 3000000 declares, in order. paseo-next-v2 and
-    /// previewnet upgraded together and their metadata is identical, so one
-    /// list covers both.
+    /// What `next-people-paseo` 3000000 declares, in order.
     const PEOPLE_V3_EXTENSIONS: &[&str] = &[
         "UnitTransactionExtension",
         "VerifyMultiSignature",
@@ -698,7 +719,7 @@ mod tests {
             extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
         },
         KnownRuntime {
-            env: "paseo-next-v2 / previewnet",
+            env: "paseo-next-v2",
             spec_name: "next-people-paseo",
             spec_version: 3_004_000,
             tuple: TUPLE_EXTENSIONS,
@@ -726,7 +747,7 @@ mod tests {
             extensions: PEOPLE_V3_EXTENSIONS,
         },
         KnownRuntime {
-            env: "paseo-next-v2 / previewnet asset hub",
+            env: "paseo-next-v2 asset hub",
             spec_name: "next-asset-hub-paseo",
             spec_version: 3_000_000,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
@@ -763,67 +784,12 @@ mod tests {
             ],
         },
         KnownRuntime {
-            env: "previewnet",
-            spec_name: "next-people-paseo",
-            spec_version: 1_000_032,
-            tuple: TUPLE_EXTENSIONS,
-            extensions: &[
-                "UnitTransactionExtension",
-                "VerifyMultiSignature",
-                "AsPerson",
-                "AsProofOfInkParticipant",
-                "ScoreAsParticipant",
-                "GameAsInvited",
-                "PeopleLiteAuth",
-                "AsMember",
-                "AsCoinage",
-                "AsResources",
-                "HonourAuth",
-                "AuthorizeCall",
-                "RestrictOrigins",
-                "CheckNonZeroSender",
-                "CheckSpecVersion",
-                "CheckTxVersion",
-                "CheckGenesis",
-                "CheckMortality",
-                "CheckNonce",
-                "CheckWeight",
-                "ChargeAssetTxPayment",
-                "StorageWeightReclaim",
-            ],
-        },
-        KnownRuntime {
             env: "paseo-next-v2 asset hub",
             spec_name: "next-asset-hub-paseo",
             spec_version: 2_000_033,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
             extensions: &[
                 "AuthorizeValueTransfer",
-                "AuthorizeCall",
-                "AsPgas",
-                "AsRingAlias",
-                "AsDotnsGateway",
-                "RestrictOrigins",
-                "CheckNonZeroSender",
-                "CheckSpecVersion",
-                "CheckTxVersion",
-                "CheckGenesis",
-                "CheckMortality",
-                "CheckNonce",
-                "CheckWeight",
-                "ChargeAssetTxPayment",
-                "CheckMetadataHash",
-                "EthSetOrigin",
-                "StorageWeightReclaim",
-            ],
-        },
-        KnownRuntime {
-            env: "previewnet asset hub",
-            spec_name: "next-asset-hub-paseo",
-            spec_version: 2_000_034,
-            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
-            extensions: &[
-                "UnitTransactionExtension",
                 "AuthorizeCall",
                 "AsPgas",
                 "AsRingAlias",
