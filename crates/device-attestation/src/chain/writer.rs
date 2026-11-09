@@ -22,16 +22,18 @@ mod link;
 mod observe;
 mod passes;
 mod people;
+mod supervise;
 mod tx;
 
 use dotns::Dotns;
 use engine::{Cx, Drain};
-use error::Op;
 pub use error::WriterError;
+use lane::Lane;
 use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
 use people::People;
+use supervise::{drive, every, hold_lease, sleep_or_wake, supervise, until_lease_lost};
 
 /// The claim size the People lane uses when `CHAIN_WRITER_BATCH_SIZE` is unset
 /// or unusable. Also the AIMD ceiling that lane climbs back to.
@@ -58,7 +60,19 @@ pub struct WriterConfig {
     pub lease_name: String,
     /// Lease TTL / heartbeat expiry.
     pub lease_ttl: Duration,
-    /// Idle poll interval between outbox scans.
+    /// The writer's one pacing interval, used wherever it waits with nothing
+    /// better to do:
+    /// - a lane's wait after a pass that settles nothing: nothing was due, or
+    ///   every claimed row was etried, parked or deferred, so a
+    ///   row that is not yet submittable cannot spin it. An idle dotNS lane is
+    ///   also woken early when a People pass lands.
+    /// - the backoff before a failed lane restarts.
+    /// - the cadence of the periodic checks that run beside the lanes. With
+    ///   the queue disabled its janitor drain runs on every one; the attester
+    ///   resource reads and the stranded-queue warning run only when their own
+    ///   interval is also due;
+    /// - the retry while another instance holds the lease, and the pause
+    ///   before re-acquiring a lost one.
     pub poll_interval: Duration,
     /// **Maximum** rows claimed per scan, and the ceiling the adaptive batch
     /// size climbs back to. Not a fixed claim size: a whole-batch failure
@@ -180,7 +194,8 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     let chain_for_lane = chain.clone();
     let config_attester = config.attester;
     let asset_hub_rpc = config.asset_hub_rpc_url.clone();
-    let passes = Passes::new(&config);
+    let dotns_link = DotnsLink::new(asset_hub_rpc, config_attester);
+    let passes = Passes::new(&config, dotns_link.subscribe());
     let mut writer = Writer {
         pool,
         chain,
@@ -189,10 +204,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         proxy_for,
         config,
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
-        dotns: Drain::new(
-            dotns_batch_max,
-            DotnsLink::new(asset_hub_rpc, config_attester),
-        ),
+        dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
     };
     writer.run_forever().await
@@ -207,7 +219,8 @@ struct Writer {
     config: WriterConfig,
     people: Drain<People>,
     dotns: Drain<Dotns>,
-    /// The periodic work this process hosts because it holds the lease.
+    /// The periodic work this process hosts because it holds the lease; it
+    /// runs only while the lease heartbeat holds.
     passes: Passes,
 }
 
@@ -216,12 +229,8 @@ impl Writer {
         loop {
             let guard = self.acquire_lease().await?;
             tracing::info!(epoch = guard.epoch, "acquired writer lease");
-            self.people.reset_nonce();
-            self.dotns.reset_nonce();
-            self.reconcile(&guard).await;
-            if let Err(e) = self.active_loop(&guard).await {
-                tracing::warn!(error = %e, "writer loop exited; re-acquiring lease");
-            }
+            let e = self.active_loop(&guard).await;
+            tracing::warn!(error = %e, "writer lease lost; re-acquiring it");
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
@@ -247,99 +256,95 @@ impl Writer {
         }
     }
 
-    async fn heartbeat(&self, guard: &Guard) -> Result<bool, WriterError> {
-        Ok(lease::renew(
-            &self.pool,
-            &guard.lease_name,
-            &guard.holder_id,
-            guard.epoch,
-            self.config.lease_ttl,
-        )
-        .await?)
-    }
-
-    async fn active_loop(&mut self, guard: &Guard) -> Result<(), WriterError> {
-        loop {
-            if !self.heartbeat(guard).await? {
-                return Err(WriterError::LeaseLost(Op::Draining));
-            }
-            self.periodic().await;
-
-            let people_idle = self.people_pass(guard).await?;
-            self.dotns_pass(guard).await?;
-            if people_idle {
-                tokio::time::sleep(self.config.poll_interval).await;
-            }
-        }
-    }
-
-    async fn periodic(&mut self) {
+    /// Drive both lanes, and the periodic passes beside them, under one lease
+    /// heartbeat until the lease is lost. A lane that fails otherwise restarts
+    /// on its own, without the other noticing.
+    async fn active_loop(&mut self, guard: &Guard) -> WriterError {
         let Writer {
             pool,
             chain,
+            signer,
             signer_account,
             proxy_for,
             config,
+            people,
             dotns,
             passes,
-            ..
         } = self;
-        passes
-            .tick(pool, chain, dotns, signer_account, *proxy_for, config)
-            .await;
-    }
+        let (pool, chain, signer_account, config) = (&*pool, &*chain, &*signer_account, &*config);
+        let proxy_for = *proxy_for;
+        let cx = &cx_of(pool, guard, signer, signer_account, proxy_for, config);
+        let landed = tokio::sync::Notify::new();
 
-    async fn people_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
-        let (cx, drain) = self.people_pass_parts(guard);
-        drain.pass(&cx).await
-    }
-
-    async fn dotns_pass(&mut self, guard: &Guard) -> Result<bool, WriterError> {
-        let (cx, drain) = self.dotns_pass_parts(guard);
-        drain.pass(&cx).await
-    }
-
-    async fn reconcile(&mut self, guard: &Guard) {
-        let (cx, drain) = self.people_pass_parts(guard);
-        if let Err(e) = drain.reconcile_submitting(&cx).await {
-            tracing::warn!(error = %e, lane = "people", "startup reconcile failed");
-        }
-        let (cx, drain) = self.dotns_pass_parts(guard);
-        if let Err(e) = drain.reconcile_submitting(&cx).await {
-            tracing::warn!(error = %e, lane = "dotns", "startup reconcile failed");
-        }
-    }
-    fn people_pass_parts<'a>(&'a mut self, guard: &'a Guard) -> (Cx<'a>, &'a mut Drain<People>) {
-        let Writer {
-            pool,
-            signer,
-            signer_account,
-            proxy_for,
-            config,
+        let lease = hold_lease(async || cx.heartbeat().await, config.lease_ttl);
+        // People wakes dotNS whenever a row lands, since that row may be one
+        // dotNS is waiting on.
+        let people_lane = run_lane(
             people,
-            ..
-        } = self;
-        (
-            cx_of(pool, guard, signer, signer_account, *proxy_for, config),
-            people,
-        )
-    }
-
-    fn dotns_pass_parts<'a>(&'a mut self, guard: &'a Guard) -> (Cx<'a>, &'a mut Drain<Dotns>) {
-        let Writer {
-            pool,
-            signer,
-            signer_account,
-            proxy_for,
+            cx,
             config,
+            async || tokio::time::sleep(config.poll_interval).await,
+            |drain| {
+                if drain.take_landed() {
+                    landed.notify_one();
+                }
+            },
+        );
+        let dotns_lane = run_lane(
             dotns,
-            ..
-        } = self;
-        (
-            cx_of(pool, guard, signer, signer_account, *proxy_for, config),
-            dotns,
-        )
+            cx,
+            config,
+            async || sleep_or_wake(config.poll_interval, &landed).await,
+            |_| {},
+        );
+        let periodic = every(
+            async || {
+                passes
+                    .tick(pool, chain, signer_account, proxy_for, config)
+                    .await
+            },
+            async || tokio::time::sleep(config.poll_interval).await,
+        );
+        until_lease_lost(lease, people_lane, dotns_lane, periodic).await
     }
+}
+
+/// Supervise one lane: restart it, run its passes, and restart it again after
+/// any failure but a lost lease. `after_pass` sees the drain after every pass.
+async fn run_lane<L: Lane>(
+    drain: &mut Drain<L>,
+    cx: &Cx<'_>,
+    config: &WriterConfig,
+    mut idle: impl AsyncFnMut(),
+    mut after_pass: impl FnMut(&Drain<L>),
+) -> WriterError {
+    supervise(
+        L::NAME,
+        drain,
+        async |drain| drain.restart(cx).await,
+        async |drain| {
+            drive(
+                async || {
+                    let idle = drain.pass(cx).await;
+                    after_pass(drain);
+                    idle
+                },
+                &mut idle,
+                lane_stall(config),
+            )
+            .await
+        },
+        async || tokio::time::sleep(config.poll_interval).await,
+        lane_stall(config),
+    )
+    .await
+}
+
+/// How long one lane pass or restart may run before it counts as hung. A pass
+/// can await finalization for up to `finalize_timeout` on top of its claim,
+/// reads and records, so twice that leaves a healthy pass ample room.
+fn lane_stall(config: &WriterConfig) -> Duration {
+    config.finalize_timeout * 2
 }
 
 fn hex_account(bytes: &[u8; 32]) -> String {

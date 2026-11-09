@@ -601,7 +601,27 @@ always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
   deploy-overlap guard only — the chain nonce plus outbox reconciliation is the
   real serializer.
 - Restart-safe: reconciles `SUBMITTING` rows on both chains against chain state
-  rather than resubmitting.
+  rather than resubmitting. A reconcile whose owner read fails logs
+  `reconcile failed; retrying on the next pass` (with a `lane` field) and is
+  retried at the start of every pass until it reads every row, so a flaky RPC
+  delays those rows but never strands them.
+- **A lane fails alone.** `lane failed; restarting it` (with a `lane` field,
+  `people` or `dotns`) means only that lane restarted, after one
+  `CHAIN_WRITER_POLL_SECS`; the other kept running. `writer lease lost;
+  re-acquiring it` means both stopped and the writer is re-acquiring the lease.
+  A `lane stalled` error means a pass or restart ran past twice
+  `CHAIN_WRITER_FINALIZE_SECS` (usually a hung RPC) and was cancelled.
+- **A database outage still ends the process.** `writer lease renewal failed`
+  repeats while the database is unreachable; once the lease has gone
+  unrenewed for about two thirds of `CHAIN_WRITER_LEASE_TTL_SECS` the writer
+  gives it up, fails to re-acquire it while the database is still down, and
+  exits non-zero — so the orchestrator's restart count shows the outage.
+- **The periodic checks run beside the lanes**, every `CHAIN_WRITER_POLL_SECS`:
+  the attester-resource reads and outbox gauges (each when its
+  `ATTESTER_RESOURCE_POLL_SECS` is due) and the queue check. A busy or failed
+  lane does not delay them. A resource read that hangs logs `attester resources
+  read timed out` (or `dotns attester resources read timed out`) after 30s, and
+  the rest of the check still runs.
 - **One dotNS condition refuses to start:** a missing `ASSET_HUB_RPC_URL`. The
   dotNS lane is not optional, so a writer without an endpoint would accept
   blocks nothing submits. Not restart-fixable; correct the `.env`.
@@ -765,12 +785,8 @@ you expect.
 | `QUEUED` rows draining with the advancer down, or stranded-queue warnings while intake goes direct | `QUEUE_ENABLED` is split between api and writer. Writer off + api on = the janitor silently drains a queue the api is still filling, and the throttle is gone. Writer on + api off = warnings about leftovers no new claim joins. The values must match; `scripts/verify_compose_boundaries.sh` pins both. |
 | Rows stuck in `RETRY_AFTER` with wasm-trap errors | Invalid payload for `PeopleLite.attest`, or attester/proxy authorization missing on-chain. |
 | At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write or a silent invite-ticket pool. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
-<<<<<<< Updated upstream
 | `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/metadata.<network>.scale` (the one this build's `DUB_NETWORK` names — the boot warning logs it as `vendored_metadata`) with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
-=======
-| `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/people.scale` with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
-| Every extrinsic rejected by the node with a wasm trap in `validate_transaction` (no `Invalid::…` reason at all) | The transaction did not **decode**, so the runtime panicked before validating anything — the extension payload is the wrong shape for the extrinsic format. A v4 signed extrinsic carries no extension-version byte and must be encoded with extension version **0**, which on these runtimes is a shorter list than the highest version they declare. subxt 0.50 encoded the highest and produced exactly this trap; 0.51 fixed it, and `chain-types`' `a_v4_extrinsic_resolves_to_extension_version_zero` fails in CI if a dependency bump regresses it. Seeing this in the wild means either that regression or a tuple that cannot satisfy a name version 0 declares. Distinguish from the row below: a *bad signature* decoded fine and failed a check. |
->>>>>>> Stashed changes
+| Every extrinsic rejected by the node with a wasm trap in `validate_transaction` (no `Invalid::…` reason at all) | The transaction did not **decode**, so the runtime panicked before validating anything — the extension payload is the wrong shape for the extrinsic format. A v4 signed extrinsic carries no extension-version byte and must be encoded with extension version **0**, which on these runtimes is a shorter list than the highest version they declare. The writer encodes version 0 itself (`chain_client::create_signed_v4`); `invite-tickets` signs through subxt's `create_signed`, where 0.50 encoded the highest version and produced exactly this trap and 0.51 fixed it. `chain-types`' `a_v4_extrinsic_resolves_to_extension_version_zero` fails in CI if a dependency bump regresses it. Seeing this in the wild means either that regression or a tuple that cannot satisfy a name version 0 declares. Distinguish from the row below: a *bad signature* decoded fine and failed a check. |
 | Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0 | The chain was reset: the process still holds the old genesis hash, captured when its client connected. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
 | Writer exits at boot | Bad `CHAIN_WRITER_SIGNER_SURI`, or Postgres unreachable. |
 | `device-attestation-api` never healthy | It blocks on the People Chain RPC at startup. Check connectivity to `PEOPLE_RPC_URL`. |
