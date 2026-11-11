@@ -4,10 +4,11 @@ Standing this backend up on a server, and running it once it is up. For what the
 system *is* and why it is shaped this way, read
 [architecture.md](architecture.md) first.
 
-Everything here is Docker Compose. There is no orchestrator-specific tooling in
-this repository — if you deploy to Kubernetes or anything else, the compose file
-is the configuration contract to port: the same image, the same `--role`
-arguments (`dub --list-roles` prints them), the same environment allowlists.
+Everything here is Docker Compose. If you deploy to anything else, the compose
+file is the configuration contract to port: the same image, the same `--role`
+arguments (`dub --list-roles` prints them), the same environment allowlists. For
+Kubernetes there is a reference Helm chart — see
+[Kubernetes (Helm)](#kubernetes-helm).
 
 **Two compose projects share a host.** The services live in an *environment*
 project started from [`docker-compose.yml`](../docker-compose.yml); the public
@@ -413,6 +414,46 @@ space that serves the unauthenticated public
 Moving between them is a **full redeploy, not a scale operation** — different
 workloads, different secret distribution, a different ingress target. The
 databases and chain accounts are unchanged; both shapes run the same code.
+
+## Kubernetes (Helm)
+
+[`helm/`](../helm/) is a **reference chart**, not a deployed one: templates plus
+example overlays, with every environment-specific value left empty. Nothing in
+this repository installs it. Copy it, or point your deployment repo at it, and
+write one values file per environment starting from
+[`values-example.yaml`](../helm/values-example.yaml) (standard topology) or
+[`values-small.yaml`](../helm/values-small.yaml) (small topology).
+
+```bash
+helm template dub helm -f helm/values-example.yaml --set global.imageTag=<tag>
+```
+
+It renders the compose contract as Kubernetes objects:
+
+- **One image, one tag**, every workload a `Deployment` whose only distinguishing
+  arg is `--role <name>`. `global.network` must match the image's `DUB_NETWORK`;
+  on `polkadot` the chart refuses to render either invite-tickets workload.
+- **One `Secret` per workload**, holding only the keys that workload declares in
+  `secretKeys` / `optionalSecretKeys` — the compose allowlists, per key, never
+  `envFrom`. Values are references your tooling resolves at apply time (e.g.
+  vals `ref+vault://`); the chart rejects the committed dev credentials.
+- **The singletons** (`device-attestation-chain-writer`, `registration-queue`,
+  `invite-tickets-pool`) are pinned to one replica with a `Recreate` strategy —
+  a rolling surge would briefly run two signers on one nonce lane.
+- **One `Ingress`** carrying the route table — a hand-kept copy of
+  `crates/dub/src/routes/table.rs`, so update it when that table changes. `pathType` is `ImplementationSpecific`
+  because the table's prefixes are literal. `/docs` is served by a small static
+  server from a ConfigMap of `docs/api-reference/` (`helm/files` is a symlink to
+  it — copy the files if you move the chart out of this repo).
+- **Render-time refusals** for the failure modes that are silent at runtime:
+  missing image tag or host, a mixed topology, a secret on the wrong workload,
+  `QUEUE_ENABLED` without `registration-queue`, a TURN provider without its
+  credential, APNs key without its selectors, metrics disabled (the workers'
+  only liveness probe is `:9090/metrics`).
+
+Databases are yours to provide (a managed Postgres, an in-cluster operator, a
+Cloud SQL proxy); point each workload's `*_DATABASE_URL` secret at its own.
+Migrations run on boot as everywhere else.
 
 ---
 

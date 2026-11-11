@@ -1,0 +1,160 @@
+{{- $root := . -}}
+{{- $g := .Values.global -}}
+{{/*
+A plain `networking.k8s.io/v1` Ingress — no CRDs, so the chart installs against
+whatever controller the cluster already runs.
+
+Two things the CRD used to do for us, and where they went:
+
+  - PRIORITY. Traefik routers are unordered and carried an explicit `priority`.
+    An Ingress has no ordering at all: the controller matches the LONGEST path.
+    That is only equivalent while no route sits inside another, which is not a
+    hope — `routes::table::tests::the_orderings_agree` fails the build if a row
+    is ever added that overlaps one of its siblings. `priority` is therefore
+    gone from the route table rather than rendered and ignored here.
+
+  - stripPrefix. An Ingress path rule cannot rewrite, so the `/docs` middleware
+    is gone; the static server nests the reference UNDER /docs instead and
+    answers the unstripped path directly (helm/templates/docs.yaml). Caddy keeps
+    its `handle_path` — that flag is Caddy-only now.
+
+Getting either wrong is the dangerous kind of wrong: the request still returns
+200, just from the wrong service, or 404s from the right one.
+
+The third of these is `pathType`, which is ImplementationSpecific rather than
+Prefix because the table's prefixes are LITERAL and `Prefix` matches on path
+ELEMENTS — global.ingress.pathType in values.yaml has the two paths where that
+distinction changes who answers.
+*/}}
+{{- $merged := and (index .Values.workloads "all-in-one") (index .Values.workloads "all-in-one").enabled -}}
+{{- $paths := list -}}
+{{- $externals := list -}}
+{{- range $r := .Values.routes }}
+{{/* A route may target a workload or the static docs server. Anything else is a
+     typo, and a typo here routes real traffic to nothing.
+
+     In the SMALL topology every surface lives in one process, so every route
+     resolves to `all-in-one` regardless of who owns the path inside it. The
+     ownership map still means something — it is what the merged router
+     dispatches on — but at the edge there is one upstream. Without this, each
+     route would be dropped for naming a disabled per-service workload and the
+     whole API would render as unreachable while the chart stayed green. */}}
+{{- $backend := $r.service }}
+{{- $enabled := false }}
+{{- if $merged }}
+{{- $backend = "all-in-one" }}
+{{- $enabled = true }}
+{{- else if eq $r.service "api-docs" }}
+{{- $enabled = $root.Values.docs.enabled }}
+{{- else }}
+{{- $svc := index $root.Values.workloads $r.service }}
+{{- if not $svc }}{{ fail (printf "route %s names unknown service %s" $r.name $r.service) }}{{ end }}
+{{/* A route to a SHARED service stays live even though this environment does
+     not deploy it — notify-relay exists once and serves every environment
+     (gateway/Caddyfile does the same with an upstream that names the other
+     environment's instance). Disabling the workload and dropping the route are
+     different things: conflating them 404s a route that works today.
+
+     An Ingress backend cannot name a Service in another namespace, so the
+     cross-namespace hop the IngressRoute did inline becomes an ExternalName
+     Service in THIS namespace. The cluster edge must be allowed to use one
+     (Traefik: `--providers.kubernetesingress.allowExternalNameServices=true`)
+     — the same class of cluster-level opt-in the CRD's allowCrossNamespace was.
+     Leave sharedServiceNamespace empty unless you run one notify-relay for
+     several environments. */}}
+{{- $shared := and $r.shared $root.Values.global.sharedServiceNamespace }}
+{{- $enabled = or $svc.enabled $shared }}
+{{- if and $shared (not $svc.enabled) }}
+{{- $backend = printf "%s-shared" $r.service }}
+{{- $externals = append $externals (dict "name" $backend "target" (printf "%s.%s.svc.cluster.local" $r.service $root.Values.global.sharedServiceNamespace)) }}
+{{- end }}
+{{- end }}
+{{- if $enabled }}
+{{- $paths = append $paths (dict "name" $r.name "path" $r.path "backend" $backend) }}
+{{- end }}
+{{- end }}
+{{- range $e := $externals }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $e.name }}
+  labels:
+    {{- include "dub.labels" (dict "name" $e.name "root" $root) | nindent 4 }}
+spec:
+  type: ExternalName
+  externalName: {{ $e.target | quote }}
+  ports:
+    - name: http
+      port: 80
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dub
+  labels:
+    {{- include "dub.labels" (dict "name" "dub" "root" $root) | nindent 4 }}
+  {{- $ann := dict }}
+  {{- if $g.ingress.externalDnsTarget }}
+  {{- $_ := set $ann "external-dns.alpha.kubernetes.io/target" $g.ingress.externalDnsTarget }}
+  {{- end }}
+  {{/* WHICH ENTRYPOINTS the router listens on — the CRD's `entryPoints:
+       [websecure]`, which a plain Ingress can only say as this annotation. The
+       provider binds a router to EVERY entrypoint when nothing names one.
+
+       With `tls:` rendered above that is not yet an exposure: the provider puts
+       TLS on the router itself rather than adding a cleartext twin, so a TLS
+       router answers nothing on :80 whatever it is bound to. This makes the
+       binding explicit instead of incidental, and it is what still shuts the
+       cleartext entrypoint in the one configuration where the `tls:` block is
+       gone — TLS terminated ahead of the controller (`tls: false`), where the
+       unbound router would otherwise serve the whole API over :80.
+       Probe :80 after a deploy to confirm it answers nothing.
+
+       The one controller-specific knob here; an ignored annotation is inert, so
+       it costs a non-Traefik cluster nothing (nginx says the same with
+       `ssl-redirect`, which it defaults to once `tls:` is present). */}}
+  {{- if $g.ingress.entryPoints }}
+  {{- $_ := set $ann "traefik.ingress.kubernetes.io/router.entrypoints" ($g.ingress.entryPoints | toString) }}
+  {{- end }}
+  {{- $ann = mergeOverwrite $ann (deepCopy ($g.ingress.annotations | default dict)) }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $g.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if $g.ingress.tls }}
+  {{/* The `tls:` block is what turns TLS ON for this router, NOT just where a
+       certificate is named. The Traefik provider gives an Ingress with no
+       `tls:` a router with TLS disabled — it never matches a request arriving
+       on the HTTPS entrypoint, so https://<host> 404s at the edge while
+       cleartext works. That is why this renders on `tls`, not on
+       `tlsSecretName`.
+
+       An entry with hosts and no secretName is the IngressRoute's empty
+       `tls: {}`: terminate with the edge's own default certificate. Name a
+       Secret only for a host that default does not cover. */}}
+  tls:
+    - hosts:
+        - {{ $g.ingress.host | quote }}
+      {{- with $g.ingress.tlsSecretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ $g.ingress.host | quote }}
+      http:
+        paths:
+          {{- range $p := $paths }}
+          # {{ $p.name }}
+          - path: {{ $p.path | quote }}
+            pathType: {{ $g.ingress.pathType }}
+            backend:
+              service:
+                name: {{ $p.backend }}
+                port:
+                  number: 80
+          {{- end }}
