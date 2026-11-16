@@ -34,15 +34,22 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **The reserved personhood name is checked on the dotNS contracts.** Intake
+  answers `409` and availability reports `EXHAUSTED` when the bare name exists
+  on `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its
+  `DotnsPopController` reservation queue is full, read on Asset Hub, as well as
+  on People while its runtime keeps usernames. Before, a claim like that was
+  accepted and then reverted on chain, taking the device name with it. No new
+  configuration: the contracts are found from
+  `DotnsGateway::DispatcherAddress`.
 - **`device-attestation-api` now needs `ASSET_HUB_RPC_URL`, and refuses to
   start without it.** Availability and the intake's digit choice read Asset
   Hub's `DotnsGateway::LiteLabelOwner`, as well as People's
   `Resources::UsernameOwnerOf` while the People runtime still keeps usernames.
   Once it does not (paritytech/individuality-community#129), the People reads
-  stop and a base is no longer `EXHAUSTED` over a taken or full personhood-name
-  reservation. That state is gone from `Resources`; a check against the dotNS
-  contracts is planned. The API connects read-only and never submits to Asset
-  Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
+  stop; a base is still `EXHAUSTED` over a taken or full personhood name, read
+  from the dotNS contracts (above). The API connects read-only and never
+  submits to Asset Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
   before upgrading; it must name the same network as `PEOPLE_RPC_URL`.
 
 - **TURN reports `proof-roots` without gating on it.** With

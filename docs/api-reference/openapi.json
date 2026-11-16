@@ -571,7 +571,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from Asset Hub `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the People runtime still keeps usernames, and pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or, on a People runtime that keeps usernames, the bare personhood name is owned or its reservation queue is full. The last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
+            "description": "Per-base availability read from Asset Hub `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the People runtime still keeps usernames, and pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare personhood name is registered on `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its `DotnsPopController` reservation queue is full (on People too, while its runtime keeps usernames). Any of those would make a claim carrying `dotns.reservedUsername` fail on chain and take the device name with it.",
             "content": {
               "application/json": {
                 "schema": {

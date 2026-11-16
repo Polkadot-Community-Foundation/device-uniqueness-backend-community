@@ -3,6 +3,7 @@
 
 pub mod asset_hub;
 pub mod attest;
+pub(crate) mod dotns;
 pub mod lease;
 pub mod outbox;
 pub mod people;

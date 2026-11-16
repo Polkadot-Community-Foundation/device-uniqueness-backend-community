@@ -1885,7 +1885,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from Asset Hub <code>DotnsGateway::LiteLabelOwner</code>, People Chain <code>Resources::UsernameOwnerOf</code> while the People runtime still keeps usernames, and pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or, on a People runtime that keeps usernames, the bare personhood name is owned or its reservation queue is full. The last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
+              <div class="sc-desc">Per-base availability read from Asset Hub <code>DotnsGateway::LiteLabelOwner</code>, People Chain <code>Resources::UsernameOwnerOf</code> while the People runtime still keeps usernames, and pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare personhood name is registered on <code>DotnsRegistrar</code>, holds a live grant on the dotNS name whitelist, or its <code>DotnsPopController</code> reservation queue is full (on People too, while its runtime keeps usernames). Any of those would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the device name with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">

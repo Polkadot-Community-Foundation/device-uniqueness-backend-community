@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use chain_client::storage;
@@ -11,7 +12,10 @@ use subxt::dynamic::{At as _, Value};
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
+use tokio::sync::OnceCell;
 
+use crate::chain::dotns::Contracts;
+use crate::chain::people::ReservationState;
 use crate::chain::people::DISCRIMINATORS;
 use crate::{check_pallet_call_args, extract_call_fields, Pallet};
 
@@ -27,6 +31,10 @@ pub struct ValidityWindow {
 pub struct AssetHub {
     client: OnlineClient<AssetHubConfig>,
     rpc: LegacyRpcMethods<RpcConfigFor<AssetHubConfig>>,
+    /// The dotNS contracts, resolved on first use and kept for the process's
+    /// life: a governance change to `DotnsGateway::DispatcherAddress` is
+    /// picked up on restart.
+    dotns: Arc<OnceCell<Contracts>>,
 }
 
 impl AssetHub {
@@ -53,6 +61,7 @@ impl AssetHub {
         Self {
             client,
             rpc: LegacyRpcMethods::new(rpc),
+            dotns: Arc::new(OnceCell::new()),
         }
     }
 
@@ -123,6 +132,24 @@ impl AssetHub {
             .await
             .context("reading dotNS lite label owners")?;
         Ok(discriminators_of(present))
+    }
+
+    /// The reservation state of the bare personhood name `name` on the dotNS
+    /// contracts: whether it exists on `DotnsRegistrar` or holds a live grant
+    /// on the name whitelist, and how full its `DotnsPopController`
+    /// reservation queue is. A claim reserving a name any of them rejects
+    /// reverts on chain, device name included.
+    pub async fn personhood_reservation(&self, name: &str) -> anyhow::Result<ReservationState> {
+        let at = self.client.at_current_block().await?;
+        let contracts = self
+            .dotns
+            .get_or_try_init(|| Contracts::resolve(&at))
+            .await
+            .context("resolving the dotNS contracts from DotnsGateway::DispatcherAddress")?;
+        contracts
+            .reservation(&at, name)
+            .await
+            .with_context(|| format!("reading the dotNS reservation state of {name}"))
     }
 
     pub async fn lite_label_owners(

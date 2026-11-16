@@ -53,24 +53,41 @@ pub(crate) fn available_digits(taken: &BTreeSet<u8>) -> Vec<u8> {
     (1..=99u8).filter(|d| !taken.contains(d)).collect()
 }
 
+/// Whether one bare personhood name can be reserved, on each chain a claim
+/// reserves it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reservation {
+    /// On People, for a runtime that keeps personhood names. `None` after
+    /// the username removal took that state out of `Resources`.
+    pub people: Option<ReservationState>,
+    /// On the dotNS contracts on Asset Hub, which the gateway forwards every
+    /// reservation to.
+    pub dotns: ReservationState,
+}
+
+impl Reservation {
+    /// Whether a claim reserving this name would be rejected on chain.
+    #[must_use]
+    pub fn rejects(&self) -> bool {
+        self.dotns.rejects() || self.people.is_some_and(|people| people.rejects())
+    }
+}
+
 /// Everything about one base that decides whether a claim can land.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaimState {
     /// Discriminators `00..=99` taken under this base: on Asset Hub, on People
     /// while its runtime keeps usernames, or by a row still in the outbox.
     pub taken: BTreeSet<u8>,
-    /// The bare base as a personhood name, on a People runtime that keeps
-    /// one. `None` after the username removal took that
-    /// state from `Resources`.
-    pub reservation: Option<ReservationState>,
+    /// The bare base as a personhood name.
+    pub reservation: Reservation,
 }
 
 impl ClaimState {
     /// Whether a claim reserving the bare base would be rejected on chain.
     #[must_use]
     pub fn rejects_reservations(&self) -> bool {
-        self.reservation
-            .is_some_and(|reservation| reservation.rejects())
+        self.reservation.rejects()
     }
 }
 
@@ -79,22 +96,19 @@ impl ClaimState {
 #[must_use]
 fn claim_state_of(
     people: Option<BaseState>,
+    dotns: ReservationState,
     lite_labels: BTreeSet<u8>,
     pending: BTreeSet<u8>,
 ) -> ClaimState {
     let mut taken = lite_labels;
     taken.extend(pending);
-    let Some(people) = people else {
-        return ClaimState {
-            taken,
-            reservation: None,
-        };
-    };
-    let reservation = people.reservation();
-    taken.extend(people.taken);
+    let people = people.map(|people| {
+        taken.extend(&people.taken);
+        people.reservation()
+    });
     ClaimState {
         taken,
-        reservation: Some(reservation),
+        reservation: Reservation { people, dotns },
     }
 }
 
@@ -118,17 +132,18 @@ pub(crate) async fn claim_state(state: &AppState, base: &str) -> UsernamesResult
 /// [`claim_state`] read at `at`, for a caller that already holds a block
 /// handle and has read `shape` from it.
 ///
-/// Asset Hub's `LiteLabelOwner` and the outbox are always read. People's
-/// `Resources::UsernameOwnerOf` and reservation state are read only while
-/// `shape` says the runtime still keeps them: names registered there before
-/// the dotNS lane existed are not on Asset Hub.
+/// Asset Hub's `LiteLabelOwner`, the dotNS reservation state of the bare base,
+/// and the outbox are always read. People's `Resources::UsernameOwnerOf` and
+/// reservation state are read only while `shape` says the runtime still keeps
+/// them: names registered there before the dotNS lane existed are not on Asset
+/// Hub.
 pub(crate) async fn claim_state_at(
     state: &AppState,
     base: &str,
     at: &PeopleAt,
     shape: AttestShape,
 ) -> UsernamesResult<ClaimState> {
-    let (people, lite_labels, pending) = tokio::try_join!(
+    let (people, dotns, lite_labels, pending) = tokio::try_join!(
         async {
             match shape {
                 AttestShape::WithUsername => state
@@ -143,6 +158,13 @@ pub(crate) async fn claim_state_at(
         async {
             state
                 .asset_hub
+                .personhood_reservation(base)
+                .await
+                .map_err(UsernamesError::from)
+        },
+        async {
+            state
+                .asset_hub
                 .taken_discriminators(base)
                 .await
                 .map_err(UsernamesError::from)
@@ -153,25 +175,37 @@ pub(crate) async fn claim_state_at(
                 .map_err(UsernamesError::from)
         },
     )?;
-    Ok(claim_state_of(people, lite_labels, pending))
+    Ok(claim_state_of(people, dotns, lite_labels, pending))
 }
 
-/// The reservation state of one bare personhood name, on a People runtime that
-/// keeps one (`shape`). `None` otherwise.
+/// The reservation state of one bare personhood name: on the dotNS contracts,
+/// and on People while its runtime keeps one (`shape`).
 pub(crate) async fn reservation_state(
     state: &AppState,
     name: &str,
     shape: AttestShape,
-) -> UsernamesResult<Option<ReservationState>> {
-    match shape {
-        AttestShape::WithUsername => state
-            .chain
-            .reservation_state(name)
-            .await
-            .map(Some)
-            .map_err(UsernamesError::from),
-        AttestShape::WithoutUsername => Ok(None),
-    }
+) -> UsernamesResult<Reservation> {
+    let (people, dotns) = tokio::try_join!(
+        async {
+            match shape {
+                AttestShape::WithUsername => state
+                    .chain
+                    .reservation_state(name)
+                    .await
+                    .map(Some)
+                    .map_err(UsernamesError::from),
+                AttestShape::WithoutUsername => Ok(None),
+            }
+        },
+        async {
+            state
+                .asset_hub
+                .personhood_reservation(name)
+                .await
+                .map_err(UsernamesError::from)
+        },
+    )?;
+    Ok(Reservation { people, dotns })
 }
 
 /// Subject-keyed rate limit for the authenticated usernames surface (never
@@ -313,10 +347,20 @@ mod tests {
         }
     }
 
+    /// The bare name as the dotNS contracts see it, `queue_len` of 64 queued.
+    fn dotns(queue_len: u32, unavailable: bool) -> ReservationState {
+        ReservationState {
+            personhood_name_unavailable: unavailable,
+            queue_len,
+            queue_capacity: 64,
+        }
+    }
+
     #[test]
     fn a_runtime_with_usernames_unions_people_asset_hub_and_the_outbox() {
         let state = claim_state_of(
             Some(people([1, 2], true)),
+            dotns(0, false),
             BTreeSet::from([2, 3]),
             BTreeSet::from([4]),
         );
@@ -334,7 +378,12 @@ mod tests {
 
     #[test]
     fn a_runtime_without_usernames_reads_asset_hub_and_the_outbox_only() {
-        let state = claim_state_of(None, BTreeSet::from([2, 3]), BTreeSet::from([4]));
+        let state = claim_state_of(
+            None,
+            dotns(0, false),
+            BTreeSet::from([2, 3]),
+            BTreeSet::from([4]),
+        );
 
         assert_eq!(
             state.taken,
@@ -342,13 +391,33 @@ mod tests {
             "Asset Hub and the outbox are the only places a name lives"
         );
         assert_eq!(
-            state.reservation, None,
+            state.reservation.people, None,
             "Resources keeps no personhood-name state after the upgrade"
         );
         assert!(
             !state.rejects_reservations(),
-            "with nothing read, nothing rejects the reservation leg"
+            "a free name on dotNS rejects nothing"
         );
+    }
+
+    #[test]
+    fn the_dotns_contracts_reject_a_reservation_on_either_runtime() {
+        let owned = Reservation {
+            people: None,
+            dotns: dotns(0, true),
+        };
+        let full = Reservation {
+            people: Some(people([1, 2], false).reservation()),
+            dotns: dotns(64, false),
+        };
+        let open = Reservation {
+            people: None,
+            dotns: dotns(63, false),
+        };
+
+        assert!(owned.rejects(), "a name already on DotnsRegistrar");
+        assert!(full.rejects(), "a full DotnsPopController queue");
+        assert!(!open.rejects(), "a queue with one slot left");
     }
 
     #[test]

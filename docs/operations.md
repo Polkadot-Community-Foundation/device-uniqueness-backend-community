@@ -631,7 +631,10 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 - `FAILED_TERMINAL` — inspect `dotns_last_error`. Common causes: `dotns signature
   does not verify` (the client bound it to a different attester than
   `GET /api/v1/attester` returns), `lite label reserved by another account`, or a
-  contract revert.
+  contract revert. A `QueueFull` revert means the reserved name's queue filled
+  after intake checked it. A name registered, or granted on the dotNS name
+  whitelist, in the meantime reverts with `PersonhoodNameUnavailable`, which
+  shows as an undecoded contract failure until the gateway decodes it.
 - `ABANDONED` — the People half reached `FAILED_TERMINAL`, so this half was never
   attempted. Nothing is wrong with the reservation; there is no username to
   attach a name to. Diagnose the People `last_error`.

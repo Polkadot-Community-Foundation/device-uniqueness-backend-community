@@ -183,14 +183,12 @@ pub async fn register(
 
     let base = claim_state_at(&state, &parsed.username, &at, shape).await?;
     if let Some(reserved) = reserved_name(&parsed) {
-        // `None` on a People runtime that keeps no personhood names: there is
-        // nothing on People to reject the reservation leg.
         let reservation = if reserved == parsed.username {
             base.reservation
         } else {
             reservation_state(&state, reserved, shape).await?
         };
-        if reservation.is_some_and(|reservation| reservation.rejects()) {
+        if reservation.rejects() {
             return Err(UsernamesError::FullNameUnavailable {
                 reserved: reserved.to_string(),
             });
