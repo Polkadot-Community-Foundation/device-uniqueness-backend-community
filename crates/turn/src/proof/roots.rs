@@ -138,10 +138,29 @@ pub struct RootsConfig {
 pub fn spawn_refresher(cache: Arc<RootCache>, config: RootsConfig) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.refresh);
-        let api = chain_client::connect(&config.rpc_url).await.unwrap();
+        let api = loop {
+            interval.tick().await;
+            match chain_client::connect(&config.rpc_url).await {
+                Ok(api) => break api,
+                Err(error) => tracing::warn!(
+                    collection = %hex::encode(config.collection),
+                    %error,
+                    "proof root refresher: People chain connection failed; retrying"
+                ),
+            }
+        };
         loop {
-            let Ok(api) = api.at_current_block().await else {
-                continue;
+            let api = match api.at_current_block().await {
+                Ok(api) => api,
+                Err(error) => {
+                    tracing::warn!(
+                        collection = %hex::encode(config.collection),
+                        %error,
+                        "proof root refresher: reading the current block failed; retrying"
+                    );
+                    interval.tick().await;
+                    continue;
+                }
             };
             let genesis = api.genesis_hash();
             if genesis.is_some_and(|genesis| genesis.0 != config.genesis) {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use http_common::{rate_limiter::Config as RateLimiterConfig, RateLimiter};
 
 use crate::config::{Config, ProofConfig};
-use crate::proof::roots::RootCaches;
+use crate::proof::roots::{spawn_refresher, PersonhoodCollection, RootCaches, RootsConfig};
 use crate::source::Source;
 
 /// No database; the only chain-facing state is the proof root cache, refreshed
@@ -46,7 +46,8 @@ pub const MAX_PERMIT_WAITERS: usize = 64;
 
 impl ProofState {
     /// Assemble proof state over an externally owned root cache (the caller
-    /// decides whether a chain refresher feeds it — the bin does, tests don't).
+    /// decides whether a chain refresher feeds it — [`AppState::start`] does,
+    /// tests don't).
     pub fn new(
         config: &ProofConfig,
         roots: RootCaches,
@@ -71,6 +72,7 @@ impl ProofState {
 }
 
 impl AppState {
+    /// For tests: the proof root caches stay empty. A process serves [`AppState::start`].
     pub fn new(config: Config) -> Self {
         let limiter: RateLimiter = RateLimiter::new(
             RateLimiterConfig::default()
@@ -99,6 +101,28 @@ impl AppState {
             limiter,
             proof,
         }
+    }
+
+    /// [`AppState::new`] plus the background refresh of the proof root caches,
+    /// without which every proof gets 503. Returns at once, whether or not the
+    /// chain is reachable. Requires a Tokio runtime.
+    pub fn start(config: Config) -> Self {
+        let state = Self::new(config);
+        if let (Some(proof_state), Some(proof_config)) = (&state.proof, &state.config.proof) {
+            for collection in PersonhoodCollection::ALL {
+                spawn_refresher(
+                    proof_state.roots.get(collection),
+                    RootsConfig {
+                        rpc_url: proof_config.rpc_url.clone(),
+                        collection: collection.id(),
+                        genesis: proof_config.genesis,
+                        refresh: crate::config::PROOF_ROOT_REFRESH,
+                    },
+                );
+            }
+            tracing::info!("proof-authorized issuance enabled; root refreshers started");
+        }
+        state
     }
 }
 

@@ -680,6 +680,42 @@ async fn no_root_snapshot_means_unavailable_not_broken() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+async fn readyz_status(app: &axum::Router) -> StatusCode {
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+// Readiness is the only signal an orchestrator or the all-in-one aggregate
+// gets that every proof answers 503.
+#[tokio::test]
+async fn proof_roots_readiness() {
+    let ring = test_ring();
+    assert_eq!(readyz_status(&app(None)).await, StatusCode::OK);
+
+    let state = state_with_rate_limit(Some((proof_config(), None)), 100);
+    let roots = state.proof.as_ref().expect("proof enabled").roots.clone();
+    let app = turn::routes(state);
+    assert_eq!(readyz_status(&app).await, StatusCode::SERVICE_UNAVAILABLE);
+
+    roots
+        .get(PersonhoodCollection::PeopleLite)
+        .set(snapshot_of(ring.commitment.clone()));
+    assert_eq!(readyz_status(&app).await, StatusCode::SERVICE_UNAVAILABLE);
+
+    roots
+        .get(PersonhoodCollection::People)
+        .set(snapshot_of(ring.commitment.clone()));
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn saturated_verification_waits_for_a_slot() {
     let ring = test_ring();

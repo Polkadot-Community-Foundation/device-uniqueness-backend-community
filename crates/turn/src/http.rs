@@ -16,6 +16,8 @@ use http_common::error::not_found;
 use http_common::rate_limiter::Paid;
 use http_common::{health, layers, AuthSubject};
 
+use crate::proof::roots::PersonhoodCollection;
+
 use self::error::{AppError, AppResult, FieldError};
 use self::state::AppState;
 
@@ -92,10 +94,24 @@ pub fn routes(state: AppState) -> Router {
     )
 }
 
-/// Stateless service: nothing to gate readiness on — if the process serves,
-/// it can mint.
-pub async fn readiness(_state: AppState) -> health::Readiness {
-    Ok(&[])
+/// With proof issuance enabled, `proof-roots` is down while any accepted
+/// collection has no fresh ring roots, since every proof for it gets 503.
+pub async fn readiness(state: AppState) -> health::Readiness {
+    let Some(proof) = &state.proof else {
+        return Ok(&[]);
+    };
+    let loaded = PersonhoodCollection::ALL.into_iter().all(|collection| {
+        proof
+            .roots
+            .get(collection)
+            .snapshot(crate::config::PROOF_MAX_ROOT_AGE)
+            .is_some()
+    });
+    if !loaded {
+        tracing::warn!("readiness check failed: proof ring roots not loaded");
+        return Err("proof-roots");
+    }
+    Ok(&["proof-roots"])
 }
 
 pub(crate) fn now_unix() -> u64 {
