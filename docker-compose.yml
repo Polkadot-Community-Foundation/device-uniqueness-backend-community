@@ -100,6 +100,9 @@ services:
       # ANDROID_ATTESTATION_CRL_* are left out on purpose: the built-in
       # defaults are correct and .env.example forbids overriding them outside tests.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
+      # Read-only here: availability and the intake's digit choice read
+      # LiteLabelOwner. Never submits; only the chain-writer does.
+      ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://paseo-asset-hub-next-rpc.polkadot.io}
       # The PEOPLE_RPC_URL and ASSET_HUB_RPC_URL
       # defaults both name Paseo Next v2, and that pairing IS the safety property:
       # split across two networks, the writer would claim LiteLabelOwner on one

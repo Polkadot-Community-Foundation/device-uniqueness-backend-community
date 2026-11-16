@@ -16,12 +16,13 @@ use utoipa::ToSchema;
 
 use crate::http::state::AppState;
 
+use super::claim_state;
+use super::ClaimState;
 use super::{
-    available_digits, base_state,
+    available_digits,
     error::{FieldError, UsernamesError, UsernamesResult},
     is_valid_base,
 };
-use crate::chain::people::BaseState;
 
 const MAX_USERNAMES: usize = 100;
 
@@ -66,12 +67,14 @@ pub(crate) struct NameAvailability {
     security(("bearer_jwt" = [])),
     request_body = AvailableRequest,
     responses(
-        (status = 200, description = "Per-base availability read from People Chain UsernameOwnerOf \
-            plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. \
-            `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the \
-            bare personhood name is owned or its reservation queue is full — the last two would \
-            make a claim carrying `dotns.reservedUsername` fail on chain and take the lite \
-            username with it.",
+        (status = 200, description = "Per-base availability read from Asset Hub \
+            `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the \
+            People runtime still keeps usernames, and pending outbox reservations, tagged \
+            `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable \
+            under this base: no free discriminator, or, on a People runtime that keeps \
+            usernames, the bare personhood name is owned or its reservation queue is full. The \
+            last two would make a claim carrying `dotns.reservedUsername` fail on chain and take \
+            the lite username with it.",
          body = AvailableV1Response,
          example = json!({ "_tag": "v1", "value": {
              "tallesx": { "status": "AVAILABLE", "availableDigits": [1, 2, 3] },
@@ -88,7 +91,7 @@ pub(crate) struct NameAvailability {
          body = serde_json::Value),
         (status = 429, description = "Subject rate limit exceeded (with `Retry-After`).",
          body = serde_json::Value),
-        (status = 500, description = "People Chain failure or reservation-outbox failure.",
+        (status = 500, description = "People Chain, Asset Hub, or reservation-outbox failure.",
          body = serde_json::Value,
          example = json!({ "error": "Internal server error. Please try again." }))
     )
@@ -163,11 +166,11 @@ async fn availability_for(state: &AppState, base: &str) -> UsernamesResult<NameA
         });
     }
 
-    Ok(availability_of(&base_state(state, base).await?))
+    Ok(availability_of(&claim_state(state, base).await?))
 }
 
 /// The availability verdict for one base, given everything read about it.
-fn availability_of(state: &BaseState) -> NameAvailability {
+fn availability_of(state: &ClaimState) -> NameAvailability {
     // Pool is 01..=99 (00 is never offered); available = pool minus taken.
     let digits = available_digits(&state.taken);
     if digits.is_empty() || state.rejects_reservations() {
@@ -186,6 +189,7 @@ fn availability_of(state: &BaseState) -> NameAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::people::ReservationState;
     use serde_json::json;
 
     #[test]
@@ -232,18 +236,24 @@ mod tests {
         );
     }
 
-    fn base_state(taken: impl IntoIterator<Item = u8>) -> BaseState {
-        BaseState {
-            taken: taken.into_iter().collect(),
-            full_name_owned: false,
-            queue_len: 0,
+    fn reservation(queue_len: u32, full_name_owned: bool) -> Option<ReservationState> {
+        Some(ReservationState {
+            full_name_owned,
+            queue_len,
             queue_capacity: 10,
+        })
+    }
+
+    fn with_taken(taken: impl IntoIterator<Item = u8>) -> ClaimState {
+        ClaimState {
+            taken: taken.into_iter().collect(),
+            reservation: reservation(0, false),
         }
     }
 
     #[test]
     fn a_base_with_free_digits_is_available() {
-        let availability = availability_of(&base_state([1, 2, 3]));
+        let availability = availability_of(&with_taken([1, 2, 3]));
         assert_eq!(availability.status, "AVAILABLE");
         let digits = availability.available_digits.expect("digits");
         assert_eq!(digits.len(), 96);
@@ -252,30 +262,43 @@ mod tests {
 
     #[test]
     fn a_base_with_no_free_digits_is_exhausted_even_though_00_is_free() {
-        let availability = availability_of(&base_state(1..=99));
+        let availability = availability_of(&with_taken(1..=99));
         assert_eq!(availability.status, "EXHAUSTED");
         assert!(availability.available_digits.is_none());
     }
 
     #[test]
     fn a_base_whose_reservation_leg_would_be_rejected_is_exhausted() {
-        let owned = BaseState {
-            full_name_owned: true,
-            ..base_state([])
+        let owned = ClaimState {
+            reservation: reservation(0, true),
+            ..with_taken([])
         };
         assert_eq!(availability_of(&owned).status, "EXHAUSTED");
 
-        let queue_full = BaseState {
-            queue_len: 10,
-            ..base_state([])
+        let queue_full = ClaimState {
+            reservation: reservation(10, false),
+            ..with_taken([])
         };
         assert_eq!(availability_of(&queue_full).status, "EXHAUSTED");
 
-        let queue_nearly_full = BaseState {
-            queue_len: 9,
-            ..base_state([])
+        let queue_nearly_full = ClaimState {
+            reservation: reservation(9, false),
+            ..with_taken([])
         };
         assert_eq!(availability_of(&queue_nearly_full).status, "AVAILABLE");
+    }
+
+    #[test]
+    fn a_runtime_without_a_reservation_leg_never_exhausts_a_base_for_it() {
+        let upgraded = ClaimState {
+            reservation: None,
+            ..with_taken([1, 2])
+        };
+        assert_eq!(
+            availability_of(&upgraded).status,
+            "AVAILABLE",
+            "only free digits decide availability once Resources keeps no personhood names"
+        );
     }
 
     #[test]

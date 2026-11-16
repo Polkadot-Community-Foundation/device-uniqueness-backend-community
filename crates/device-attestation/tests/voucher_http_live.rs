@@ -10,6 +10,7 @@ use http_body_util::BodyExt as _;
 use sqlx::Row as _;
 use tower::ServiceExt as _;
 
+use device_attestation::chain::asset_hub::AssetHub;
 use device_attestation::eligibility;
 use device_attestation::{AppState, Config, Jwt, PeopleChain};
 
@@ -98,8 +99,9 @@ fn unique_base(prefix: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres (DEVICE_ATTESTATION_TEST_DATABASE_URL) and a reachable People Chain RPC \
-            (PEOPLE_RPC_URL or the Paseo default); run with --ignored"]
+#[ignore = "requires Postgres (DEVICE_ATTESTATION_TEST_DATABASE_URL) and reachable People Chain \
+            and Asset Hub RPCs (PEOPLE_RPC_URL and ASSET_HUB_RPC_URL, or the Paseo defaults); \
+            run with --ignored"]
 async fn voucher_claim_is_instant_over_the_production_router() {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
         .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
@@ -109,12 +111,18 @@ async fn voucher_claim_is_instant_over_the_production_router() {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect_for_reads(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
 
     let mut config = Config::test_default();
     config.queue_enabled = true;
     config.registration_vouchers_enabled = true;
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app =
+        device_attestation::routes(AppState::new(pool.clone(), chain, asset_hub, jwt, config));
     let token = mint_token();
 
     let base = unique_base("vhttp");

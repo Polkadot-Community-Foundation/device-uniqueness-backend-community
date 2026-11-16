@@ -1007,7 +1007,7 @@ table.params td.desc code{
           </div>
         </div>
         <div class="endpoint-body">
-          <p class="endpoint-desc">Kubernetes readiness probe — checks <code>db</code> and <code>chain</code> subsystems.</p>
+          <p class="endpoint-desc">Kubernetes readiness probe — checks the <code>db</code>, <code>chain</code> and <code>asset_hub</code> subsystems.</p>
           <div class="code-block">
             <div class="code-head">
               <span class="code-head-label">Response · 200 · application/json</span>
@@ -1017,7 +1017,8 @@ table.params td.desc code{
   <span class="s">"status"</span><span class="p">:</span> <span class="s">"ready"</span><span class="p">,</span>
   <span class="s">"service"</span><span class="p">:</span> <span class="s">"device-attestation"</span><span class="p">,</span>
   <span class="s">"db"</span><span class="p">:</span> <span class="s">"up"</span><span class="p">,</span>
-  <span class="s">"chain"</span><span class="p">:</span> <span class="s">"up"</span>
+  <span class="s">"chain"</span><span class="p">:</span> <span class="s">"up"</span><span class="p">,</span>
+  <span class="s">"asset_hub"</span><span class="p">:</span> <span class="s">"up"</span>
 <span class="p">}</span></pre>
           </div>
           <div class="code-block">
@@ -1037,7 +1038,7 @@ table.params td.desc code{
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Instance can take traffic; db and chain reachable.</div>
+              <div class="sc-desc">Instance can take traffic; db, People Chain and Asset Hub reachable.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1884,7 +1885,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c200">200</span>
                 <span class="sc-label">OK</span>
               </div>
-              <div class="sc-desc">Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
+              <div class="sc-desc">Per-base availability read from Asset Hub <code>DotnsGateway::LiteLabelOwner</code>, People Chain <code>Resources::UsernameOwnerOf</code> while the People runtime still keeps usernames, and pending outbox reservations, tagged <code>{_tag: &quot;v1&quot;, value}</code> with availableDigits. <code>EXHAUSTED</code> means nothing claimable under this base: no free discriminator, or, on a People runtime that keeps usernames, the bare personhood name is owned or its reservation queue is full. The last two would make a claim carrying <code>dotns.reservedUsername</code> fail on chain and take the lite username with it.</div>
             </div>
             <div class="status-card">
               <div class="sc-head">
@@ -1912,7 +1913,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c500">500</span>
                 <span class="sc-label">Internal server error. Please try again.</span>
               </div>
-              <div class="sc-desc">People Chain failure or reservation-outbox failure.</div>
+              <div class="sc-desc">People Chain, Asset Hub, or reservation-outbox failure.</div>
             </div>
           </div>
         </div>

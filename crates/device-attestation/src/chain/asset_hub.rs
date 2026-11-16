@@ -12,6 +12,7 @@ use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
+use crate::chain::people::DISCRIMINATORS;
 use crate::{check_pallet_call_args, extract_call_fields, Pallet};
 
 const PALLET: &str = "DotnsGateway";
@@ -36,6 +37,14 @@ impl AssetHub {
             .await
             .with_context(|| format!("Asset Hub at {url}"))?;
         Ok(this)
+    }
+
+    /// Connects for reads only, without the `reserve_name` shape check
+    /// [`Self::connect`] makes. For `device-attestation-api`, which reads
+    /// `LiteLabelOwner` for availability and never submits.
+    pub async fn connect_for_reads(url: &str) -> anyhow::Result<Self> {
+        let (client, rpc) = chain_client::connect_asset_hub_with_rpc(url).await?;
+        Ok(Self::from_parts(client, rpc))
     }
 
     /// Wraps an already-constructed online client and the RPC client it was
@@ -91,6 +100,29 @@ impl AssetHub {
             Some(value) => Ok(Some(value.decode()?.0)),
             None => Ok(None),
         }
+    }
+
+    /// The discriminators `00..=99` whose `base.NN` lite label is in
+    /// `DotnsGateway::LiteLabelOwner`, in one batched read. Every lite label
+    /// is there, since only the gateway issues them.
+    pub async fn taken_discriminators(&self, base: &str) -> anyhow::Result<BTreeSet<u8>> {
+        let at = self.client.at_current_block().await?;
+        let entry = at
+            .storage()
+            .entry(subxt::dynamic::storage::<_, AccountId32>(
+                PALLET,
+                "LiteLabelOwner",
+            ))?;
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(usize::from(DISCRIMINATORS));
+        for discriminator in 0..DISCRIMINATORS {
+            let label = format!("{base}.{discriminator:02}");
+            keys.push(entry.fetch_key((label_key(&label),))?);
+        }
+
+        let present = storage::fetch_present(&self.rpc, &keys, at.block_hash())
+            .await
+            .context("reading dotNS lite label owners")?;
+        Ok(discriminators_of(present))
     }
 
     pub async fn lite_label_owners(
@@ -178,6 +210,30 @@ impl AssetHub {
     }
 }
 
+/// The discriminators at the positions of `present`, which index keys built
+/// for `00..DISCRIMINATORS` in order.
+#[must_use]
+fn discriminators_of(present: BTreeSet<usize>) -> BTreeSet<u8> {
+    present
+        .into_iter()
+        .filter_map(|index| u8::try_from(index).ok())
+        .collect()
+}
+
 fn label_key(lite_label: &str) -> Value {
     Value::from_bytes(lite_label.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn present_keys_map_back_to_their_discriminators() {
+        assert_eq!(
+            discriminators_of(BTreeSet::from([0, 7, 99])),
+            BTreeSet::from([0, 7, 99]),
+            "key i was built for base.{{i:02}}"
+        );
+    }
 }

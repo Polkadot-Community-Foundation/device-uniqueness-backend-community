@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use device_attestation::chain::asset_hub::AssetHub;
 use secrecy::ExposeSecret as _;
 use serde_json::json;
 use tower_http::services::ServeDir;
@@ -23,7 +24,7 @@ const DEFAULT_DOCS_ROOT: &str = "/srv/docs";
 /// component cannot be added to one and forgotten in the other.
 #[derive(Clone)]
 struct Health {
-    attestation: (sqlx::PgPool, device_attestation::PeopleChain),
+    attestation: (sqlx::PgPool, device_attestation::PeopleChain, AssetHub),
     indexer: (sqlx::PgPool, username_indexer::PeopleChain),
     #[cfg(invite_tickets)]
     invite_tickets: invite_tickets::AppState,
@@ -73,6 +74,9 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .await?;
     tracing::info!("connected to People Chain");
+    let attestation_asset_hub =
+        AssetHub::connect_for_reads(&attestation_config.asset_hub_rpc_url).await?;
+    tracing::info!("connected to Asset Hub");
 
     let jwt = device_attestation::Jwt::new(
         attestation_config.jwt_secret.expose_secret(),
@@ -81,6 +85,7 @@ pub async fn run() -> anyhow::Result<()> {
     let attestation_state = device_attestation::AppState::new(
         attestation_pool.clone(),
         attestation_chain.clone(),
+        attestation_asset_hub.clone(),
         jwt,
         attestation_config,
     );
@@ -100,7 +105,7 @@ pub async fn run() -> anyhow::Result<()> {
     let notify_state = crate::roles::notify_relay::build_state(notify_config)?;
 
     let health = Health {
-        attestation: (attestation_pool, attestation_chain),
+        attestation: (attestation_pool, attestation_chain, attestation_asset_hub),
         indexer: (indexer_pool, indexer_chain),
         #[cfg(invite_tickets)]
         invite_tickets: invite_state.clone(),
@@ -169,15 +174,16 @@ fn health_router() -> Router<Health> {
 /// nothing is serving. `/livez` stays a liveness echo — a dependency outage
 /// must never restart the process.
 async fn readyz(State(health): State<Health>) -> Response {
-    let (attestation_pool, attestation_chain) = &health.attestation;
+    let (attestation_pool, attestation_chain, attestation_asset_hub) = &health.attestation;
     let (indexer_pool, indexer_chain) = &health.indexer;
 
     let results = [
         (
             "device-attestation-api",
-            device_attestation::http::health::probe(
+            device_attestation::http::health::api_probe(
                 attestation_pool.clone(),
                 attestation_chain.clone(),
+                attestation_asset_hub.clone(),
             )
             .await,
         ),

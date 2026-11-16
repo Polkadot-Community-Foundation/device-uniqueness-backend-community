@@ -571,7 +571,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
+            "description": "Per-base availability read from Asset Hub `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the People runtime still keeps usernames, and pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or, on a People runtime that keeps usernames, the bare personhood name is owned or its reservation queue is full. The last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -633,7 +633,7 @@
             }
           },
           "500": {
-            "description": "People Chain failure or reservation-outbox failure.",
+            "description": "People Chain, Asset Hub, or reservation-outbox failure.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -706,11 +706,11 @@
         "tags": [
           "Liveness & Readiness"
         ],
-        "summary": "Kubernetes readiness probe — checks `db` and `chain` subsystems.",
+        "summary": "Kubernetes readiness probe — checks the `db`, `chain` and `asset_hub` subsystems.",
         "operationId": "readyz",
         "responses": {
           "200": {
-            "description": "Instance can take traffic; db and chain reachable.",
+            "description": "Instance can take traffic; db, People Chain and Asset Hub reachable.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -718,7 +718,8 @@
                   "status": "ready",
                   "service": "device-attestation",
                   "db": "up",
-                  "chain": "up"
+                  "chain": "up",
+                  "asset_hub": "up"
                 }
               }
             }

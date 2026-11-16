@@ -34,6 +34,16 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Changed
 
+- **`device-attestation-api` now needs `ASSET_HUB_RPC_URL`, and refuses to
+  start without it.** Availability and the intake's digit choice read Asset
+  Hub's `DotnsGateway::LiteLabelOwner`, as well as People's
+  `Resources::UsernameOwnerOf` while the People runtime still keeps usernames.
+  Once it does not (paritytech/individuality-community#129), the People reads
+  stop and a base is no longer `EXHAUSTED` over a taken or full personhood-name
+  reservation. That state is gone from `Resources`; a check against the dotNS
+  contracts is planned. The API connects read-only and never submits to Asset
+  Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
+  before upgrading; it must name the same network as `PEOPLE_RPC_URL`.
 - **The writer's "already landed" read and `/readyz` survive the People
   runtime's username removal.** On a runtime whose `attest` takes no username,
   a People row counts as landed once its candidate has a `Resources::Consumers`

@@ -19,7 +19,9 @@ pub type PeopleAt = subxt::client::ClientAtBlock<
     subxt::client::OnlineClientAtBlockImpl<PeopleConfig>,
 >;
 
-const DISCRIMINATORS: u8 = 100;
+/// How many `.NN` suffixes a base has, `00` included: the keys an
+/// availability read asks for.
+pub(crate) const DISCRIMINATORS: u8 = 100;
 
 const PALLET: &str = "PeopleLite";
 

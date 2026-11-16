@@ -17,7 +17,6 @@ use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::chain::attest::AttestShape;
 use crate::chain::attest::PayloadVersion;
 use crate::config::Config;
 use crate::{
@@ -30,7 +29,7 @@ use crate::{
 };
 
 use super::error::{FieldError, UsernamesError, UsernamesResult};
-use super::{available_digits, base_state_at, reservation_state};
+use super::{attest_shape_at, available_digits, claim_state_at, reservation_state};
 
 mod request;
 
@@ -178,19 +177,20 @@ pub async fn register(
         .await
         .map_err(|e| UsernamesError::from(anyhow::Error::from(e)))?;
     let signature_form = crate::signature::account_signature_form(at.metadata_ref(), PEOPLE_PALLET);
-    let accepted_version: PayloadVersion = AttestShape::try_from(at.metadata_ref())
-        .map_err(UsernamesError::from)?
-        .payload_version();
+    let shape = attest_shape_at(&at)?;
+    let accepted_version: PayloadVersion = shape.payload_version();
     let mut parsed = validate_register(&value, &state.config, &signature_form, accepted_version)?;
 
-    let base = base_state_at(&state, &parsed.username, &at).await?;
+    let base = claim_state_at(&state, &parsed.username, &at, shape).await?;
     if let Some(reserved) = reserved_name(&parsed) {
+        // `None` on a People runtime that keeps no personhood names: there is
+        // nothing on People to reject the reservation leg.
         let reservation = if reserved == parsed.username {
-            base.reservation()
+            base.reservation
         } else {
-            reservation_state(&state, reserved).await?
+            reservation_state(&state, reserved, shape).await?
         };
-        if reservation.rejects() {
+        if reservation.is_some_and(|reservation| reservation.rejects()) {
             return Err(UsernamesError::FullNameUnavailable {
                 reserved: reserved.to_string(),
             });

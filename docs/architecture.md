@@ -87,7 +87,8 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 ## Classification quick-reference
 
 - **attestation** → inside `device-attestation` (NOT a service, NOT a shared lib).
-- **availability** → `device-attestation` (People Chain plus durable reservation-outbox read).
+- **availability** → `device-attestation` (Asset Hub `LiteLabelOwner`, People Chain while its
+  runtime keeps usernames, plus durable reservation-outbox read).
 - **username write** → `device-attestation`.
 - **username read/search** → `username-indexer` — true carve-out.
 - **proof of compute** → `username-indexer` (the gate protects its public read; issuance lives with it).
@@ -239,6 +240,17 @@ Operational invariants an agent must respect when touching the code.
   never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
   and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
   keys, so they cost no extra round trip and cannot disagree about their block.
+- **Asset Hub holds every lite label; People holds them only until the username removal.** Taken discriminators
+  are the union of Asset Hub's `DotnsGateway::LiteLabelOwner` (only the gateway issues lite
+  labels, so it has all of them), the outbox, and, while the People runtime's `attest` still takes
+  a username, `Resources::UsernameOwnerOf`, which also holds names registered before the dotNS
+  lane existed. Which People reads run is decided from the `attest` shape at the block the
+  request reads, as for the payload version. Once that runtime keeps no usernames, the bare-name
+  owner and queue are gone with them, so the reservation leg no longer makes a base `EXHAUSTED`
+  and a taken personhood name is only caught on chain. A check against the dotNS contracts
+  (`DotnsRegistrar.exists`, the `DotnsPopController` reservation queue) is planned to close
+  that gap. `device-attestation-api` reads Asset Hub through a read-only client and never
+  submits there.
   *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
   and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
   unconditionally and no client is planned that can register without the reservation leg, so the
@@ -425,7 +437,8 @@ Operational invariants an agent must respect when touching the code.
   vendoring a second, faster-churning metadata blob.
 - **HTTP** (`device-attestation::http`): router in `http.rs` wrapped in a tower-http stack
   (request-id → trace → 30s timeout) with graceful shutdown. Health at `/livez`, `/readyz` (gates on
-  a live Postgres `SELECT 1`), `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
+  a live Postgres `SELECT 1`, the People Chain RPC and the Asset Hub RPC),
+  `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
   the Postgres pool, `ChainClient`, `Jwt` and `Config`, plus the rate limiter, the attestation CRL
   cache and the optional DeviceCheck / Play Integrity clients. `username-indexer` uses the same tower-http
   stack, but its `/readyz` also reports index freshness and it never publishes JWKS — it holds

@@ -153,7 +153,7 @@ workloads:
     # The longest of the five, plus the migration sets and the blocking People
     # Chain connect: username-indexer's finalized scan dominates.
     startupSeconds: 350
-    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, PEOPLE_NETWORK, QUEUE_ENABLED, ATTESTER_ACCOUNT, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, ASSET_HUB_RPC_URL, PEOPLE_NETWORK, QUEUE_ENABLED, ATTESTER_ACCOUNT, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
     # THE UNION, enumerated by hand rather than computed from the five services.
     # The list growing must be a visible diff in review — that is the whole
     # control. On a `polkadot` build there is no invite-tickets surface: override
@@ -245,7 +245,7 @@ workloads:
     replicas: 2
     # Startup grace, from the compose healthcheck's start_period.
     startupSeconds: 90
-    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, QUEUE_ENABLED, ATTESTER_ACCOUNT, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, ASSET_HUB_RPC_URL, QUEUE_ENABLED, ATTESTER_ACCOUNT, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
     secretKeys: [DEVICE_ATTESTATION_DATABASE_URL, JWT_ED25519_SECRET]
     # The attestation verification material. Absent = that verifier is not
     # configured, which is a legitimate state (the feature flags below default
