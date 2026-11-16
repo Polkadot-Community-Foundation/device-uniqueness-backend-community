@@ -197,7 +197,10 @@ async fn readyz(State(health): State<Health>) -> Response {
             "invite-tickets-api",
             invite_tickets::http::readiness(health.invite_tickets.clone()).await,
         ),
-        ("turn-api", turn::http::readiness(health.turn.clone()).await),
+        (
+            "turn-api",
+            turn::http::proof_roots(health.turn.clone()).await,
+        ),
         (
             "notify-relay",
             notifications::http::readiness(health.notifications.clone()).await,

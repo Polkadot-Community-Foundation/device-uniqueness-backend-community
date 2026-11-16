@@ -94,24 +94,47 @@ pub fn routes(state: AppState) -> Router {
     )
 }
 
-/// With proof issuance enabled, `proof-roots` is down while any accepted
-/// collection has no fresh ring roots, since every proof for it gets 503.
+/// The service's own `/readyz`: never gated on the chain.
+///
+/// `/turn/issue` reads no chain state, so stale or missing ring roots must not
+/// take the process out of rotation — `/turn/issue-with-proof` already answers
+/// those proofs with 503 per request. `proof-roots` is listed as up while every
+/// collection has fresh roots and simply omitted otherwise; the strict signal
+/// is [`proof_roots`].
 pub async fn readiness(state: AppState) -> health::Readiness {
-    let Some(proof) = &state.proof else {
-        return Ok(&[]);
-    };
-    let loaded = PersonhoodCollection::ALL.into_iter().all(|collection| {
+    match proof_roots_fresh(&state) {
+        Some(true) => Ok(&["proof-roots"]),
+        _ => Ok(&[]),
+    }
+}
+
+/// Strict proof-root health: `proof-roots` is down while any accepted
+/// collection has no ring roots younger than `PROOF_MAX_ROOT_AGE`, since every
+/// proof for it gets 503. Feeds the `dub_dependency_up` gauge and the
+/// `all-in-one` aggregate (which reports it as degraded); never a pod's
+/// readiness gate.
+pub async fn proof_roots(state: AppState) -> health::Readiness {
+    match proof_roots_fresh(&state) {
+        None => Ok(&[]),
+        Some(true) => Ok(&["proof-roots"]),
+        Some(false) => {
+            tracing::warn!("proof ring roots not loaded; proofs answer 503");
+            Err("proof-roots")
+        }
+    }
+}
+
+/// `None` with proof issuance disabled; otherwise whether every accepted
+/// collection holds fresh roots.
+fn proof_roots_fresh(state: &AppState) -> Option<bool> {
+    let proof = state.proof.as_ref()?;
+    Some(PersonhoodCollection::ALL.into_iter().all(|collection| {
         proof
             .roots
             .get(collection)
             .snapshot(crate::config::PROOF_MAX_ROOT_AGE)
             .is_some()
-    });
-    if !loaded {
-        tracing::warn!("readiness check failed: proof ring roots not loaded");
-        return Err("proof-roots");
-    }
-    Ok(&["proof-roots"])
+    }))
 }
 
 pub(crate) fn now_unix() -> u64 {

@@ -693,27 +693,40 @@ async fn readyz_status(app: &axum::Router) -> StatusCode {
         .status()
 }
 
-// Readiness is the only signal an orchestrator or the all-in-one aggregate
-// gets that every proof answers 503.
+// Missing ring roots must never take turn-api out of rotation: `/turn/issue`
+// reads no chain state, and the proof route already answers 503 per request.
+// The strict `proof_roots` check is what the gauge and all-in-one report.
 #[tokio::test]
-async fn proof_roots_readiness() {
+async fn proof_roots_never_gate_readiness() {
     let ring = test_ring();
     assert_eq!(readyz_status(&app(None)).await, StatusCode::OK);
 
     let state = state_with_rate_limit(Some((proof_config(), None)), 100);
     let roots = state.proof.as_ref().expect("proof enabled").roots.clone();
-    let app = turn::routes(state);
-    assert_eq!(readyz_status(&app).await, StatusCode::SERVICE_UNAVAILABLE);
+    let app = turn::routes(state.clone());
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Err("proof-roots")
+    );
 
     roots
         .get(PersonhoodCollection::PeopleLite)
         .set(snapshot_of(ring.commitment.clone()));
-    assert_eq!(readyz_status(&app).await, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Err("proof-roots")
+    );
 
     roots
         .get(PersonhoodCollection::People)
         .set(snapshot_of(ring.commitment.clone()));
     assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Ok(&["proof-roots"][..])
+    );
 }
 
 #[tokio::test]
