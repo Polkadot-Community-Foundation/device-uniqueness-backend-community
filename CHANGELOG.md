@@ -44,6 +44,13 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   contracts is planned. The API connects read-only and never submits to Asset
   Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
   before upgrading; it must name the same network as `PEOPLE_RPC_URL`.
+
+- **TURN readiness reports `proof-roots`.** With `TURN_PROOF_ENABLED`,
+  `turn-api`'s `/readyz` answers `503` with `"proof-roots": "down"` while
+  either personhood collection has no ring roots younger than ten minutes,
+  which also takes `/api/v1/turn/issue` out of rotation. `all-in-one` reports
+  it as a degraded component and stays ready.
+
 - **The writer's "already landed" read and `/readyz` survive the People
   runtime's username removal.** On a runtime whose `attest` takes no username,
   a People row counts as landed once its candidate has a `Resources::Consumers`
@@ -53,6 +60,13 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   upgrade.
 
 ### Fixed
+
+- **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
+  against the People Chain's rings, as `turn-api` does, where it used to
+  answer every one with `503 ring roots not yet available`.
+
+- **The proof root refresher retries a failed People Chain connection** and
+  logs each failure, where it used to stop for the life of the process.
 
 - **A registration no longer waits behind the previous row's dotNS
   reservation.** The chain writer ran its People and dotNS (Asset Hub) passes

@@ -101,7 +101,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     #[cfg(invite_tickets)]
     let invite_state = invite_tickets::AppState::new(invite_pool, invite_config);
-    let turn_state = turn::AppState::new(turn_config);
+    let turn_state = turn::AppState::start(turn_config);
     let notify_state = crate::roles::notify_relay::build_state(notify_config)?;
 
     let health = Health {
