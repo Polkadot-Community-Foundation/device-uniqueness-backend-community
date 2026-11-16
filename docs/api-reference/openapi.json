@@ -534,7 +534,7 @@
             }
           },
           "503": {
-            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable).",
+            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable), or intake is paused while the outbox drains ahead of a People runtime upgrade (`INTAKE_PAUSED`; retryable once the upgrade is through, and the claim may need re-signing in the payload version the upgraded runtime takes).",
             "content": {
               "application/json": {
                 "schema": {},

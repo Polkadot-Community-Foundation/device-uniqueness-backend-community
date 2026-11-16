@@ -707,6 +707,54 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 | `TURN_SECRET` (`coturn`) | **Does** invalidate outstanding credentials (up to `TURN_TTL_SECS` old), because the relay recomputes the HMAC. Update the relay and every `turn-api` together, then recreate each service — a mismatch means the relay rejects everything this service mints. |
 | `POC_HMAC_SECRET` | Invalidates outstanding puzzles (≤90s old); in-flight solvers get a `402` and request a new one. Safe to rotate any time. |
 
+## Draining the outbox for a People runtime upgrade
+
+A People runtime upgrade that changes `PeopleLite.attest`'s consumer
+registration (dropping the username and reserved name from it) also changes what the consumer signature covers. A row signed for the old
+runtime cannot land on the new one: the writer fails it as
+`payload version 1 is no longer accepted`, and only the client can claim again.
+Drain the outbox before the upgrade is enacted so no row is caught by it.
+
+1. **Ship both sides of the new format before the upgrade is scheduled.**
+   - A backend release that handles both shapes (payload version `2`). It keeps
+     working on either side of the upgrade.
+   - App releases that sign the new consumer message, `(account, verifier,
+     identifierKey)`, and send `payloadVersion: 2` once the runtime has taken
+     the upgrade. Intake accepts only the version the connected runtime takes,
+     so after step 5 a client that still signs the old message and omits
+     `payloadVersion` gets a `400` on `payloadVersion` for every claim. Until
+     those releases are out and adopted, resuming intake only moves the outage
+     from the writer to the clients.
+2. **Pause intake.** Set `INTAKE_PAUSED=true` for `device-attestation-api` (or
+   `all-in-one`) and recreate it:
+   `sudo docker compose up -d device-attestation-api`. `POST /api/v1/usernames`
+   now answers `503` `INTAKE_PAUSED` before it reads or writes anything. The
+   writer and the `registration-queue` advancer keep running, so the outbox only
+   shrinks. Leave the advancer up: with `QUEUE_ENABLED` on, `QUEUED` rows only
+   leave the queue through it.
+3. **Wait for the drain.**
+
+   ```bash
+   sudo docker compose exec device-attestation-chain-writer dub --outbox-drained
+   ```
+
+   It exits `0` and prints `drained` once every People-lane row is `ASSIGNED`
+   or `FAILED_TERMINAL`. Otherwise it prints each other status that still has
+   rows, with its count, and exits `1`. It reads
+   `DEVICE_ATTESTATION_DATABASE_URL`, which the writer container already has,
+   and never migrates. The `dub_outbox_undrained` gauge reports the same count from the
+   writer. A row in `RETRY_AFTER` takes up to its 8 attempts with backoff, so
+   allow minutes, not seconds. The dotNS half is not counted: Asset Hub is not
+   part of this upgrade.
+4. **Enact the upgrade.** Expect `submission deferred` while its stepped
+   migration runs (see [Registration outbox](#registration-outbox)). The writer
+   logs nothing new to act on.
+5. **Resume intake.** Unset `INTAKE_PAUSED` and recreate the service. Intake now
+   accepts only payload version `2`, which the upgraded runtime takes.
+
+A row still undrained at step 4 is not lost silently: it fails with
+`payload version 1 is no longer accepted`, and its client has to claim again.
+
 ## After a chain wipe
 
 Test networks get re-spawned. Two databases hold state derived from the chain
@@ -832,6 +880,7 @@ you expect.
 
 | Symptom | Action |
 |---|---|
+| `POST /api/v1/usernames` answers `503` `INTAKE_PAUSED` | `INTAKE_PAUSED=true` is set for an [outbox drain](#draining-the-outbox-for-a-people-runtime-upgrade). Unset it once the upgrade is through. |
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
 | Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | The signer cannot pay fees on that chain. Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
 | Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |

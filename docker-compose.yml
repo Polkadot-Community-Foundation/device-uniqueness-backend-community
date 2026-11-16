@@ -95,6 +95,8 @@ services:
       WIDEVINE_DEDUP_ENFORCE: ${WIDEVINE_DEDUP_ENFORCE:-false}
       WIDEVINE_DEDUP_HMAC_KEY: ${WIDEVINE_DEDUP_HMAC_KEY:-}
       REGISTRATION_VOUCHERS_ENABLED: ${REGISTRATION_VOUCHERS_ENABLED:-false}
+      # Outbox drain: true answers every new claim with a 503.
+      INTAKE_PAUSED: ${INTAKE_PAUSED:-false}
       # ANDROID_ATTESTATION_CRL_* are left out on purpose: the built-in
       # defaults are correct and .env.example forbids overriding them outside tests.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}

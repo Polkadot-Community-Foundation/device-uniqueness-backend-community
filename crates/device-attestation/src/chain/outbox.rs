@@ -35,6 +35,17 @@ impl Status {
         Status::FailedTerminal,
     ];
 
+    /// Whether the People lane is done with a row in this status. Only
+    /// `ASSIGNED` and `FAILED_TERMINAL` are: every other status is a row the
+    /// writer or the queue advancer will still move, and possibly submit.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        match self {
+            Status::Assigned | Status::FailedTerminal => true,
+            Status::Queued | Status::Reserved | Status::Submitting | Status::RetryAfter => false,
+        }
+    }
+
     /// The stored `status` string.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -131,6 +142,22 @@ pub async fn depth_by_status(pool: &PgPool) -> Result<Vec<(Status, StatusDepth)>
             (status, depth)
         })
         .collect())
+}
+
+/// The People-lane rows that can still be submitted, per non-terminal
+/// status, from a [`depth_by_status`] read. Empty once the outbox is drained:
+/// the condition for enacting a People runtime upgrade that changes `attest`,
+/// since a row signed for the old runtime cannot land after it.
+///
+/// The dotNS half is not counted. It submits to Asset Hub, which that upgrade
+/// does not touch.
+#[must_use]
+pub fn undrained(depths: &[(Status, StatusDepth)]) -> Vec<(Status, i64)> {
+    depths
+        .iter()
+        .filter(|(status, depth)| !status.is_terminal() && depth.depth > 0)
+        .map(|(status, depth)| (*status, depth.depth))
+        .collect()
 }
 
 pub struct NewReservation {
@@ -625,6 +652,62 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A status holding `rows` rows, of no particular age.
+    fn holding(rows: i64) -> StatusDepth {
+        StatusDepth {
+            depth: rows,
+            oldest_age_secs: None,
+        }
+    }
+
+    #[test]
+    fn only_assigned_and_failed_terminal_are_terminal() {
+        let terminal: Vec<Status> = Status::ALL
+            .into_iter()
+            .filter(|status| status.is_terminal())
+            .collect();
+        assert_eq!(
+            terminal,
+            [Status::Assigned, Status::FailedTerminal],
+            "every other status is a row the People lane can still submit"
+        );
+    }
+
+    #[test]
+    fn rows_left_outside_the_terminal_statuses_keep_the_outbox_undrained() {
+        let depths: Vec<(Status, StatusDepth)> = Status::ALL
+            .into_iter()
+            .map(|status| (status, holding(3)))
+            .collect();
+
+        assert_eq!(
+            undrained(&depths),
+            [
+                (Status::Queued, 3),
+                (Status::Reserved, 3),
+                (Status::Submitting, 3),
+                (Status::RetryAfter, 3),
+            ],
+            "each non-terminal status with rows is reported with its count"
+        );
+    }
+
+    #[test]
+    fn an_outbox_with_only_terminal_rows_is_drained() {
+        let depths: Vec<(Status, StatusDepth)> = Status::ALL
+            .into_iter()
+            .map(|status| {
+                let rows = if status.is_terminal() { 5 } else { 0 };
+                (status, holding(rows))
+            })
+            .collect();
+
+        assert!(
+            undrained(&depths).is_empty(),
+            "terminal rows, however many, never hold a drain open"
+        );
+    }
 
     #[test]
     fn all_covers_every_status() {

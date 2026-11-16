@@ -86,6 +86,10 @@ pub enum UsernamesError {
     /// client retries.
     #[error("device evidence verification unavailable")]
     DeviceEvidenceUnavailable,
+    /// `INTAKE_PAUSED` is set: the outbox is draining ahead of a People
+    /// runtime upgrade, and no claim is taken until it is unset (503).
+    #[error("registration intake paused")]
+    IntakePaused,
     /// Unexpected internal failure; logged, surfaced opaquely (500).
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -196,6 +200,14 @@ impl IntoResponse for UsernamesError {
                 Json(json!({
                     "error": "DEVICE_EVIDENCE_UNAVAILABLE",
                     "message": "device evidence verification unavailable"
+                })),
+            )
+                .into_response(),
+            UsernamesError::IntakePaused => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "INTAKE_PAUSED",
+                    "message": "registration is paused for a chain upgrade; retry later"
                 })),
             )
                 .into_response(),

@@ -41,6 +41,11 @@ pub struct Config {
     /// `true` recognises `lifetimePoUDVoucher` on `POST /api/v1/usernames`;
     /// `false` (default) ignores the field, keeping the frozen wire.
     pub registration_vouchers_enabled: bool,
+    /// Intake switch for an outbox drain: `true` answers every
+    /// `POST /api/v1/usernames` with a `503` before it reads anything, so no
+    /// new row enters the outbox while the writer finishes the ones there.
+    /// Set ahead of a People runtime upgrade that changes `attest`.
+    pub intake_paused: bool,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -215,6 +220,7 @@ impl Config {
             enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
+            intake_paused: env_bool("INTAKE_PAUSED", false)?,
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -266,6 +272,7 @@ impl Config {
             enforce_auth: false,
             queue_enabled: false,
             registration_vouchers_enabled: false,
+            intake_paused: false,
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),

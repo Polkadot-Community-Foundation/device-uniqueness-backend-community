@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod healthcheck;
+mod outbox_drained;
 
 use dub::roles;
 
@@ -20,6 +21,9 @@ enum Command {
     /// Probe a `/readyz` and exit 0/1. Defaults to this process's own bind
     /// port on loopback.
     Healthcheck(Option<String>),
+    /// Exit 0 when the People-lane outbox holds no row the writer can still
+    /// submit, 1 otherwise. Reads `DEVICE_ATTESTATION_DATABASE_URL`.
+    OutboxDrained,
 }
 
 fn parse_args() -> anyhow::Result<Command> {
@@ -39,6 +43,7 @@ fn parse_args() -> anyhow::Result<Command> {
             "--healthcheck" => healthcheck = true,
             "--list-roles" => return Ok(Command::ListRoles),
             "--list-merged-roles" => return Ok(Command::ListMergedRoles),
+            "--outbox-drained" => return Ok(Command::OutboxDrained),
             "--help" | "-h" => {
                 eprintln!("{}", usage());
                 std::process::exit(0);
@@ -65,7 +70,7 @@ fn parse_args() -> anyhow::Result<Command> {
 
 fn usage() -> String {
     format!(
-        "usage: dub --role <ROLE>\n       dub --list-roles | --list-merged-roles\n       dub --healthcheck [--url URL]\n\nnetwork: {} (fixed at build time by DUB_NETWORK)\n\nstandard topology ({} workloads):\n  {}\n\nsmall topology (this, plus the {} workers above; holds every secret in one\nprocess — see docs/architecture.md, Deployment topologies):\n  {}",
+        "usage: dub --role <ROLE>\n       dub --list-roles | --list-merged-roles\n       dub --healthcheck [--url URL]\n       dub --outbox-drained\n\nnetwork: {} (fixed at build time by DUB_NETWORK)\n\nstandard topology ({} workloads):\n  {}\n\nsmall topology (this, plus the {} workers above; holds every secret in one\nprocess — see docs/architecture.md, Deployment topologies):\n  {}",
         env!("DUB_NETWORK"),
         roles::ROLES.len(),
         roles::ROLES.join("\n  "),
@@ -90,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Healthcheck(url) => healthcheck::run(url).await,
+        Command::OutboxDrained => outbox_drained::run().await,
         Command::Run(role) => roles::run(&role).await,
     }
 }

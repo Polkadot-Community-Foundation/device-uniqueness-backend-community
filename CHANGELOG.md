@@ -24,6 +24,14 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   boot check on `attest` now compares argument names and accepts either
   consumer shape, instead of requiring the vendored types.
 
+- **An outbox drain for a People runtime upgrade.** `INTAKE_PAUSED=true` makes
+  `POST /api/v1/usernames` answer `503` `INTAKE_PAUSED` before it reads or
+  writes anything, while the writer and the queue advancer keep going.
+  `dub --outbox-drained` exits `0` once every People-lane row is `ASSIGNED` or
+  `FAILED_TERMINAL`, and otherwise lists what is left per status and exits
+  `1`. The writer publishes the same count as `dub_outbox_undrained`. See
+  `docs/operations.md`, "Draining the outbox for a People runtime upgrade".
+
 ### Changed
 
 - **The writer's "already landed" read and `/readyz` survive the People

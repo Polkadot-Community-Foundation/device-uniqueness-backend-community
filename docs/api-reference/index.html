@@ -1780,7 +1780,7 @@ against the base of the lite username in the same claim.</td></tr>
                 <span class="sc-code c503">503</span>
                 <span class="sc-label">Failed to mark iOS device as registered with Apple DeviceCheck</span>
               </div>
-              <div class="sc-desc">The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (<code>DEVICE_EVIDENCE_UNAVAILABLE</code>; retryable).</div>
+              <div class="sc-desc">The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), the enforced Widevine dedup gate could not fetch the attestation revocation list (<code>DEVICE_EVIDENCE_UNAVAILABLE</code>; retryable), or intake is paused while the outbox drains ahead of a People runtime upgrade (<code>INTAKE_PAUSED</code>; retryable once the upgrade is through, and the claim may need re-signing in the payload version the upgraded runtime takes).</div>
             </div>
           </div>
         </div>
