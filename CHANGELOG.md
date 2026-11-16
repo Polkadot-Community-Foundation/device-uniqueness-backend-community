@@ -8,7 +8,34 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-16
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3004000      |
+| `polkadot` | `people-polkadot`   | 2005000      |
+
+### Changed
+
+- **TURN reports `proof-roots` without gating on it.** With
+  `TURN_PROOF_ENABLED`, `dub_dependency_up{component="proof-roots"}` drops to
+  `0` while either personhood collection has no ring roots younger than ten
+  minutes, and `all-in-one` reports it as a degraded component and stays
+  ready. `turn-api`'s own `/readyz` lists `"proof-roots": "up"` once both are
+  loaded but never answers `503` for it: a slow or dead People Chain leaves
+  `/api/v1/turn/issue` in rotation, and only proofs answer `503`.
+
 ### Fixed
+
+- **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
+  against the People Chain's rings, as `turn-api` does, where it used to
+  answer every one with `503 ring roots not yet available`.
+
+- **The proof root refresher retries a failed People Chain connection**,
+  where it used to stop for the life of the process, and loads roots as soon
+  as it connects rather than one refresh period later.
 
 - **A registration no longer waits behind the previous row's dotNS
   reservation.** The chain writer ran its People and dotNS (Asset Hub) passes
