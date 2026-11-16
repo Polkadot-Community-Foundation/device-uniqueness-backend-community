@@ -18,7 +18,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let bind_addr = config.bind_addr;
     let state = AppState::start(config);
-    http_common::metrics::spawn_readiness_probe("turn-api", state.clone(), turn::http::readiness);
+    http_common::metrics::spawn_readiness_probe("turn-api", state.clone(), turn::http::proof_roots);
     let app = routes(state.clone());
 
     let listener = tokio::net::TcpListener::bind(bind_addr)

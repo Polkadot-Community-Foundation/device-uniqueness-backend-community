@@ -149,6 +149,7 @@ pub fn spawn_refresher(cache: Arc<RootCache>, config: RootsConfig) {
                 ),
             }
         };
+        interval.reset_immediately();
         loop {
             let api = match api.at_current_block().await {
                 Ok(api) => api,
