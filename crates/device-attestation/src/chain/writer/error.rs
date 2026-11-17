@@ -23,6 +23,8 @@ pub enum Op {
     Draining,
     /// Awaiting finalization of a submitted extrinsic.
     Finalizing,
+    /// Renewing the lease on the heartbeat.
+    Renewing,
 }
 
 impl fmt::Display for Op {
@@ -37,6 +39,7 @@ impl fmt::Display for Op {
             Op::Submitting => "marking rows submitting",
             Op::Draining => "draining",
             Op::Finalizing => "awaiting finalization",
+            Op::Renewing => "renewing it",
         };
         f.write_str(what)
     }
@@ -100,6 +103,7 @@ mod tests {
             Op::Submitting,
             Op::Draining,
             Op::Finalizing,
+            Op::Renewing,
         ] {
             let rendered = WriterError::LeaseLost(op).to_string();
             assert_eq!(

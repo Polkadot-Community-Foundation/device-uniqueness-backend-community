@@ -1,0 +1,102 @@
+# EXAMPLE environment overlay — the SMALL topology: four workloads instead of
+# eight (two on a `polkadot` build).
+#
+# One `all-in-one` process serves all five HTTP surfaces on one port, with the
+# route table compiled in; the single-instance workers stay separate, because
+# each owns a Postgres lease and a nonce lane.
+#
+# READ THIS BEFORE USING IT. The trade is not "fewer moving parts" — it is the
+# secret compartmentalisation the standard topology enforces. In this shape ONE
+# process holds, at once:
+#
+#   JWT_ED25519_SECRET            mint an access token for ANY subject
+#   POC_HMAC_SECRET               forge proof-of-compute solutions
+#   the TURN credential secret    mint TURN credentials (TURN_SECRET on a
+#                                 coturn relay, TURN_API_TOKEN on Cloudflare)
+#   all three *_DATABASE_URLs     full read/write on every database
+#
+# and reaches them from the same address space that serves the unauthenticated,
+# public `GET /api/v1/usernames/search`. In the standard topology a bug on that
+# path reaches a read-only projection and a verify-only public key. That is the
+# whole difference; the code, the handlers and the dependencies are identical.
+#
+# Full reasoning: docs/architecture.md, "Deployment topologies".
+#
+# Not a deployed environment: every `TODO` is something only you can supply.
+
+global:
+  envId: TODO-env-id
+  network: testnet
+
+  # Required. Absent by default, so this topology cannot be inherited by copying
+  # another values file: the chart refuses to render without it.
+  allInOne:
+    acknowledgedSecretUnion: true
+
+  ingress:
+    host: TODO.example.org
+  env:
+    PEOPLE_RPC_URL: TODO-wss-people-rpc
+    ASSET_HUB_RPC_URL: TODO-wss-asset-hub-rpc   # same network as PEOPLE_RPC_URL
+    PEOPLE_NETWORK: paseo
+    QUEUE_ENABLED: "false"
+    ATTESTER_ACCOUNT: TODO-attester-ss58
+    JWT_ED25519_PUBLIC_KEY: TODO-0x-ed25519-public-key
+  inviters:
+    invite: TODO-inviter-ss58   # owns its own nonce lane; testnet only
+
+workloads:
+  # The merged HTTP tier.
+  all-in-one:
+    enabled: true
+    env:
+      TURN_PROVIDER: coturn
+      TURN_REALM: TODO.example.org
+      ICE_SERVERS: "stun:TODO.example.org:3478,turn:TODO.example.org:3478?transport=udp"
+
+  # ...and the five per-service workloads OFF. The chart fails to render if any
+  # of them is left enabled alongside the merged one: a mix would pay this
+  # topology's secret union while still running the compartmentalised services.
+  device-attestation-api:
+    enabled: false
+  username-indexer:
+    enabled: false
+  invite-tickets-api:
+    enabled: false
+  turn-api:
+    enabled: false
+  notify-relay:
+    enabled: false
+
+  # The workers are unchanged — they belong to BOTH topologies. On a `polkadot`
+  # build also disable invite-tickets-pool, and drop INVITE_TICKETS_DATABASE_URL
+  # from all-in-one's secretKeys and from `secrets` below.
+
+# The merged process file-serves the committed API reference itself (the same
+# artifact, from GATEWAY_DOCS_ROOT), so the static docs workload is not needed.
+docs:
+  enabled: false
+
+secrets:
+  # One secret set, matching all-in-one's hand-enumerated `secretKeys` (plus the
+  # TURN credential its TURN_PROVIDER selects). The per-service entries must be
+  # absent: a secret left behind under a disabled workload is a credential
+  # nobody deploys and nobody rotates, and the chart rejects it.
+  all-in-one:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+    INDEXER_DATABASE_URL: ref+vault://TODO/dub#INDEXER_DATABASE_URL
+    INVITE_TICKETS_DATABASE_URL: ref+vault://TODO/dub#INVITE_TICKETS_DATABASE_URL
+    JWT_ED25519_SECRET: ref+vault://TODO/dub#JWT_ED25519_SECRET
+    POC_HMAC_SECRET: ref+vault://TODO/dub#POC_HMAC_SECRET
+    TURN_SECRET: ref+vault://TODO/dub#TURN_SECRET
+
+  # The workers keep their own sets in both topologies: one signer each, on its
+  # own account.
+  device-attestation-chain-writer:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+    CHAIN_WRITER_SIGNER_SURI: ref+vault://TODO/dub#CHAIN_WRITER_SIGNER_SURI
+  registration-queue:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+  invite-tickets-pool:
+    INVITE_TICKETS_DATABASE_URL: ref+vault://TODO/dub#INVITE_TICKETS_DATABASE_URL
+    INVITER_SIGNER_SURI: ref+vault://TODO/dub#INVITER_SIGNER_SURI

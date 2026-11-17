@@ -92,6 +92,7 @@ if [ "$mode" = "chain" ]; then
     DEVICE_ATTESTATION_TEST_DATABASE_URL="$device_attestation_url" \
       "${cargo_cmd[@]}" -p device-attestation --test "$suite" -- --ignored
   done
+  "${cargo_cmd[@]}" -p turn --test proof_roots_live -- --ignored
   exit 0
 fi
 
