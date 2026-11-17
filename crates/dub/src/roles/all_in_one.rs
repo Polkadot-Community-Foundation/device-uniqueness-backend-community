@@ -96,7 +96,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     #[cfg(invite_tickets)]
     let invite_state = invite_tickets::AppState::new(invite_pool, invite_config);
-    let turn_state = turn::AppState::new(turn_config);
+    let turn_state = turn::AppState::start(turn_config);
     let notify_state = crate::roles::notify_relay::build_state(notify_config)?;
 
     let health = Health {
@@ -191,7 +191,10 @@ async fn readyz(State(health): State<Health>) -> Response {
             "invite-tickets-api",
             invite_tickets::http::readiness(health.invite_tickets.clone()).await,
         ),
-        ("turn-api", turn::http::readiness(health.turn.clone()).await),
+        (
+            "turn-api",
+            turn::http::proof_roots(health.turn.clone()).await,
+        ),
         (
             "notify-relay",
             notifications::http::readiness(health.notifications.clone()).await,

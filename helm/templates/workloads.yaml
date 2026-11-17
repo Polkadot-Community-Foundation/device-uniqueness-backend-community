@@ -1,0 +1,165 @@
+{{- include "dub.validate" . -}}
+{{- $root := . -}}
+{{- range $name, $w := .Values.workloads }}
+{{- if $w.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dub.labels" (dict "name" $name "root" $root) | nindent 4 }}
+spec:
+  replicas: {{ $w.replicas }}
+  {{- if $w.singleton }}
+  # Recreate, not RollingUpdate: a surge would briefly run two signers against
+  # one account. The Postgres lease makes that survivable, not correct.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dub.selectorLabels" (dict "name" $name "root" $root) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dub.labels" (dict "name" $name "root" $root) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Secret volumes are written root:root; without fsGroup the container
+        # user cannot read them whatever the mode says. This is what makes the
+        # APNs key readable — verified by reading it as uid 10001 in the image,
+        # not by reading this YAML.
+        fsGroup: 10001
+      {{- if and $w.keyFile $w.keyFile.secret }}
+      volumes:
+        # Signing key as a file. defaultMode renders as decimal (256 == 0400);
+        # the pod runs as uid 10001, which is what must be able to read it.
+        - name: key-file
+          secret:
+            secretName: {{ $w.keyFile.secret }}
+            defaultMode: {{ $w.keyFile.mode }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "dub.image" (dict "name" $name "root" $root) }}
+          # One image, one role per workload: this is what makes the pod this service. The
+          # image has an ENTRYPOINT and no CMD, so a workload with no args
+          # fails loudly rather than defaulting into somebody else's service.
+          # Every workload name must be a role `dub --list-roles` accepts (the
+          # same rule scripts/verify_role_split.sh enforces on compose).
+          args: ["--role", {{ $name | quote }}]
+          imagePullPolicy: {{ $root.Values.global.imagePullPolicy }}
+          ports:
+            {{- if eq $w.kind "http" }}
+            - name: http
+              containerPort: 8080
+            {{- end }}
+            # Every process exports metrics, workers included. Scraped on the
+            # cluster network only — never routed through the ingress.
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "dub.env" (dict "name" $name "workload" $w "root" $root) | nindent 12 }}
+          {{- if eq $w.kind "http" }}
+          # startupProbe carries the slow first boot (username-indexer scans
+          # finalized chain state for its projection); readiness/liveness stay
+          # tight afterwards. Without it, a readinessProbe would restart that
+          # scan from the beginning, forever.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            # Floored at 3: failureThreshold is allowed CONSECUTIVE failures, not a
+            # grace window, and the kubelet probes immediately.
+            failureThreshold: {{ max 3 (div (add $w.startupSeconds 9) 10) }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- else }}
+          # The workers serve no HTTP beyond the metrics exporter, so that is
+          # the only liveness signal available in-image. It proves the process
+          # is up, not that it holds its lease (the lease is in Postgres).
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
+          {{- with ($w.resources | default $root.Values.global.resources) }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if and $w.keyFile $w.keyFile.secret }}
+          volumeMounts:
+            - name: key-file
+              mountPath: {{ $w.keyFile.path }}
+              readOnly: true
+          {{- end }}
+{{- if eq $w.kind "http" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dub.labels" (dict "name" $name "root" $root) | nindent 4 }}
+spec:
+  selector:
+    {{- include "dub.selectorLabels" (dict "name" $name "root" $root) | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+One Secret per workload, holding ONLY the keys that workload declares — the
+Kubernetes form of the compose environment allowlists. Values are
+`ref+vault://` references substituted at apply time, so a rendered manifest can
+be read, diffed and reviewed without ever containing a secret.
+*/}}
+{{- range $name, $w := .Values.workloads }}
+{{- $vals := index $root.Values.secrets $name | default dict }}
+{{- if and $w.enabled (or $w.secretKeys $vals) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dub.labels" (dict "name" $name "root" $root) | nindent 4 }}
+type: Opaque
+stringData:
+  {{- range $key := $w.secretKeys | default list }}
+  {{ $key }}: {{ index $vals $key | quote }}
+  {{- end }}
+  {{- range $key := $w.optionalSecretKeys | default list }}
+  {{- if hasKey $vals $key }}
+  {{ $key }}: {{ index $vals $key | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}

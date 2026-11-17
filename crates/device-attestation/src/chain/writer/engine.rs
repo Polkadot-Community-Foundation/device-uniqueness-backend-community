@@ -12,7 +12,12 @@
 //! checked against the calls submitted, or through a direct ownership read. A
 //! mapping that does not line up is discarded, never guessed at.
 
-use std::{collections::HashMap, marker::PhantomData, time::Duration};
+use std::{
+    collections::HashMap,
+    marker::PhantomData,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use anyhow::Result;
 use chain_client::WriterSigner;
@@ -40,14 +45,15 @@ use crate::chain::{
 /// decided them to settle.
 const BATCH_RECONCILE_BACKOFF: time::Duration = time::Duration::seconds(10);
 
-/// How many `SUBMITTING` rows one startup-reconcile owner read covers. A writer
+/// How many `SUBMITTING` rows one reconcile owner read covers. A writer
 /// that died mid-drain can leave far more than a batch's worth, and a single
 /// unbounded read over all of them is one point of failure for the whole
 /// reconcile.
 const RECONCILE_READ_CHUNK: usize = 50;
 
-/// Everything a pass needs that is not lane-specific. Borrowed for the duration
-/// of one pass, so both lanes share one signer, one lease and one config.
+/// Everything a pass needs that is not lane-specific. Borrowed for as long as
+/// this process holds one lease, so both lanes share one signer, one lease and
+/// one config.
 pub(super) struct Cx<'a> {
     pub pool: &'a PgPool,
     pub guard: &'a Guard,
@@ -61,6 +67,7 @@ pub(super) struct Cx<'a> {
 }
 
 impl Cx<'_> {
+    /// Renew the lease. `Ok(false)` means another writer holds it now.
     pub(super) async fn heartbeat(&self) -> Result<bool, WriterError> {
         Ok(lease::renew(
             self.pool,
@@ -157,6 +164,17 @@ pub(super) struct Drain<L: Lane> {
     nonce: Option<u64>,
     /// This lane's connection and park state.
     link: L::Link,
+    /// Whether rows a previous run left `SUBMITTING` still need reconciling.
+    /// Set by every restart and cleared only once a reconcile has read them,
+    /// so a lane that restarts while its chain is unreachable — or whose
+    /// reconcile fails on a flaky read — reconciles on the next pass that
+    /// reaches it.
+    reconcile_due: bool,
+    /// Whether a row has reached its chain since [`Drain::take_landed`] last
+    /// read it.
+    landed: AtomicBool,
+    /// Whether the current pass moved any row out of the due set for good.
+    settled: AtomicBool,
     lane: PhantomData<L>,
 }
 
@@ -166,23 +184,88 @@ impl<L: Lane> Drain<L> {
             batch: BatchLane::new(L::NAME, batch_max),
             nonce: None,
             link,
+            reconcile_due: true,
+            landed: AtomicBool::new(false),
+            settled: AtomicBool::new(false),
             lane: PhantomData,
         }
     }
 
-    /// Forget the cached nonce. A new lease means a new claim on the account:
-    /// whatever nonce the previous holder reached is not ours to assume.
-    pub(super) fn reset_nonce(&mut self) {
+    /// Bring the lane up from an unknown state: forget the cached nonce (the
+    /// failure, or another holder, may have consumed it) and reconcile the
+    /// rows left `SUBMITTING` — now if the chain is reachable, otherwise on
+    /// the first pass that reaches it. Only a lost lease returns `Err`.
+    pub(super) async fn restart(&mut self, cx: &Cx<'_>) -> Result<(), WriterError> {
         self.nonce = None;
+        self.reconcile_due = true;
+        if let Some(chain) = self.link.up().await {
+            self.reconcile_on(cx, &chain).await?;
+        }
+        Ok(())
     }
 
-    /// This lane's chain for a one-off read, dialling if it is due a retry.
-    /// `None` while the lane is parked.
-    pub(super) async fn chain(&mut self) -> Option<L::Chain> {
-        self.link.up().await
+    /// Whether a row reached the chain since the last call.
+    pub(super) fn take_landed(&self) -> bool {
+        self.landed.swap(false, Ordering::Relaxed)
     }
 
-    /// Drain one claimed set. `Ok(true)` means there was nothing due.
+    /// Run a due reconcile against a reachable chain. Failures other than a
+    /// lost lease are logged, not returned, and leave the reconcile due: the
+    /// rows a failed read left behind stay `SUBMITTING`, and the next pass
+    /// retries them.
+    async fn reconcile_on(&mut self, cx: &Cx<'_>, chain: &L::Chain) -> Result<(), WriterError> {
+        if !std::mem::take(&mut self.reconcile_due) {
+            return Ok(());
+        }
+        match self.reconcile_submitting(cx, chain).await {
+            Err(e) if e.is_lease_lost() => {
+                tracing::error!(
+                    error = %e,
+                    lane = L::NAME,
+                    "reconcile failed terminally"
+                );
+                Err(e)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    lane = L::NAME,
+                    "reconcile failed; retrying on the next pass"
+                );
+                self.reconcile_due = true;
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Record one row's outcome, noting whether it landed or left the due
+    /// set for good.
+    async fn record(
+        &self,
+        cx: &Cx<'_>,
+        r: &Reservation,
+        outcome: Outcome<'_>,
+    ) -> Result<(), WriterError> {
+        let (landed, settled) = match outcome {
+            Outcome::Landed | Outcome::Observed => (true, true),
+            Outcome::Failed(_) | Outcome::Expired(_) => (false, true),
+            Outcome::Retry(_) | Outcome::Park(_) | Outcome::Defer { .. } => (false, false),
+        };
+        L::record(cx.pool, cx.guard, r, outcome).await?;
+        if landed {
+            self.landed.store(true, Ordering::Relaxed);
+        }
+        if settled {
+            self.settled.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Drain one claimed set. `Ok(true)` means the lane should wait before its
+    /// next pass: nothing was due, or every claimed row was put back (retried,
+    /// parked or deferred) without anything settling. A pass that only puts
+    /// rows back must not loop straight into claiming them again.
     ///
     /// Triage decides each row's fate offline and against one batched owner
     /// read; whatever is left is submitted as **one** extrinsic. A single-row
@@ -193,6 +276,8 @@ impl<L: Lane> Drain<L> {
         let Some(chain) = self.link.up().await else {
             return Ok(true);
         };
+        self.reconcile_on(cx, &chain).await?;
+        self.settled.store(false, Ordering::Relaxed);
         let due = L::claim(cx.pool, i64::from(self.batch.size)).await?;
         if due.is_empty() {
             return Ok(true);
@@ -207,7 +292,7 @@ impl<L: Lane> Drain<L> {
             Err(e) => {
                 let reason = format!("lane context read failed: {e:#}");
                 self.retry_batch(cx, due, &reason).await?;
-                return Ok(false);
+                return Ok(true);
             }
         };
         let submittable = self.triage(cx, chain, ctx, due).await?;
@@ -219,7 +304,7 @@ impl<L: Lane> Drain<L> {
             }
             _ => self.batch(cx, chain, &submittable).await?,
         }
-        Ok(false)
+        Ok(!self.settled.load(Ordering::Relaxed))
     }
 
     /// Resolve every row decidable without submitting anything, and return the
@@ -247,7 +332,7 @@ impl<L: Lane> Drain<L> {
         for r in due {
             match L::gate(r, ctx, now) {
                 Ok(candidate) => gated.push((r, candidate)),
-                Err(gate) => L::record(cx.pool, cx.guard, r, gate.outcome()).await?,
+                Err(gate) => self.record(cx, r, gate.outcome()).await?,
             }
         }
         if gated.is_empty() {
@@ -270,11 +355,10 @@ impl<L: Lane> Drain<L> {
         let mut submittable = Vec::with_capacity(gated.len());
         for (r, candidate) in gated {
             match owners.get(&r.full_username) {
-                Some(owner) if *owner == candidate => {
-                    L::record(cx.pool, cx.guard, r, Outcome::Observed).await?
-                }
+                Some(owner) if *owner == candidate => self.record(cx, r, Outcome::Observed).await?,
                 Some(_) => {
-                    L::record(cx.pool, cx.guard, r, Outcome::Failed(L::OWNED_ELSEWHERE)).await?
+                    self.record(cx, r, Outcome::Failed(L::OWNED_ELSEWHERE))
+                        .await?
                 }
                 None => submittable.push((r, candidate)),
             }
@@ -295,7 +379,7 @@ impl<L: Lane> Drain<L> {
             Ok(n) => n,
             Err(e) => {
                 let reason = format!("{}: {e}", L::NONCE_FETCH);
-                return L::record(cx.pool, cx.guard, r, Outcome::Retry(&reason)).await;
+                return self.record(cx, r, Outcome::Retry(&reason)).await;
             }
         };
 
@@ -305,7 +389,7 @@ impl<L: Lane> Drain<L> {
                 // A lone row still proves the lane works, so it grows the size
                 // back toward the max after a halving search.
                 self.batch.succeeded();
-                L::record(cx.pool, cx.guard, r, Outcome::Landed).await
+                self.record(cx, r, Outcome::Landed).await
             }
             Err(e) => {
                 self.nonce = None;
@@ -409,7 +493,7 @@ impl<L: Lane> Drain<L> {
 
         for ((r, candidate), item) in rows.iter().zip(items) {
             let Err(reason) = item else {
-                L::record(cx.pool, cx.guard, r, Outcome::Landed).await?;
+                self.record(cx, r, Outcome::Landed).await?;
                 continue;
             };
             let observed = owners.get(&r.full_username).copied();
@@ -435,24 +519,13 @@ impl<L: Lane> Drain<L> {
             L::attempt(r) + 1,
             cx.max_attempts,
         ) {
-            SubmitFailureAction::Assign => L::record(cx.pool, cx.guard, r, Outcome::Landed).await,
-            SubmitFailureAction::Park => {
-                L::record(cx.pool, cx.guard, r, Outcome::Park(reason)).await
-            }
-            SubmitFailureAction::Retry => {
-                L::record(cx.pool, cx.guard, r, Outcome::Retry(reason)).await
-            }
-            SubmitFailureAction::Defer => {
-                L::record(cx.pool, cx.guard, r, signer_defer(reason)).await
-            }
+            SubmitFailureAction::Assign => self.record(cx, r, Outcome::Landed).await,
+            SubmitFailureAction::Park => self.record(cx, r, Outcome::Park(reason)).await,
+            SubmitFailureAction::Retry => self.record(cx, r, Outcome::Retry(reason)).await,
+            SubmitFailureAction::Defer => self.record(cx, r, signer_defer(reason)).await,
             SubmitFailureAction::Fail => {
-                L::record(
-                    cx.pool,
-                    cx.guard,
-                    r,
-                    Outcome::Failed(&terminal_reason(reason)),
-                )
-                .await
+                self.record(cx, r, Outcome::Failed(&terminal_reason(reason)))
+                    .await
             }
         }
     }
@@ -481,7 +554,7 @@ impl<L: Lane> Drain<L> {
         let mut unlanded = Vec::new();
         for (r, candidate) in rows {
             if owners.get(&r.full_username) == Some(candidate) {
-                L::record(cx.pool, cx.guard, r, Outcome::Landed).await?;
+                self.record(cx, r, Outcome::Landed).await?;
             } else {
                 unlanded.push((*r, *candidate));
             }
@@ -560,7 +633,7 @@ impl<L: Lane> Drain<L> {
                 reason,
                 cause: Defer::Batch,
             };
-            L::record(cx.pool, cx.guard, r.reservation(), outcome).await?;
+            self.record(cx, r.reservation(), outcome).await?;
         }
         Ok(())
     }
@@ -581,22 +654,22 @@ impl<L: Lane> Drain<L> {
     /// died mid-batch can leave far more than a batch's worth, and one
     /// unbounded read over all of them would make every stuck row hostage to a
     /// single timeout or unanswered key — and the rows it left behind would
-    /// wait for the next *lease acquisition*, which the active loop may not
-    /// reach for a long time.
+    /// wait for the lane's next restart, which a healthy lane may not reach
+    /// for a long time.
     ///
     /// Rows in a chunk that could not be read stay `SUBMITTING`: unknown is
     /// never read as not-yet-landed.
-    pub(super) async fn reconcile_submitting(&mut self, cx: &Cx<'_>) -> Result<(), WriterError> {
-        let Some(chain) = self.link.up().await else {
-            return Ok(());
-        };
-        let chain = &chain;
+    async fn reconcile_submitting(
+        &mut self,
+        cx: &Cx<'_>,
+        chain: &L::Chain,
+    ) -> Result<(), WriterError> {
         let stuck = L::submitting(cx.pool).await?;
         let mut parsed = Vec::with_capacity(stuck.len());
         for r in &stuck {
             match parse_candidate(r) {
                 Ok(candidate) => parsed.push((r, candidate)),
-                Err(gate) => L::record(cx.pool, cx.guard, r, gate.outcome()).await?,
+                Err(gate) => self.record(cx, r, gate.outcome()).await?,
             }
         }
         if parsed.is_empty() {
@@ -624,9 +697,9 @@ impl<L: Lane> Drain<L> {
             };
             for (r, candidate) in chunk {
                 if owners.get(&r.full_username) == Some(candidate) {
-                    L::record(cx.pool, cx.guard, r, Outcome::Observed).await?;
+                    self.record(cx, r, Outcome::Observed).await?;
                 } else {
-                    L::record(cx.pool, cx.guard, r, Outcome::Retry(L::RECONCILED)).await?;
+                    self.record(cx, r, Outcome::Retry(L::RECONCILED)).await?;
                 }
             }
         }

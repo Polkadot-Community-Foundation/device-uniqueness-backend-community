@@ -1,0 +1,70 @@
+# EXAMPLE environment overlay — the STANDARD topology (eight workloads on a
+# `testnet` build, six on `polkadot`). Not a deployed environment: every
+# `TODO` is something only you can supply, and the chart refuses to render
+# while a required one is empty.
+#
+#   helm template dub helm -f helm/values-example.yaml --set global.imageTag=<tag>
+#
+# Copy this file per environment. Keep secrets as references your deploy
+# tooling resolves (shown here as vals-style `ref+vault://` URIs), never as
+# plaintext.
+
+global:
+  envId: TODO-env-id
+  # testnet | polkadot — must match the image (release tags end in -<network>).
+  network: testnet
+  ingress:
+    host: TODO.example.org
+    # className: traefik
+    # annotations:
+    #   kubernetes.io/ingress.class: traefik
+  env:
+    PEOPLE_RPC_URL: TODO-wss-people-rpc
+    # Same network as PEOPLE_RPC_URL — dotNS claims are global and unrecoverable.
+    ASSET_HUB_RPC_URL: TODO-wss-asset-hub-rpc
+    PEOPLE_NETWORK: paseo
+    QUEUE_ENABLED: "false"
+    ATTESTER_ACCOUNT: TODO-attester-ss58
+    JWT_ED25519_PUBLIC_KEY: TODO-0x-ed25519-public-key
+  inviters:
+    invite: TODO-inviter-ss58   # owns its own nonce lane; testnet only
+
+# On a `polkadot` build, also:
+#
+# workloads:
+#   invite-tickets-api:
+#     enabled: false
+#   invite-tickets-pool:
+#     enabled: false
+#
+# and drop both invite-tickets entries from `secrets` below.
+
+workloads:
+  turn-api:
+    env:
+      TURN_PROVIDER: coturn
+      TURN_REALM: TODO.example.org
+      ICE_SERVERS: "stun:TODO.example.org:3478,turn:TODO.example.org:3478?transport=udp"
+
+secrets:
+  # One set per workload, holding ONLY what that workload declares — the
+  # Kubernetes form of the compose environment allowlists.
+  device-attestation-api:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+    JWT_ED25519_SECRET: ref+vault://TODO/dub#JWT_ED25519_SECRET
+  device-attestation-chain-writer:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+    CHAIN_WRITER_SIGNER_SURI: ref+vault://TODO/dub#CHAIN_WRITER_SIGNER_SURI
+  registration-queue:
+    DEVICE_ATTESTATION_DATABASE_URL: ref+vault://TODO/dub#DEVICE_ATTESTATION_DATABASE_URL
+  username-indexer:
+    INDEXER_DATABASE_URL: ref+vault://TODO/dub#INDEXER_DATABASE_URL
+  invite-tickets-api:
+    INVITE_TICKETS_DATABASE_URL: ref+vault://TODO/dub#INVITE_TICKETS_DATABASE_URL
+  invite-tickets-pool:
+    INVITE_TICKETS_DATABASE_URL: ref+vault://TODO/dub#INVITE_TICKETS_DATABASE_URL
+    INVITER_SIGNER_SURI: ref+vault://TODO/dub#INVITER_SIGNER_SURI
+  turn-api:
+    # TURN_PROVIDER=coturn needs TURN_SECRET; cloudflare needs TURN_API_TOKEN
+    # (plus a TURN_KEY_ID in env) instead. Never both.
+    TURN_SECRET: ref+vault://TODO/dub#TURN_SECRET
