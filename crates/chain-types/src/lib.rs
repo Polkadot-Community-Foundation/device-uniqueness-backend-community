@@ -598,6 +598,20 @@ mod tests {
         KnownRuntime {
             env: "polkadot-test",
             spec_name: "people-polkadot",
+            spec_version: 2_005_003,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test asset hub",
+            spec_name: "statemint",
+            spec_version: 2_005_003,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test",
+            spec_name: "people-polkadot",
             spec_version: 2_005_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
@@ -841,7 +855,7 @@ mod tests {
     }
 
     #[cfg(dub_network = "polkadot")]
-    const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
+    const VENDORED_VERSION: (u32, u32) = (2_005_003, 0);
     #[cfg(not(dub_network = "polkadot"))]
     const VENDORED_VERSION: (u32, u32) = (3_004_000, 6);
 
