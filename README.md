@@ -58,8 +58,10 @@ independent state machine alongside the People Chain registration.
   prerequisites it cannot create for itself.
 - **It does not issue personhood.** Device uniqueness is not proof of a person;
   it is one signal among several.
-- **It does not ship a Kubernetes chart or any deployment automation.** Docker
-  Compose is the configuration contract; port it wherever you like.
+- **It does not ship deployment automation.** Docker Compose is the
+  configuration contract. A reference Helm chart lives in [`helm/`](helm/) as a
+  guide for Kubernetes deployers — templates and example overlays, no real
+  environment values; see [operations.md](docs/operations.md#kubernetes-helm).
 
 ## One binary, every role
 

@@ -327,7 +327,14 @@ Operational invariants an agent must respect when touching the code.
   deploy-overlap guard only; the chain nonce + outbox reconciliation is the real serializer.
   Never run two writers / never scale it. The writer owns **two** lanes on one account, People
   and Asset Hub. That is safe because nonces are per chain. Both sit behind the same single
-  lease, so one lease still means one submitter on each.
+  lease, so one lease still means one submitter on each. The lanes run concurrently and fail
+  independently: a lane error other than a lost lease, or a pass that hangs, restarts **that lane
+  only** (nonce forgotten, its `SUBMITTING` rows reconciled as soon as its chain is reachable, and
+  retried on each pass until a reconcile reads them all), while the other keeps submitting. The
+  lease is renewed by one heartbeat of its own, not by the lanes, so a stalled lane cannot let it
+  lapse under the other lane or the periodic passes. Only a lost lease ends both, at once, mid-pass
+  if need be — safe because a row is marked `SUBMITTING` before its extrinsic is broadcast, so the
+  next holder's reconcile settles it.
 - **The dotNS gateway lane is a second state machine on the same row.** Usernames
   live in two independent stores with no bridge between them. People
   `Resources::UsernameOwnerOf` is written by `PeopleLite.attest`. The Asset Hub dotNS contracts

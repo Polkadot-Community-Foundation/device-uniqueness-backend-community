@@ -99,6 +99,7 @@ aes-kw = { version = "0.2", features = ["std"] }
 jsonwebtoken = "9"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 subxt-rpcs = { workspace = true, features = ["mock-rpc-client"] }

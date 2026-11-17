@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use tokio::sync::watch;
 
 use crate::chain::asset_hub::{AssetHub, ValidityWindow};
 use crate::chain::people::PeopleChain;
@@ -54,6 +55,7 @@ pub(super) struct DotnsLink {
     rpc_url: String,
     attester: [u8; 32],
     connected: Option<(AssetHub, ValidityWindow)>,
+    published: watch::Sender<Option<AssetHub>>,
     last_error: Option<String>,
     retry_at: Option<Instant>,
 }
@@ -86,6 +88,7 @@ impl DotnsLink {
     }
 
     fn record_dial_success(&mut self, up: (AssetHub, ValidityWindow)) {
+        self.published.send_replace(Some(up.0.clone()));
         self.connected = Some(up);
         self.last_error = None;
         self.retry_at = None;
@@ -104,9 +107,16 @@ impl DotnsLink {
             rpc_url,
             attester,
             connected: None,
+            published: watch::Sender::new(None),
             last_error: None,
             retry_at: None,
         }
+    }
+
+    /// Follow the connected Asset Hub client: `None` until the lane's first
+    /// successful dial, then the latest client it connected.
+    pub(super) fn subscribe(&self) -> watch::Receiver<Option<AssetHub>> {
+        self.published.subscribe()
     }
 }
 

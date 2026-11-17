@@ -680,6 +680,55 @@ async fn no_root_snapshot_means_unavailable_not_broken() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+async fn readyz_status(app: &axum::Router) -> StatusCode {
+    app.clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/readyz")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+// Missing ring roots must never take turn-api out of rotation: `/turn/issue`
+// reads no chain state, and the proof route already answers 503 per request.
+// The strict `proof_roots` check is what the gauge and all-in-one report.
+#[tokio::test]
+async fn proof_roots_never_gate_readiness() {
+    let ring = test_ring();
+    assert_eq!(readyz_status(&app(None)).await, StatusCode::OK);
+
+    let state = state_with_rate_limit(Some((proof_config(), None)), 100);
+    let roots = state.proof.as_ref().expect("proof enabled").roots.clone();
+    let app = turn::routes(state.clone());
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Err("proof-roots")
+    );
+
+    roots
+        .get(PersonhoodCollection::PeopleLite)
+        .set(snapshot_of(ring.commitment.clone()));
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Err("proof-roots")
+    );
+
+    roots
+        .get(PersonhoodCollection::People)
+        .set(snapshot_of(ring.commitment.clone()));
+    assert_eq!(readyz_status(&app).await, StatusCode::OK);
+    assert_eq!(
+        turn::http::proof_roots(state.clone()).await,
+        Ok(&["proof-roots"][..])
+    );
+}
+
 #[tokio::test]
 async fn saturated_verification_waits_for_a_slot() {
     let ring = test_ring();
