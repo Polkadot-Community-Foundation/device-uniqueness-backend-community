@@ -1,0 +1,9 @@
+apiVersion: v2
+name: dub
+description: Device Uniqueness Backend — every service from one image, one tag, one --role per workload
+type: application
+# A REFERENCE chart: the templates are the contract, the values are a guide.
+# Nothing in this repository deploys it. Copy it, or point your own deployment
+# repo at it, and supply one values file per environment (see the examples
+# next to values.yaml and docs/operations.md "Kubernetes (Helm)").
+version: 0.1.0

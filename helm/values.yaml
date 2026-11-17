@@ -1,0 +1,511 @@
+# Chart defaults — a TEMPLATE, not a deployable environment.
+#
+# Every environment-specific value (hostname, RPC endpoints, attester, JWT
+# verification key, inviter, secrets) is deliberately EMPTY here, and the chart
+# refuses to render until an environment's values file supplies it. Start from
+# values-example.yaml (standard topology) or values-small.yaml (small topology).
+#
+# The per-workload `env` keys mirror docker-compose.yml, which is the
+# configuration contract: when a service gains or loses a variable there, change
+# it here in the same change. The values below are the code/compose defaults,
+# not recommendations for any particular network.
+
+global:
+  # Names the environment. Stamped on every object as a label; any string.
+  envId: ""
+
+  # The network the image was built for — DUB_NETWORK at build time: `testnet`
+  # or `polkadot`. It decides which roles exist in the image: a `polkadot`
+  # build has no invite-tickets roles, and the chart refuses to render either
+  # invite-tickets workload against it. Must match the image tag you deploy
+  # (release images are `<tag>-<network>`).
+  network: testnet
+
+  # Namespace holding a shared notify-relay, for environments that do not
+  # deploy their own. TURN is per-environment because proof verification pins
+  # one People Chain RPC and genesis. Empty = this environment runs notify.
+  sharedServiceNamespace: ""
+
+  # ONE image, ONE tag, every workload. `imageRepo` is a full repository path,
+  # not a registry — the tag is appended directly, so moving registries is a
+  # change to this one value. What makes a workload a given service is its
+  # `--role` arg, never a per-workload image or tag.
+  imageRepo: docker.io/paritytech/device-uniqueness-backend
+  # Required; no default, because a defaulted tag deploys something nobody chose.
+  imageTag: ""
+  imagePullPolicy: IfNotPresent
+
+  ingress:
+    # Required. The one public hostname the whole API is served under.
+    host: ""
+    # The IngressClass the cluster edge watches. Set it wrong and the route is
+    # silently ignored, which looks exactly like a DNS problem. Some controllers
+    # filter on the legacy `kubernetes.io/ingress.class` annotation instead —
+    # put that under `annotations` and leave this empty.
+    className: ""
+    # ImplementationSpecific, not Prefix. The route table's prefixes are
+    # LITERAL, and the spec's `Prefix` matches on path ELEMENTS instead — under
+    # it `/api/v1/turn/` would also own the bare `/api/v1/turn`, and
+    # `/api/v1/usernames/search` would stop owning `/api/v1/usernames/searchfoo`,
+    # both divergences from the Caddy edge. Change this only for a controller
+    # whose ImplementationSpecific is not a literal prefix match.
+    pathType: ImplementationSpecific
+    # Whether this host is served over TLS. The `tls:` block is what turns TLS
+    # ON for the router, not merely where a certificate is named: with Traefik,
+    # an Ingress with no `tls:` gets a router with TLS disabled, and
+    # https://<host> then 404s at the edge while cleartext still works. Turn
+    # this off only for a genuinely HTTP-only host.
+    tls: true
+    # Empty means the cluster edge terminates with its own default certificate.
+    # Name a Secret only for a host that default does not cover.
+    tlsSecretName: ""
+    # Traefik only: which entrypoints the router listens on (the
+    # `traefik.ingress.kubernetes.io/router.entrypoints` annotation). Traefik
+    # binds a router to ALL entrypoints when nothing names one; this keeps :80
+    # shut even if TLS is terminated ahead of the controller. The chart renders
+    # no HTTP->HTTPS redirect — that is the cluster edge's business. Inert on
+    # other controllers; set empty if yours names its entrypoint differently.
+    entryPoints: websecure
+    # Optional external-dns target annotation.
+    externalDnsTarget: ""
+    annotations: {}
+
+  # Default resource requests. ESTIMATES — size them from your own load. Requests
+  # only, plus a memory limit: a CPU limit would throttle the chain writer's
+  # burst on batch submission for no benefit. Override per workload below.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  # Config inherited verbatim by every workload that lists the key in its
+  # `globalEnv`. A key read by more than one process lives HERE and only here
+  # (QUEUE_ENABLED is read by two, and a split value is silently destructive);
+  # the chart refuses a workload-local copy of a global key.
+  env:
+    BIND_ADDR: "0.0.0.0:8080"
+    # Required. The People Chain this environment serves.
+    PEOPLE_RPC_URL: ""
+    # Required. MUST be the Asset Hub of the same network as PEOPLE_RPC_URL:
+    # dotNS reservations are global, unrecoverable claims.
+    ASSET_HUB_RPC_URL: ""
+    # Wire literal stamped into rows and responses (westend2|paseo|polkadot).
+    # Read by invite-tickets only. Not the same axis as `network` above.
+    PEOPLE_NETWORK: ""
+    QUEUE_ENABLED: "false"
+    # Required. The attester account on the People Chain (SS58). The dev
+    # //Alice account is refused.
+    ATTESTER_ACCOUNT: ""
+    # Required (or JWT_JWKS_JSON). The public half of device-attestation-api's
+    # JWT_ED25519_SECRET, as 0x-hex. The committed dev key is refused.
+    JWT_ED25519_PUBLIC_KEY: ""
+    JWT_JWKS_JSON: ""
+    METRICS_ENABLED: "true"
+    METRICS_ADDR: "0.0.0.0:9090"
+    RUST_LOG: "info"
+    # One JSON object per event, which is what makes aggregated logs queryable
+    # by field. The service/environment are NOT in the body — label them from
+    # the platform's metadata in your log shipper.
+    LOG_FORMAT: "json"
+
+  # The SMALL topology's acknowledgement. Absent by default: its absence is what
+  # makes enabling all-in-one a deliberate act rather than an inherited one.
+  # allInOne:
+  #   acknowledgedSecretUnion: true
+
+  # An inviter owns a nonce lane: never point two submitters at one account.
+  # Resolved per workload via its `inviter:` key; required wherever an
+  # invite-tickets-pool runs.
+  inviters:
+    invite: ""
+
+# Secret VALUES never appear in git. Each entry is a REFERENCE your deploy
+# tooling resolves at apply time (e.g. `ref+vault://...` via vals/helm-secrets,
+# or your platform's equivalent), so a rendered manifest can be read, diffed and
+# reviewed without containing a secret. Keys are declared per workload in
+# `secretKeys` / `optionalSecretKeys`; the chart refuses a secret handed to a
+# workload that does not declare it, and refuses the committed dev values.
+#
+#   secrets:
+#     device-attestation-api:
+#       DEVICE_ATTESTATION_DATABASE_URL: ref+vault://<path>#DEVICE_ATTESTATION_DATABASE_URL
+#       JWT_ED25519_SECRET: ref+vault://<path>#JWT_ED25519_SECRET
+secrets: {}
+
+workloads:
+  # ── The SMALL topology ──────────────────────────────────────────────────
+  #
+  # Disabled here. Enabling it is mutually exclusive with the five per-service
+  # HTTP workloads below and additionally requires
+  # `global.allInOne.acknowledgedSecretUnion: true`; the chart refuses to render
+  # otherwise. See values-small.yaml, and docs/architecture.md "Deployment
+  # topologies" for what it trades away.
+  all-in-one:
+    enabled: false
+    kind: http
+    # NEVER more than one: not for correctness (the surfaces are stateless and
+    # the leases live on the three workers) but because this is the topology for
+    # deployments that did not want eight workloads — scale by moving to the
+    # standard topology.
+    replicas: 1
+    # The longest of the five, plus the migration sets and the blocking People
+    # Chain connect: username-indexer's finalized scan dominates.
+    startupSeconds: 350
+    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, PEOPLE_NETWORK, QUEUE_ENABLED, ATTESTER_ACCOUNT, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    # THE UNION, enumerated by hand rather than computed from the five services.
+    # The list growing must be a visible diff in review — that is the whole
+    # control. On a `polkadot` build there is no invite-tickets surface: override
+    # this list without INVITE_TICKETS_DATABASE_URL in that environment's file.
+    secretKeys:
+      - DEVICE_ATTESTATION_DATABASE_URL   # device attestation: full read/write
+      - INDEXER_DATABASE_URL              # the username projection
+      - INVITE_TICKETS_DATABASE_URL
+      - JWT_ED25519_SECRET                # mint an access token for ANY subject
+      - POC_HMAC_SECRET                   # forge proof-of-compute solutions
+    # The TURN credential secret is in the union too, but optional: exactly one
+    # of the two applies to the selected TURN_PROVIDER, and holding both is
+    # refused at boot. The attestation verification material and the push
+    # credentials are optional on the same terms: absent = not configured.
+    optionalSecretKeys:
+      - TURN_SECRET                       # coturn: mint relay credentials
+      - TURN_API_TOKEN                    # cloudflare: mint on the org's account
+      - DEVICE_CHECK_PRIVATE_KEY
+      - GOOGLE_CREDENTIALS
+      - PLAY_INTEGRITY_DECRYPTION_KEY
+      - PLAY_INTEGRITY_VERIFICATION_KEY
+      - WIDEVINE_DEDUP_HMAC_KEY
+      - FCM_SERVICE_ACCOUNT_JSON
+      - APNS_PRIVATE_KEY
+    env:
+      ACCESS_TOKEN_TTL_SECS: "86400"
+      REFRESH_TOKEN_TTL_SECS: "2592000"
+      CHALLENGE_TTL_SECS: "300"
+      AUTH_RATE_LIMIT: "30"
+      AUTH_RATE_WINDOW_SECS: "60"
+      AUTH_ENABLED: "false"
+      ENFORCE_AUTH: "false"
+      JWT_ISSUER: "polkadot-app"
+      ANDROID_PACKAGE_NAMES: ""
+      ANDROID_SIGNING_DIGEST_PLAYSTORE: ""
+      ANDROID_SIGNING_DIGEST_WEBSITE: ""
+      APPLE_APP_ATTEST_APP_IDS: ""
+      APPLE_TEAM_ID: ""
+      DEVICE_CHECK_IOS_ENABLED: "false"
+      DEVICE_CHECK_KEY_ID: ""
+      # Non-blank default on purpose: the config reads a blank one as-is.
+      DEVICE_CHECK_URL: "https://api.devicecheck.apple.com/v1"
+      PLAY_INTEGRITY_MODE: "strict"
+      REGISTRATION_VOUCHERS_ENABLED: "false"
+      WIDEVINE_DEDUP_ENABLED: "false"
+      WIDEVINE_DEDUP_ENFORCE: "false"
+      IOS_PACKAGE_NAMES: ""
+      DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: "600"
+      DOTNS_MAX_FUTURE_SKEW_SECS: "30"
+      SEARCH_RATE_LIMIT: "60"
+      SEARCH_RATE_LIMIT_WINDOW_SECS: "60"
+      POC_ENABLED: "false"
+      POC_DIFFICULTY_BITS: "16"
+      STORAGE_PAGE_SIZE: "1000"
+      SYNC_INTERVAL_SECS: "30"
+      SPECULATIVE_INDEXING_ENABLED: "true"
+      INVITE_TICKETS_RATE_LIMIT: "30"
+      INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS: "60"
+      TURN_RATE_LIMIT: "30"
+      TURN_RATE_LIMIT_WINDOW_SECS: "60"
+      # Credential source, as on the turn-api workload: cloudflare | coturn.
+      TURN_PROVIDER: "coturn"
+      TURN_KEY_ID: ""
+      TURN_AUTH_ALGORITHM: "SHA1"
+      TURN_PROOF_CONCURRENCY: "auto"
+      TURN_PROOF_CONTEXT_SUFFIX: "0"
+      TURN_PROOF_ENABLED: "false"
+      TURN_PROOF_GENESIS: ""
+      TURN_PROOF_PRODUCTS: ""
+      TURN_PROOF_RPC_URL: ""
+      TURN_REALM: "example.org"
+      TURN_TTL_SECS: "1800"
+      ICE_SERVERS: "stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp"
+      # APNs, as on the notify-relay workload. All four are required the moment
+      # APNS_PRIVATE_KEY holds a PEM; unset is the stub provider. This topology
+      # has no keyFile mount, so APNS_PRIVATE_KEY is the only route into it.
+      APNS_KEY_ID: ""
+      APNS_TEAM_ID: ""
+      APNS_TOPIC: ""
+      APNS_ENVIRONMENT: ""
+      NOTIFY_RATE_LIMIT: "60"
+      NOTIFY_RATE_LIMIT_WINDOW_SECS: "60"
+
+  # ── The STANDARD topology ───────────────────────────────────────────────
+
+  device-attestation-api:
+    enabled: true
+    kind: http
+    replicas: 2
+    # Startup grace, from the compose healthcheck's start_period.
+    startupSeconds: 90
+    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, QUEUE_ENABLED, ATTESTER_ACCOUNT, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [DEVICE_ATTESTATION_DATABASE_URL, JWT_ED25519_SECRET]
+    # The attestation verification material. Absent = that verifier is not
+    # configured, which is a legitimate state (the feature flags below default
+    # off), so these are optional rather than required. This is the ONLY
+    # workload that gets them; verify_compose_boundaries.sh asserts the same
+    # shape on the compose side.
+    optionalSecretKeys:
+      - DEVICE_CHECK_PRIVATE_KEY
+      - GOOGLE_CREDENTIALS
+      - PLAY_INTEGRITY_DECRYPTION_KEY
+      - PLAY_INTEGRITY_VERIFICATION_KEY
+      - WIDEVINE_DEDUP_HMAC_KEY
+    env:
+      ACCESS_TOKEN_TTL_SECS: "86400"
+      ANDROID_PACKAGE_NAMES: ""
+      ANDROID_SIGNING_DIGEST_PLAYSTORE: ""
+      ANDROID_SIGNING_DIGEST_WEBSITE: ""
+      APPLE_APP_ATTEST_APP_IDS: ""
+      APPLE_TEAM_ID: ""
+      AUTH_ENABLED: "false"
+      AUTH_RATE_LIMIT: "30"
+      AUTH_RATE_WINDOW_SECS: "60"
+      CHALLENGE_TTL_SECS: "300"
+      DEVICE_CHECK_IOS_ENABLED: "false"
+      DEVICE_CHECK_KEY_ID: ""
+      # Non-blank default on purpose: the config reads a blank one as-is.
+      DEVICE_CHECK_URL: "https://api.devicecheck.apple.com/v1"
+      DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: "600"
+      DOTNS_MAX_FUTURE_SKEW_SECS: "30"
+      ENFORCE_AUTH: "false"
+      IOS_PACKAGE_NAMES: ""
+      JWT_ISSUER: "polkadot-app"
+      PLAY_INTEGRITY_MODE: "strict"
+      REFRESH_TOKEN_TTL_SECS: "2592000"
+      REGISTRATION_VOUCHERS_ENABLED: "false"
+      WIDEVINE_DEDUP_ENABLED: "false"
+      WIDEVINE_DEDUP_ENFORCE: "false"
+
+  device-attestation-chain-writer:
+    enabled: true
+    kind: worker
+    # Single-instance: one signer = one nonce lane. Never scale.
+    singleton: true
+    replicas: 1
+    globalEnv: [PEOPLE_RPC_URL, ASSET_HUB_RPC_URL, QUEUE_ENABLED, ATTESTER_ACCOUNT, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [DEVICE_ATTESTATION_DATABASE_URL, CHAIN_WRITER_SIGNER_SURI]
+    env:
+      ATTESTER_ALLOWANCE_FLOOR: "100"
+      ATTESTER_RESOURCE_POLL_SECS: "60"
+      ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK: "10000000000"
+      CHAIN_WRITER_BATCH_SIZE: "25"
+      # The dotNS (Asset Hub) lane has its own, much tighter, budget.
+      CHAIN_WRITER_DOTNS_BATCH_SIZE: "3"
+      CHAIN_WRITER_FINALIZE_SECS: "120"
+      CHAIN_WRITER_HOLDER_ID: ""
+      CHAIN_WRITER_LEASE_NAME: "people-chain-writer"
+      CHAIN_WRITER_LEASE_TTL_SECS: "30"
+      CHAIN_WRITER_MAX_ATTEMPTS: "8"
+      CHAIN_WRITER_POLL_SECS: "2"
+      QUEUE_FALLBACK_AFTER_SECS: "60"
+
+  # testnet builds only — disable both invite-tickets workloads on `polkadot`.
+  invite-tickets-api:
+    enabled: true
+    kind: http
+    replicas: 2
+    # Startup grace, from the compose healthcheck's start_period.
+    startupSeconds: 70
+    globalEnv: [BIND_ADDR, PEOPLE_NETWORK, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [INVITE_TICKETS_DATABASE_URL]
+    env:
+      INVITE_TICKETS_RATE_LIMIT: "30"
+      INVITE_TICKETS_RATE_LIMIT_WINDOW_SECS: "60"
+
+  invite-tickets-pool:
+    enabled: true
+    kind: worker
+    # Single-instance: one signer = one nonce lane. Never scale.
+    singleton: true
+    replicas: 1
+    inviter: invite   # which global.inviters entry funds this workload
+    globalEnv: [PEOPLE_RPC_URL, PEOPLE_NETWORK, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [INVITE_TICKETS_DATABASE_URL, INVITER_SIGNER_SURI]
+    env:
+      POOL_BATCH_MAX: "100"
+      POOL_DIMS: "Game,ProofOfInk"
+      POOL_FINALIZE_SECS: "60"
+      POOL_INTERVAL_SECS: "6"
+      POOL_TARGET_SIZE: "10000"
+
+  notify-relay:
+    enabled: true
+    kind: http
+    replicas: 2
+    # Startup grace, from the compose healthcheck's start_period.
+    startupSeconds: 55
+    globalEnv: [BIND_ADDR, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    # Absent = the unconfigured stub provider, a legitimate state, so these are
+    # optional. notify-relay has no database. APNS_PRIVATE_KEY carries the
+    # signing key inline, as the PEM itself, and is read before
+    # APNS_PRIVATE_KEY_FILE, so an environment that sets it needs no keyFile.
+    optionalSecretKeys: [FCM_SERVICE_ACCOUNT_JSON, APNS_PRIVATE_KEY]
+    # The second route to the APNs signing key: a FILE rather than an env value.
+    # Set `secret: <name>` to a Kubernetes Secret holding an `apns.p8` key; it is
+    # mounted read-only. Unset = no mount AND no path variable, so iOS pushes
+    # report provider failure rather than the pod failing to start.
+    keyFile:
+      secret: ""
+      path: /run/secrets/notify
+      fileName: apns.p8
+      # The variable the service reads the path from. Rendered only when
+      # `secret` names one, so an environment with no mount gets no path.
+      envKey: APNS_PRIVATE_KEY_FILE
+      # 0440 with fsGroup 10001: owner root, group appuser, group-readable.
+      # 0400 would be root-only and the service could not open it.
+      mode: 0440
+    env:
+      APNS_ENVIRONMENT: ""
+      APNS_KEY_ID: ""
+      APNS_TEAM_ID: ""
+      APNS_TOPIC: ""
+      NOTIFY_RATE_LIMIT: "60"
+      NOTIFY_RATE_LIMIT_WINDOW_SECS: "60"
+
+  registration-queue:
+    enabled: true
+    kind: worker
+    # Single-instance: its lease guards promotion order. Never scale.
+    singleton: true
+    replicas: 1
+    globalEnv: [PEOPLE_RPC_URL, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [DEVICE_ATTESTATION_DATABASE_URL]
+    env:
+      QUEUE_ADVANCE_INTERVAL_SECS: "6"
+      QUEUE_LEASE_TTL_SECS: "30"
+
+  turn-api:
+    enabled: true
+    kind: http
+    replicas: 2
+    # Startup grace, from the compose healthcheck's start_period.
+    startupSeconds: 50
+    globalEnv: [BIND_ADDR, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    # Neither is required on its own: TURN_PROVIDER picks which one this
+    # deployment needs, and the chart requires exactly that one. TURN_API_TOKEN
+    # mints against a Cloudflare account (and is billed to it); TURN_SECRET is
+    # the HMAC key shared with a self-hosted coturn relay (`--use-auth-secret`).
+    # Setting TURN_SECRET while the provider is cloudflare is refused at boot.
+    optionalSecretKeys: [TURN_SECRET, TURN_API_TOKEN]
+    env:
+      # Credential source: cloudflare | coturn. The CODE default is cloudflare;
+      # pick one per environment and supply its secret.
+      TURN_PROVIDER: "coturn"
+      # TURN_PROVIDER=cloudflare only. Names the TURN app; not a secret.
+      TURN_KEY_ID: ""
+      # TURN_PROVIDER=coturn only, and required there alongside TURN_SECRET and
+      # TURN_REALM: nothing upstream supplies ICE servers on that provider.
+      ICE_SERVERS: "stun:stun.example.com:3478,turn:turn.example.com:3478?transport=udp"
+      TURN_RATE_LIMIT: "30"
+      TURN_RATE_LIMIT_WINDOW_SECS: "60"
+      TURN_AUTH_ALGORITHM: "SHA1"
+      TURN_PROOF_CONCURRENCY: "auto"
+      TURN_PROOF_CONTEXT_SUFFIX: "0"
+      TURN_PROOF_ENABLED: "false"
+      TURN_PROOF_GENESIS: ""
+      TURN_PROOF_PRODUCTS: ""
+      TURN_PROOF_RPC_URL: ""
+      TURN_REALM: "example.org"
+      TURN_TTL_SECS: "1800"
+
+  username-indexer:
+    enabled: true
+    kind: http
+    # The only service with a meaningful working set: it holds a projection of
+    # finalized chain state and rebuilds it on first boot.
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+    replicas: 2
+    # Startup grace, from the compose healthcheck's start_period.
+    startupSeconds: 350
+    globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, JWT_ED25519_PUBLIC_KEY, JWT_JWKS_JSON, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
+    secretKeys: [INDEXER_DATABASE_URL]
+    # Required only when POC_ENABLED is true; the service refuses to boot then.
+    optionalSecretKeys: [POC_HMAC_SECRET]
+    env:
+      POC_DIFFICULTY_BITS: "16"
+      POC_ENABLED: "false"
+      SEARCH_RATE_LIMIT: "60"
+      SEARCH_RATE_LIMIT_WINDOW_SECS: "60"
+      STORAGE_PAGE_SIZE: "1000"
+      SYNC_INTERVAL_SECS: "30"
+      SPECULATIVE_INDEXING_ENABLED: "true"
+
+# The committed API reference, served at /docs. `helm/files` is a SYMLINK to
+# docs/api-reference — the generated artifact, never a copy, so the two cannot
+# drift (`just openapi` regenerates it and a test forbids hand-edits). If you
+# copy this chart elsewhere, copy the two files into `files/` with it.
+docs:
+  enabled: true
+  # Static content only; no application image is involved.
+  image: nginxinc/nginx-unprivileged:1.27-alpine
+  replicas: 2
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# The route table: one public origin, every service behind it, rendered as
+# Ingress path rules. A HAND-KEPT copy of crates/dub/src/routes/table.rs (the
+# table gateway/Caddyfile and `--role all-in-one` use) — update it when that
+# table changes.
+#
+# There is no `priority`: an Ingress is matched longest-path-first, which agrees
+# with Caddy's first-match-wins order only while no path sits inside another
+# (the catch-all aside). Keep it that way. A route whose service is disabled in
+# this environment is skipped; in the small topology every route resolves to
+# `all-in-one`.
+routes:
+  # The committed API reference. Caddy file-serves it and STRIPS the prefix. An Ingress rule
+  # cannot rewrite, so the Helm chart's static server mounts the reference UNDER /docs and
+  # answers the unstripped path instead. Get either wrong and the server is handed
+  # /docs/openapi.json, misses, and 404s while its readiness probe stays green. Ownership
+  # parity is not path parity.
+  - name: docs
+    path: /docs
+    service: api-docs
+  # Username search is the indexer's only route under /api/v1/usernames; the rest of that
+  # prefix (the claim and availability writes, their CORS preflight) falls through to
+  # device-attestation-api.
+  - name: username-search
+    path: /api/v1/usernames/search
+    service: username-indexer
+  # The synchronous invitation-credential claim route.
+  - name: invite-tickets
+    path: /api/v1/invitation-ticket/
+    service: invite-tickets-api
+  # Each environment runs its own issuer because proof verification pins one People Chain
+  # RPC and genesis hash; routing to another environment would verify against the wrong ring.
+  - name: turn
+    path: /api/v1/turn/
+    service: turn-api
+  # Shared across environments. NOTE: this service answers an EMPTY 404 for an unmatched path and
+  # 405 for a wrong method, where every sibling answers the JSON 404 body. The
+  # whole prefix is routed here, so that is the live contract — see routes::fallback.
+  - name: notify
+    path: /api/v1/notify
+    service: notify-relay
+    shared: true
+  # Proof-of-compute gates the indexer's own public search, so it is the indexer's route.
+  # Off by default, in which case the service answers its plain-text 404.
+  - name: proof-of-compute
+    path: /api/v1/poc
+    service: username-indexer
+  # Everything else: auth, attester, username writes, JWKS, root health.
+  - name: default
+    path: /
+    service: device-attestation-api

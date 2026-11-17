@@ -4,15 +4,18 @@
 use std::time::{Duration, Instant};
 
 use subxt::utils::AccountId32;
+use tokio::sync::watch;
 
 use super::{
-    engine::Drain,
     error::WriterError,
     hex_account,
     observe::{record_outbox_gauges, record_spec_version},
-    Dotns, WriterConfig,
+    WriterConfig,
 };
-use crate::chain::people::PeopleChain;
+use crate::chain::{asset_hub::AssetHub, people::PeopleChain};
+
+/// How long one attester-resource read may take.
+const RESOURCE_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 // A job that fires on its own interval.
 struct Ticker {
@@ -38,14 +41,21 @@ impl Ticker {
 // The writer's periodic passes and when each is next due.
 pub(super) struct Passes {
     resources: Ticker,
+    /// The Asset Hub half of the resource read, on its own ticker so it is
+    /// not consumed while the dotNS lane has yet to connect: the first read
+    /// then happens as soon as the link is up, not a whole interval later.
+    asset_hub_resources: Ticker,
     stranded: Ticker,
+    asset_hub: watch::Receiver<Option<AssetHub>>,
 }
 
 impl Passes {
-    pub(super) fn new(config: &WriterConfig) -> Self {
+    pub(super) fn new(config: &WriterConfig, asset_hub: watch::Receiver<Option<AssetHub>>) -> Self {
         Self {
             resources: Ticker::new(config.resource_poll_interval),
+            asset_hub_resources: Ticker::new(config.resource_poll_interval),
             stranded: Ticker::new(config.queue_fallback_after),
+            asset_hub,
         }
     }
 
@@ -54,20 +64,27 @@ impl Passes {
         &mut self,
         pool: &sqlx::PgPool,
         chain: &PeopleChain,
-        dotns: &mut Drain<Dotns>,
         signer_account: &AccountId32,
         proxy_for: Option<[u8; 32]>,
         config: &WriterConfig,
     ) {
         if self.resources.due() {
-            if let Err(e) =
-                attester_resources(chain, dotns, signer_account, proxy_for, config).await
-            {
-                tracing::warn!(error = %e, "attester resources read failed");
-            }
+            bounded(
+                people_resources(chain, signer_account, proxy_for, config),
+                "attester resources",
+            )
+            .await;
             if let Err(e) = record_outbox_gauges(pool).await {
                 tracing::warn!(error = %e, "outbox gauge pass failed");
             }
+        }
+        let asset_hub = self.asset_hub.borrow().clone();
+        if let Some(asset_hub) = asset_hub.filter(|_| self.asset_hub_resources.due()) {
+            bounded(
+                asset_hub_resources(&asset_hub, signer_account, config),
+                "dotns attester resources",
+            )
+            .await;
         }
 
         self.queue(pool, config).await;
@@ -102,13 +119,27 @@ impl Passes {
     }
 }
 
-async fn attester_resources(
+/// Run one resource read under [`RESOURCE_READ_TIMEOUT`], logging a failure.
+async fn bounded(
+    read: impl std::future::Future<Output = Result<(), WriterError>>,
+    what: &'static str,
+) {
+    match tokio::time::timeout(RESOURCE_READ_TIMEOUT, read).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "{what} read failed"),
+        Err(_) => tracing::warn!(
+            timeout_secs = RESOURCE_READ_TIMEOUT.as_secs(),
+            "{what} read timed out"
+        ),
+    }
+}
+
+async fn people_resources(
     chain: &PeopleChain,
-    dotns: &mut Drain<Dotns>,
     signer_account: &AccountId32,
     proxy_for: Option<[u8; 32]>,
     config: &WriterConfig,
-) -> anyhow::Result<(), WriterError> {
+) -> Result<(), WriterError> {
     let allowance_account = config.attester;
     let allowance = chain.attestation_allowance(allowance_account).await?;
     let signer_balance = chain.free_balance(signer_account.0).await?;
@@ -158,42 +189,48 @@ async fn attester_resources(
             "chain-writer signer balance below floor; registrations will fail to pay fees"
         );
     }
+    Ok(())
+}
 
-    if let Some(asset_hub) = dotns.chain().await {
-        let allowance = asset_hub.attestation_allowance(allowance_account).await?;
-        let ah_signer_balance = asset_hub.free_balance(signer_account.0).await?;
-        tracing::info!(
+async fn asset_hub_resources(
+    asset_hub: &AssetHub,
+    signer_account: &AccountId32,
+    config: &WriterConfig,
+) -> Result<(), WriterError> {
+    let allowance_account = config.attester;
+    let allowance = asset_hub.attestation_allowance(allowance_account).await?;
+    let ah_signer_balance = asset_hub.free_balance(signer_account.0).await?;
+    tracing::info!(
+        allowance,
+        allowance_account = %hex_account(&allowance_account),
+        signer_balance_planck = ah_signer_balance,
+        "dotns_attester_resources"
+    );
+    metrics::gauge!("dub_dotns_attester_allowance").set(allowance as f64);
+    record_spec_version("asset-hub", asset_hub.online()).await;
+    metrics::gauge!(
+        "dub_account_free_balance_planck",
+        "role" => "signer",
+        "chain" => "asset-hub"
+    )
+    .set(ah_signer_balance as f64);
+
+    if allowance < config.allowance_floor {
+        tracing::warn!(
             allowance,
+            floor = config.allowance_floor,
             allowance_account = %hex_account(&allowance_account),
-            signer_balance_planck = ah_signer_balance,
-            "dotns_attester_resources"
+            "dotns gateway allowance below floor; reservations stop at zero"
         );
-        metrics::gauge!("dub_dotns_attester_allowance").set(allowance as f64);
-        record_spec_version("asset-hub", asset_hub.online()).await;
-        metrics::gauge!(
-            "dub_account_free_balance_planck",
-            "role" => "signer",
-            "chain" => "asset-hub"
-        )
-        .set(ah_signer_balance as f64);
-
-        if allowance < config.allowance_floor {
-            tracing::warn!(
-                allowance,
-                floor = config.allowance_floor,
-                allowance_account = %hex_account(&allowance_account),
-                "dotns gateway allowance below floor; reservations stop at zero"
-            );
-        }
-        if ah_signer_balance < config.signer_balance_floor_planck {
-            tracing::warn!(
-                signer_balance_planck = ah_signer_balance,
-                floor_planck = config.signer_balance_floor_planck,
-                signer = %hex_account(&signer_account.0),
-                "chain-writer signer balance on Asset Hub below floor; \
-                 failed reservations will not pay their fees"
-            );
-        }
+    }
+    if ah_signer_balance < config.signer_balance_floor_planck {
+        tracing::warn!(
+            signer_balance_planck = ah_signer_balance,
+            floor_planck = config.signer_balance_floor_planck,
+            signer = %hex_account(&signer_account.0),
+            "chain-writer signer balance on Asset Hub below floor; \
+             failed reservations will not pay their fees"
+        );
     }
     Ok(())
 }
