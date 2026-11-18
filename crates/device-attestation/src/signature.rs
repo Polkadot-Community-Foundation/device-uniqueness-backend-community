@@ -161,14 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn a_runtime_without_the_constant_takes_the_plain_message() {
-        // The vendored People metadata predates the constant.
+    fn the_form_follows_the_vendored_metadata() {
+        // In the vendored polkadot metadata, `PeopleLite` does not expose `SigningContext`.
         let metadata = chain_types::metadata_arc();
         assert!(metadata.pallet_by_name(PEOPLE_PALLET).is_some());
-        assert_eq!(
-            account_signature_form(&metadata, PEOPLE_PALLET),
-            AccountSignatureForm::Plain
-        );
+        let form = account_signature_form(&metadata, PEOPLE_PALLET);
+        if chain_types::NETWORK == "polkadot" {
+            assert_eq!(form, AccountSignatureForm::Plain);
+        } else {
+            assert!(matches!(form, AccountSignatureForm::InContext(_)));
+        }
         assert_eq!(
             account_signature_form(&metadata, "NoSuchPallet"),
             AccountSignatureForm::Plain

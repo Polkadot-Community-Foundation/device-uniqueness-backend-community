@@ -598,6 +598,20 @@ mod tests {
         KnownRuntime {
             env: "polkadot-test",
             spec_name: "people-polkadot",
+            spec_version: 2_005_003,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test asset hub",
+            spec_name: "statemint",
+            spec_version: 2_005_003,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot-test",
+            spec_name: "people-polkadot",
             spec_version: 2_005_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
@@ -612,12 +626,26 @@ mod tests {
         KnownRuntime {
             env: "paseo-next-v2",
             spec_name: "next-people-paseo",
+            spec_version: 3_005_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2 asset hub",
+            spec_name: "next-asset-hub-paseo",
+            spec_version: 3_005_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_V3004_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "paseo-next-v2",
+            spec_name: "next-people-paseo",
             spec_version: 3_004_000,
             tuple: TUPLE_EXTENSIONS,
             extensions: PEOPLE_V3004_EXTENSIONS,
         },
         KnownRuntime {
-            env: "paseo-next-v2 / previewnet asset hub",
+            env: "paseo-next-v2 asset hub",
             spec_name: "next-asset-hub-paseo",
             spec_version: 3_004_000,
             tuple: ASSET_HUB_TUPLE_EXTENSIONS,
@@ -841,9 +869,9 @@ mod tests {
     }
 
     #[cfg(dub_network = "polkadot")]
-    const VENDORED_VERSION: (u32, u32) = (2_005_000, 0);
+    const VENDORED_VERSION: (u32, u32) = (2_005_003, 0);
     #[cfg(not(dub_network = "polkadot"))]
-    const VENDORED_VERSION: (u32, u32) = (3_004_000, 6);
+    const VENDORED_VERSION: (u32, u32) = (3_005_000, 7);
 
     fn people_metadata() -> subxt::ArcMetadata {
         subxt::Metadata::decode_from(METADATA_BYTES)
