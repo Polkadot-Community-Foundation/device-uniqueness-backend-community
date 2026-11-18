@@ -186,6 +186,9 @@ workloads:
       AUTH_RATE_WINDOW_SECS: "60"
       AUTH_ENABLED: "false"
       ENFORCE_AUTH: "false"
+      # true answers POST /api/v1/usernames with 503 INTAKE_PAUSED, to drain the
+      # outbox ahead of a People runtime upgrade.
+      INTAKE_PAUSED: "false"
       JWT_ISSUER: "polkadot-app"
       ANDROID_PACKAGE_NAMES: ""
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ""
@@ -245,6 +248,8 @@ workloads:
     replicas: 2
     # Startup grace, from the compose healthcheck's start_period.
     startupSeconds: 90
+    # ASSET_HUB_RPC_URL: availability and the digit choice read Asset Hub,
+    # read-only; the API refuses to start without it.
     globalEnv: [BIND_ADDR, PEOPLE_RPC_URL, ASSET_HUB_RPC_URL, QUEUE_ENABLED, ATTESTER_ACCOUNT, METRICS_ENABLED, METRICS_ADDR, RUST_LOG, LOG_FORMAT]
     secretKeys: [DEVICE_ATTESTATION_DATABASE_URL, JWT_ED25519_SECRET]
     # The attestation verification material. Absent = that verifier is not
@@ -276,6 +281,9 @@ workloads:
       DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS: "600"
       DOTNS_MAX_FUTURE_SKEW_SECS: "30"
       ENFORCE_AUTH: "false"
+      # true answers POST /api/v1/usernames with 503 INTAKE_PAUSED, to drain the
+      # outbox ahead of a People runtime upgrade.
+      INTAKE_PAUSED: "false"
       IOS_PACKAGE_NAMES: ""
       JWT_ISSUER: "polkadot-app"
       PLAY_INTEGRITY_MODE: "strict"
@@ -305,6 +313,12 @@ workloads:
       CHAIN_WRITER_LEASE_TTL_SECS: "30"
       CHAIN_WRITER_MAX_ATTEMPTS: "8"
       CHAIN_WRITER_POLL_SECS: "2"
+      # Settling dotNS pending claims: the signer pays each account's
+      # LabelStore deposit, so it is off unless enabled.
+      DOTNS_SETTLE_ENABLED: "false"
+      DOTNS_SETTLE_INTERVAL_SECS: "60"
+      DOTNS_SETTLE_CLAIM_LIMIT: "10"
+      DOTNS_SETTLE_MAX_ACCOUNTS: "5"
       QUEUE_FALLBACK_AFTER_SECS: "60"
 
   # testnet builds only — disable both invite-tickets workloads on `polkadot`.

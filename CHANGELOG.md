@@ -10,6 +10,20 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Added
 
+- **The writer can settle dotNS pending claims (`DOTNS_SETTLE_ENABLED`, off
+  by default).** A gateway-minted name whose owner has no `LabelStore` stays a
+  pending claim on `DotnsPopController`, with no label in a store and no
+  `NameRegistered` event, until a signed origin settles it. With settlement on,
+  the writer walks the controller's `pendingClaimUsers`, dry-runs
+  `settlePendingClaims` for each account, and submits the ones that would go
+  through as one `Utility.force_batch` of `Revive.call`s from its signer,
+  between the dotNS lane's passes and on that lane's nonce. It maps the signer
+  in pallet-revive first if needed. **The signer pays** each account's fee and
+  new `LabelStore` deposit (about 0.53 PAS on Paseo Next). New settings
+  `DOTNS_SETTLE_INTERVAL_SECS`, `DOTNS_SETTLE_CLAIM_LIMIT` and
+  `DOTNS_SETTLE_MAX_ACCOUNTS`; new metrics `dub_dotns_settle_total{outcome}` and
+  `dub_dotns_pending_claim_accounts`. See `docs/operations.md`, "Settling
+  pending claims".
 - **Payload version `2`, for a People runtime without usernames.** When
   `PeopleLite.attest`'s consumer registration no longer carries `username` and
   `reserved_username` (paritytech/individuality-community#129),

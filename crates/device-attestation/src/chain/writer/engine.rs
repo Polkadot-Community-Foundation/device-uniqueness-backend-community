@@ -210,6 +210,37 @@ impl<L: Lane> Drain<L> {
         self.landed.swap(false, Ordering::Relaxed)
     }
 
+    /// Run `work` between this lane's passes, against its chain and with its
+    /// next account nonce, so a submission that is not a row's never races the
+    /// lane's own. `work` says whether it spent the nonce. Skipped while the
+    /// lane's chain is unreachable; a failure is logged and forgets the cached
+    /// nonce, since the one it was handed may or may not have been used.
+    pub(super) async fn aside(
+        &mut self,
+        cx: &Cx<'_>,
+        what: &'static str,
+        work: impl AsyncFnOnce(&L::Chain, u64) -> Result<bool>,
+    ) {
+        let Some(chain) = self.link.up().await else {
+            return;
+        };
+        let nonce = match self.next_nonce(cx, &chain).await {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                tracing::warn!(lane = L::NAME, what, error = %e, "nonce read failed; skipping");
+                return;
+            }
+        };
+        match work(&chain, nonce).await {
+            Ok(true) => self.nonce = Some(nonce + 1),
+            Ok(false) => {}
+            Err(e) => {
+                self.nonce = None;
+                tracing::warn!(lane = L::NAME, what, error = %e, "work between passes failed");
+            }
+        }
+    }
+
     /// Run a due reconcile against a reachable chain. Failures other than a
     /// lost lease are logged, not returned, and leave the reconcile due: the
     /// rows a failed read left behind stay `SUBMITTING`, and the next pass

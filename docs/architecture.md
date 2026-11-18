@@ -417,6 +417,23 @@ Operational invariants an agent must respect when touching the code.
   currently expose the supported `signed_at` shape, but a runtime upgrade can change it at any
   time, so it is asserted per connect and parks the lane rather than the writer.
   `dub_dotns_lane_connected` is the signal.
+- **The writer can settle dotNS pending claims, and runs that inside the dotNS lane.** The gateway
+  mints from a Root origin, which pallet-revive does not let deploy a contract, so a name whose
+  owner has no `LabelStore` stays a pending claim on `DotnsPopController` until a signed origin
+  calls `settlePendingClaims`. That call is permissionless and its signer pays the fee and the
+  store's deposit; device-name holders have no Asset Hub funds, so the writer's signer is the only party
+  placed to make it. It signs from the same account as `reserve_name`, so it shares that lane's
+  nonce and runs between the lane's passes, never beside them. Each step walks one page of the
+  controller's own enumeration of accounts with pending claims (`pendingClaimUsers`), so it needs no
+  bookkeeping of its own and also covers names other backends minted; it dry-runs each settlement
+  and submits only those that would go through, as one `Utility.force_batch` of `Revive.call`s
+  bounded by half a normal extrinsic's weight and by the signer's free balance above
+  `ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK`: `reserve_name` pays its fee up front from the same
+  balance, so settlement never spends it below what reservations need. The calls are the signer's own, never proxied: the
+  attester authority is not who pays. *Trade-off:* settling every listed account spends the
+  operator's funds on names other backends minted, so it is off unless `DOTNS_SETTLE_ENABLED` is
+  set. Nothing in DUB reads the settled label, and `DeviceNameIssued` is emitted at mint on both
+  paths, so an indexer built on it does not depend on settlement.
 - **Signing:** one canonical `ATTESTER_ACCOUNT` (SS58) names the attester authority, and **proxying
   is derived, not configured**: the writer signs `PeopleLite.attest` directly when that account is
   its own signer, and wraps it in `Proxy.proxy(real = authority, …)` otherwise. A proxied call's

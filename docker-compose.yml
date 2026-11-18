@@ -181,6 +181,12 @@ services:
       # points at, or the writer claims labels on the wrong chain. Both default
       # to Paseo Next v2; an environment that moves one moves the other.
       ASSET_HUB_RPC_URL: ${ASSET_HUB_RPC_URL:-wss://paseo-asset-hub-next-rpc.polkadot.io}
+      # Settling dotNS pending claims from the signer, which pays each account's
+      # LabelStore deposit. Off unless enabled.
+      DOTNS_SETTLE_ENABLED: ${DOTNS_SETTLE_ENABLED:-false}
+      DOTNS_SETTLE_INTERVAL_SECS: ${DOTNS_SETTLE_INTERVAL_SECS:-60}
+      DOTNS_SETTLE_CLAIM_LIMIT: ${DOTNS_SETTLE_CLAIM_LIMIT:-10}
+      DOTNS_SETTLE_MAX_ACCOUNTS: ${DOTNS_SETTLE_MAX_ACCOUNTS:-5}
       # Must match device-attestation-api's QUEUE_ENABLED: on = QUEUED rows are never
       # drained here (stranded-queue warning only); off = janitor drain.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}

@@ -9,11 +9,14 @@ use chain_client::storage;
 use chain_types::AssetHubConfig;
 use subxt::config::RpcConfigFor;
 use subxt::dynamic::{At as _, Value};
+use subxt::ext::scale_value::ValueDef;
 use subxt::utils::AccountId32;
 use subxt::OnlineClient;
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 use tokio::sync::OnceCell;
 
+use crate::chain::dotns::revive_address;
+use crate::chain::dotns::AssetHubAt;
 use crate::chain::dotns::Contracts;
 use crate::chain::people::ReservationState;
 use crate::chain::people::DISCRIMINATORS;
@@ -141,15 +144,35 @@ impl AssetHub {
     /// reverts on chain, device name included.
     pub async fn personhood_reservation(&self, name: &str) -> anyhow::Result<ReservationState> {
         let at = self.client.at_current_block().await?;
-        let contracts = self
-            .dotns
-            .get_or_try_init(|| Contracts::resolve(&at))
-            .await
-            .context("resolving the dotNS contracts from DotnsGateway::DispatcherAddress")?;
+        let contracts = self.dotns_contracts(&at).await?;
         contracts
             .reservation(&at, name)
             .await
             .with_context(|| format!("reading the dotNS reservation state of {name}"))
+    }
+
+    /// The dotNS contracts, resolved at `at` on first use.
+    pub(crate) async fn dotns_contracts(&self, at: &AssetHubAt) -> anyhow::Result<Contracts> {
+        let contracts = self
+            .dotns
+            .get_or_try_init(|| Contracts::resolve(at))
+            .await
+            .context("resolving the dotNS contracts from DotnsGateway::DispatcherAddress")?;
+        Ok(*contracts)
+    }
+
+    /// Whether pallet-revive has `account` mapped, which a signed origin needs
+    /// before it can call a contract.
+    pub async fn is_revive_mapped(&self, account: &[u8; 32]) -> anyhow::Result<bool> {
+        if account[20..] == [0xee; 12] {
+            // Ethereum-derived accounts are mapped without a storage entry.
+            return Ok(true);
+        }
+        let address = revive_address(account);
+        let at = self.client.at_current_block().await?;
+        let entry = subxt::dynamic::storage::<_, AccountId32>("Revive", "OriginalAccount");
+        let original = at.storage().try_fetch(entry, (address,)).await?;
+        Ok(original.is_some())
     }
 
     pub async fn lite_label_owners(
@@ -227,6 +250,37 @@ impl AssetHub {
                 ))
                 .context("reading DotnsGateway::MaxFutureSkewSeconds")?,
         })
+    }
+
+    /// The `(ref_time, proof_size)` weight one normal extrinsic may use:
+    /// `System::BlockWeights.per_class.normal.max_extrinsic`.
+    pub async fn max_extrinsic_weight(&self) -> anyhow::Result<(u64, u64)> {
+        let at = self.client.at_current_block().await?;
+        let weights: Value = at
+            .constants()
+            .entry(subxt::dynamic::constant::<Value>("System", "BlockWeights"))
+            .context("reading System::BlockWeights")?;
+        let max = weights
+            .at("per_class")
+            .and_then(|classes| classes.at("normal"))
+            .and_then(|normal| normal.at("max_extrinsic"))
+            .context("BlockWeights has no per_class.normal.max_extrinsic")?;
+        let ValueDef::Variant(max) = &max.value else {
+            anyhow::bail!("max_extrinsic is not an Option");
+        };
+        let weight = max
+            .values
+            .values()
+            .next()
+            .context("normal extrinsics have no max_extrinsic")?;
+        let part = |name: &str| {
+            weight
+                .at(name)
+                .and_then(Value::as_u128)
+                .and_then(|part| u64::try_from(part).ok())
+                .with_context(|| format!("max_extrinsic has no {name}"))
+        };
+        Ok((part("ref_time")?, part("proof_size")?))
     }
 
     pub async fn next_nonce(&self, account: &AccountId32) -> anyhow::Result<u64> {

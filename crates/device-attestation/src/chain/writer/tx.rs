@@ -4,6 +4,7 @@
 use subxt::{
     dynamic::{self, Value},
     tx::DynamicPayload,
+    utils::H160,
 };
 
 use crate::chain::attest::PayloadVersion;
@@ -181,6 +182,52 @@ fn attest_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
 
 fn sr25519_signature(bytes: &[u8]) -> Value {
     Value::unnamed_variant("Sr25519", [Value::from_bytes(bytes)])
+}
+
+/// One `Revive.call` from the signer, with no value transferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContractCall<'a> {
+    /// The contract called.
+    pub dest: H160,
+    /// The `(ref_time, proof_size)` weight limit.
+    pub weight_limit: (u64, u64),
+    /// The most storage deposit the call may charge, in planck.
+    pub storage_deposit_limit: u128,
+    /// The ABI calldata.
+    pub data: &'a [u8],
+}
+
+/// `Utility.force_batch` of `calls`, each a `Revive.call` from the signer
+/// itself, never proxied: the signer pays for them.
+pub(super) fn build_contract_batch_tx(calls: &[ContractCall<'_>]) -> DynamicPayload<Vec<Value>> {
+    let calls = Value::unnamed_composite(calls.iter().map(revive_call).collect::<Vec<_>>());
+    dynamic::tx("Utility", "force_batch", vec![calls])
+}
+
+/// `Revive.map_account`, which pallet-revive requires of a signed origin before
+/// it can call a contract.
+pub(super) fn build_map_account_tx() -> DynamicPayload<Vec<Value>> {
+    dynamic::tx("Revive", "map_account", Vec::new())
+}
+
+fn revive_call(call: &ContractCall<'_>) -> Value {
+    let (ref_time, proof_size) = call.weight_limit;
+    Value::unnamed_variant(
+        "Revive",
+        [Value::unnamed_variant(
+            "call",
+            [
+                Value::from_bytes(call.dest.as_bytes()),
+                Value::u128(0),
+                Value::named_composite([
+                    ("ref_time", Value::u128(u128::from(ref_time))),
+                    ("proof_size", Value::u128(u128::from(proof_size))),
+                ]),
+                Value::u128(call.storage_deposit_limit),
+                Value::from_bytes(call.data),
+            ],
+        )],
+    )
 }
 
 #[cfg(test)]
@@ -396,6 +443,34 @@ mod tests {
             AttestShape::try_from(&*metadata).expect("vendored attest has a known shape"),
             AttestShape::WithUsername,
             "the vendored runtime takes format 1, which the fixture row carries"
+        );
+    }
+
+    #[test]
+    fn a_contract_batch_is_a_force_batch_of_revive_calls() {
+        let data = [1, 2, 3];
+        let call = ContractCall {
+            dest: H160::repeat_byte(7),
+            weight_limit: (10, 20),
+            storage_deposit_limit: 30,
+            data: &data,
+        };
+
+        let payload = build_contract_batch_tx(&[call, call]);
+
+        assert_eq!(payload.pallet_name(), "Utility", "never proxied");
+        assert_eq!(
+            payload.call_name(),
+            "force_batch",
+            "one item failing spares the rest"
+        );
+        assert_eq!(
+            payload.call_data(),
+            &vec![Value::unnamed_composite([
+                revive_call(&call),
+                revive_call(&call)
+            ])],
+            "one Revive.call per settlement, in order"
         );
     }
 }
