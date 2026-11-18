@@ -8,6 +8,24 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-17
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3005000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
+### Changed
+
+- **Vendored metadata refreshed for both networks.** `polkadot` now builds
+  against People and Asset Hub `2005003` (polkadot-test v2.5.3), and `testnet`
+  against `next-people-paseo` / `next-asset-hub-paseo` `3005000`
+  (paseo-next-v2 v0.3.5). The previous runtimes (`2005000`, `3004000`) stay in
+  `KNOWN_RUNTIMES`, so a binary pointed at a node that has not upgraded yet
+  still signs.
+
 ## [0.8.1] - 2026-11-16
 
 Runtime versions this release targets:
