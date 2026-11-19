@@ -8,6 +8,25 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-19
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3005000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
+**Upgrading from 0.8.x.** `device-attestation-api` and `all-in-one` refuse to
+start without `ASSET_HUB_RPC_URL`, which must name the same network as
+`PEOPLE_RPC_URL` (the compose default is Paseo, so a `polkadot` deployment
+overrides it). Every claim now also reads Asset Hub, so that RPC is on the
+claim path. Migrations `0012` and `0013` run on first boot, after which a 0.8.x
+binary will not start against the database: take a snapshot first if you need
+a way back. This release supports the People runtime both before and after
+the username removal (paritytech/individuality-community#129); the username
+indexer still reads People and needs a later release once that runtime ships.
+
 ### Added
 
 - **A JWT subject holds at most 3 open username claims at a time
@@ -90,14 +109,6 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   submits to Asset Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
   before upgrading; it must name the same network as `PEOPLE_RPC_URL`.
 
-- **TURN reports `proof-roots` without gating on it.** With
-  `TURN_PROOF_ENABLED`, `dub_dependency_up{component="proof-roots"}` drops to
-  `0` while either personhood collection has no ring roots younger than ten
-  minutes, and `all-in-one` reports it as a degraded component and stays
-  ready. `turn-api`'s own `/readyz` lists `"proof-roots": "up"` once both are
-  loaded but never answers `503` for it: a slow or dead People Chain leaves
-  `/api/v1/turn/issue` in rotation, and only proofs answer `503`.
-
 - **The writer's "already landed" read and `/readyz` survive the People
   runtime's username removal.** On a runtime whose `attest` takes no username,
   a People row counts as landed once its candidate has a `Resources::Consumers`
@@ -136,6 +147,46 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
   `LitePeopleCollectionNotCreated`. Those park the row like an unfunded
   signer, so running out of attestation allowance can no longer fail the whole
   outbox. Errors from other pallets or the transport keep the retry budget.
+
+## [0.8.2] - 2026-11-17
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3005000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
+### Changed
+
+- **Vendored metadata refreshed for both networks.** `polkadot` now builds
+  against People and Asset Hub `2005003` (polkadot-test v2.5.3), and `testnet`
+  against `next-people-paseo` / `next-asset-hub-paseo` `3005000`
+  (paseo-next-v2 v0.3.5). The previous runtimes (`2005000`, `3004000`) stay in
+  `KNOWN_RUNTIMES`, so a binary pointed at a node that has not upgraded yet
+  still signs.
+
+## [0.8.1] - 2026-11-16
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3004000      |
+| `polkadot` | `people-polkadot`   | 2005000      |
+
+### Changed
+
+- **TURN reports `proof-roots` without gating on it.** With
+  `TURN_PROOF_ENABLED`, `dub_dependency_up{component="proof-roots"}` drops to
+  `0` while either personhood collection has no ring roots younger than ten
+  minutes, and `all-in-one` reports it as a degraded component and stays
+  ready. `turn-api`'s own `/readyz` lists `"proof-roots": "up"` once both are
+  loaded but never answers `503` for it: a slow or dead People Chain leaves
+  `/api/v1/turn/issue` in rotation, and only proofs answer `503`.
+
+### Fixed
+
 - **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
   against the People Chain's rings, as `turn-api` does, where it used to
   answer every one with `503 ring roots not yet available`.
@@ -788,7 +839,10 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.9.0
+[0.8.2]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.2
+[0.8.1]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.1
 
 [0.8.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.0
 
