@@ -209,18 +209,6 @@ impl<L: Lane> Drain<L> {
         self.landed.swap(false, Ordering::Relaxed)
     }
 
-    /// PCF fork: forget the cached nonce after another submission from this
-    /// lane's account.
-    pub(super) fn reset_nonce(&mut self) {
-        self.nonce = None;
-    }
-
-    /// PCF fork: this lane's chain for a one-off read, dialling if it is due a
-    /// retry. `None` while the lane is parked.
-    pub(super) async fn chain(&mut self) -> Option<L::Chain> {
-        self.link.up().await
-    }
-
     /// Run a due reconcile against a reachable chain. Failures other than a
     /// lost lease are logged, not returned, and leave the reconcile due: the
     /// rows a failed read left behind stay `SUBMITTING`, and the next pass
