@@ -18,6 +18,11 @@ pub struct Config {
     pub jwt_issuer: String,
     /// People Chain RPC endpoint for read-path chain queries.
     pub people_rpc_url: String,
+    /// Asset Hub RPC endpoint, read for `LiteLabelOwner` (availability and
+    /// the intake's digit choice). Must be the Asset Hub of the network
+    /// `people_rpc_url` names. Required: once the People runtime keeps no
+    /// usernames, Asset Hub is the only place a name lives.
+    pub asset_hub_rpc_url: String,
     /// Attester authority: published by `GET /api/v1/attester` as `0x`+hex and
     /// attested as by device-attestation-chain-writer, from one shared value.
     pub attester_account: [u8; 32],
@@ -41,6 +46,18 @@ pub struct Config {
     /// `true` recognises `lifetimePoUDVoucher` on `POST /api/v1/usernames`;
     /// `false` (default) ignores the field, keeping the frozen wire.
     pub registration_vouchers_enabled: bool,
+    /// Intake switch for an outbox drain: `true` answers every
+    /// `POST /api/v1/usernames` with a `503` before it reads anything, so no
+    /// new row enters the outbox while the writer finishes the ones there.
+    /// Set ahead of a People runtime upgrade that changes `attest`.
+    pub intake_paused: bool,
+    /// The most open claims one JWT subject may hold at once, on any base
+    /// (`USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT`, default 3): rows that have not
+    /// landed and still hold a discriminator (see `outbox::open_claims`).
+    /// Another claim by that subject gets a `409` until one lands or a failure
+    /// ages out. `None` (set to `0`) means no cap. Voucher claims are never
+    /// capped.
+    pub max_open_claims_per_subject: Option<std::num::NonZeroU16>,
     /// Max age, in seconds, of `dotns.signedAt` (the intake freshness bound).
     pub dotns_intake_freshness_max_age_secs: u32,
     /// Max future skew, in seconds, tolerated on `dotns.signedAt`.
@@ -205,6 +222,7 @@ impl Config {
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "polkadot-app".to_string()),
             people_rpc_url: std::env::var("PEOPLE_RPC_URL")
                 .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string()),
+            asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
             attester_account: attester_account_from_env()?,
             access_ttl: Duration::from_secs(parse_var("ACCESS_TOKEN_TTL_SECS", "86400")?),
             refresh_ttl: Duration::from_secs(parse_var("REFRESH_TOKEN_TTL_SECS", "2592000")?),
@@ -215,6 +233,11 @@ impl Config {
             enforce_auth,
             queue_enabled: env_bool("QUEUE_ENABLED", false)?,
             registration_vouchers_enabled: env_bool("REGISTRATION_VOUCHERS_ENABLED", false)?,
+            intake_paused: env_bool("INTAKE_PAUSED", false)?,
+            max_open_claims_per_subject: std::num::NonZeroU16::new(parse_var(
+                "USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT",
+                "3",
+            )?),
             dotns_intake_freshness_max_age_secs: parse_var(
                 "DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS",
                 "600",
@@ -256,6 +279,7 @@ impl Config {
             jwt_secret: SecretBox::new(Box::new([7u8; 32])),
             jwt_issuer: "polkadot-app".to_string(),
             people_rpc_url: "unused".to_string(),
+            asset_hub_rpc_url: "unused".to_string(),
             attester_account: [0xaa; 32],
             access_ttl: Duration::from_secs(86_400),
             refresh_ttl: Duration::from_secs(2_592_000),
@@ -266,6 +290,8 @@ impl Config {
             enforce_auth: false,
             queue_enabled: false,
             registration_vouchers_enabled: false,
+            intake_paused: false,
+            max_open_claims_per_subject: std::num::NonZeroU16::new(3),
             dotns_intake_freshness_max_age_secs: 600,
             dotns_max_future_skew_secs: 600,
             apple_app_attest_app_ids: Vec::new(),
@@ -782,6 +808,7 @@ mod tests {
         const VARS: &[&str] = &[
             "DEVICE_ATTESTATION_DATABASE_URL",
             "JWT_ED25519_SECRET",
+            "ASSET_HUB_RPC_URL",
             "ATTESTER_ACCOUNT",
             "AUTH_ENABLED",
             "APPLE_APP_ATTEST_APP_IDS",
@@ -807,6 +834,8 @@ mod tests {
         std::env::set_var("DEVICE_ATTESTATION_DATABASE_URL", "postgres://unused");
         missing("JWT_ED25519_SECRET");
         std::env::set_var("JWT_ED25519_SECRET", hex::encode([1u8; 32]));
+        missing("ASSET_HUB_RPC_URL");
+        std::env::set_var("ASSET_HUB_RPC_URL", "wss://asset-hub.example");
         missing("ATTESTER_ACCOUNT");
         std::env::set_var(
             "ATTESTER_ACCOUNT",

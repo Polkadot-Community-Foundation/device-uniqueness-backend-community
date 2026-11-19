@@ -8,7 +8,7 @@ use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
 use time::OffsetDateTime;
 
 use super::{
-    engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
+    engine::{finalize, parse_candidate, Cx, PARK_BACKOFF_SECS},
     error::{Op, WriterError},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
@@ -275,7 +275,7 @@ impl Lane for Dotns {
                     id = r.id,
                     username = %r.full_username,
                     attempt = r.dotns_attempt,
-                    backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
+                    backoff_secs = PARK_BACKOFF_SECS,
                     reason,
                     "dotns reservation parked without spending an attempt; \
                      the signer cannot pay fees"

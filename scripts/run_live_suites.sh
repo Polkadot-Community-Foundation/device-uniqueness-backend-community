@@ -96,7 +96,7 @@ if [ "$mode" = "chain" ]; then
   exit 0
 fi
 
-# Deterministic database-only gate: 12 suites / 30 ignored tests. Keep this
+# Deterministic database-only gate: 12 suites / 34 ignored tests. Keep this
 # list here so local tests, CI, and coverage all execute the same catalog.
 for suite in allocation_live auth_live outbox_live dotns_live queue_live voucher_live; do
   DEVICE_ATTESTATION_TEST_DATABASE_URL="$device_attestation_url" \

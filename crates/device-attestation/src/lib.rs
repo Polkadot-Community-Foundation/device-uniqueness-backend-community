@@ -120,3 +120,31 @@ pub(crate) fn check_pallet_call_args(
         found: fields.iter().map(extractor).collect::<Vec<_>>().join(", "),
     })
 }
+
+/// Checks the pallet call's argument names, in order, ignoring their types.
+///
+/// For a call whose argument types this backend reads from the live metadata
+/// rather than the vendored one (`PeopleLite::attest`, see
+/// [`chain::attest::AttestShape`]). Type ids are indices into each runtime's
+/// own type registry, so they cannot be compared across a runtime upgrade.
+pub(crate) fn check_pallet_call_arg_names(
+    expected: &[Field<PortableForm>],
+    pallet: Pallet,
+    fields: &[Field<PortableForm>],
+) -> Result<(), PalletCallArgsShapeError> {
+    let names = |fields: &[Field<PortableForm>]| -> Vec<String> {
+        fields
+            .iter()
+            .map(|field| field.name.clone().unwrap_or_else(|| "<unnamed>".to_owned()))
+            .collect()
+    };
+    let (expected, found) = (names(expected), names(fields));
+    if expected == found {
+        return Ok(());
+    }
+    Err(PalletCallArgsShapeError {
+        pallet,
+        expected: expected.join(", "),
+        found: found.join(", "),
+    })
+}

@@ -8,6 +8,146 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-19
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3005000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
+**Upgrading from 0.8.x.** `device-attestation-api` and `all-in-one` refuse to
+start without `ASSET_HUB_RPC_URL`, which must name the same network as
+`PEOPLE_RPC_URL` (the compose default is Paseo, so a `polkadot` deployment
+overrides it). Every claim now also reads Asset Hub, so that RPC is on the
+claim path. Migrations `0012` and `0013` run on first boot, after which a 0.8.x
+binary will not start against the database: take a snapshot first if you need
+a way back. This release supports the People runtime both before and after
+the username removal (paritytech/individuality-community#129); the username
+indexer still reads People and needs a later release once that runtime ships.
+
+### Added
+
+- **A JWT subject holds at most 3 open username claims at a time
+  (`USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT`, `0` disables).** An open claim is a
+  row that has not landed and still holds a discriminator: `QUEUED`,
+  `RESERVED`, `SUBMITTING` or `RETRY_AFTER`, or `FAILED_TERMINAL` within the
+  30 minutes its discriminator is held. The count spans every base. A subject
+  that already holds that many gets a `409` (`Too many pending username claims
+  for this account. Try again once one completes.`) until one lands or a
+  failure ages out. Because recent failures count, a claim that fails fast
+  frees no slot early, so one subject cycling claims that are meant to fail
+  cannot hold more than the cap's worth of discriminators. The cap is the
+  subject's own, so other subjects' claims never use it up. Concurrent claims
+  are serialised per subject, so the cap holds under load. Voucher claims are
+  exempt. Migration `0013` indexes the count.
+- **`consumerRegistrationSignature` is verified, at intake and before
+  submission.** It used to be checked for shape only, so a claim with a
+  correct `candidateSignature` and random bytes here was accepted, took a
+  discriminator, and failed on chain after the signer paid its fee. Intake now
+  rebuilds the payload the runtime verifies, `(account, verifier,
+  identifierKey, base, reservedUsername)` for format `1` and `(account,
+  verifier, identifierKey)` for format `2`, with `ATTESTER_ACCOUNT` as the
+  verifier, and answers a signature that does not verify with a `400` on that
+  field. The writer's gate checks it again, so rows stored before this release
+  fail without paying a fee. Clients that sign as the runtime expects see no
+  change.
+- **The writer can settle dotNS pending claims (`DOTNS_SETTLE_ENABLED`, off
+  by default).** A gateway-minted name whose owner has no `LabelStore` stays a
+  pending claim on `DotnsPopController`, with no label in a store and no
+  `NameRegistered` event, until a signed origin settles it. With settlement on,
+  the writer walks the controller's `pendingClaimUsers`, dry-runs
+  `settlePendingClaims` for each account, and submits the ones that would go
+  through as one `Utility.force_batch` of `Revive.call`s from its signer,
+  between the dotNS lane's passes and on that lane's nonce. It maps the signer
+  in pallet-revive first if needed. **The signer pays** each account's fee and
+  new `LabelStore` deposit (about 0.53 PAS on Paseo Next). New settings
+  `DOTNS_SETTLE_INTERVAL_SECS`, `DOTNS_SETTLE_CLAIM_LIMIT` and
+  `DOTNS_SETTLE_MAX_ACCOUNTS`; new metrics `dub_dotns_settle_total{outcome}` and
+  `dub_dotns_pending_claim_accounts`. See `docs/operations.md`, "Settling
+  pending claims".
+- **Payload version `2`, for a People runtime without usernames.** When
+  `PeopleLite.attest`'s consumer registration no longer carries `username` and
+  `reserved_username` (paritytech/individuality-community#129),
+  `consumerRegistrationSignature` covers `(account, verifier, identifierKey)`
+  only, and clients declare `payloadVersion: 2`. The backend reads the shape
+  from the live People runtime rather than the vendored metadata, so this
+  release works before and after that upgrade. Intake accepts only the version
+  the connected runtime takes and answers any other with a `400` on
+  `payloadVersion`. The writer builds `attest` in the matching shape, fails a
+  format-`1` row once the runtime has dropped the username (the client must
+  re-sign), and defers a format-`2` row while the runtime still takes it. The
+  boot check on `attest` now compares argument names and accepts either
+  consumer shape, instead of requiring the vendored types.
+
+- **An outbox drain for a People runtime upgrade.** `INTAKE_PAUSED=true` makes
+  `POST /api/v1/usernames` answer `503` `INTAKE_PAUSED` before it reads or
+  writes anything, while the writer and the queue advancer keep going.
+  `dub --outbox-drained` exits `0` once every People-lane row is `ASSIGNED` or
+  `FAILED_TERMINAL`, and otherwise lists what is left per status and exits
+  `1`. The writer publishes the same count as `dub_outbox_undrained`. See
+  `docs/operations.md`, "Draining the outbox for a People runtime upgrade".
+
+### Changed
+
+- **The reserved personhood name is checked on the dotNS contracts.** Intake
+  answers `409` and availability reports `EXHAUSTED` when the bare name exists
+  on `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its
+  `DotnsPopController` reservation queue is full, read on Asset Hub, as well as
+  on People while its runtime keeps usernames. Before, a claim like that was
+  accepted and then reverted on chain, taking the device name with it. No new
+  configuration: the contracts are found from
+  `DotnsGateway::DispatcherAddress`.
+- **`device-attestation-api` now needs `ASSET_HUB_RPC_URL`, and refuses to
+  start without it.** Availability and the intake's digit choice read Asset
+  Hub's `DotnsGateway::LiteLabelOwner`, as well as People's
+  `Resources::UsernameOwnerOf` while the People runtime still keeps usernames.
+  Once it does not (paritytech/individuality-community#129), the People reads
+  stop; a base is still `EXHAUSTED` over a taken or full personhood name, read
+  from the dotNS contracts (above). The API connects read-only and never
+  submits to Asset Hub. Set `ASSET_HUB_RPC_URL` for `device-attestation-api` (and `all-in-one`)
+  before upgrading; it must name the same network as `PEOPLE_RPC_URL`.
+
+- **The writer's "already landed" read and `/readyz` survive the People
+  runtime's username removal.** On a runtime whose `attest` takes no username,
+  a People row counts as landed once its candidate has a `Resources::Consumers`
+  record, instead of reading the removed `Resources::UsernameOwnerOf`.
+  `/readyz`'s People Chain probe reads a `PeopleLite::AttestationAllowance` key
+  instead of a `UsernameOwnerOf` one, so readiness stays green through that
+  upgrade.
+
+### Fixed
+
+- **A failed claim no longer holds its username for ever.** A
+  `FAILED_TERMINAL` outbox row used to keep its discriminator permanently, so
+  99 failed claims, garbage ones included, exhausted a base for good. It now
+  releases the discriminator 30 minutes after failing
+  (`FAILED_DISCRIMINATOR_HOLD`). Migration `0012` replaces the table-wide
+  unique constraint on `full_username` with a partial unique index that skips
+  failed rows. To make the release safe, People registration transactions are
+  now **mortal for 64 blocks** where they used to be immortal: a transaction
+  not included in that window is dropped and the row is resubmitted under a
+  fresh nonce. The window counts from the finalized block, or from the best
+  block while finality lags more than 32 blocks behind it, so a finality stall
+  cannot make every transaction dead on arrival and fail the outbox. The node
+  refuses an expired transaction as `Transaction has a bad signature` (the
+  runtime checks it against a later block's hash), and a birth block reorged
+  off the best chain the same way. The writer defers either, like an ancient
+  birth block, without spending an attempt, and signs afresh on the next pass.
+- **A rejected claim fails on the first pass instead of paying for eight.**
+  The writer used to fail at once only on three `Resources` reservation
+  errors. Any other rejection of the claim, such as a bad
+  `proofOfOwnership` that only had its shape checked at intake, was
+  resubmitted up to `CHAIN_WRITER_MAX_ATTEMPTS`
+  times, with a fee each time. Now every `PeopleLite::*` / `Resources::*`
+  dispatch error fails the row immediately, except four that are about the
+  attester or the network: `NoAttestationAllowance`,
+  `PaidRegistrationLimitReached`, `TooManyLitePeople` and
+  `LitePeopleCollectionNotCreated`. Those park the row like an unfunded
+  signer, so running out of attestation allowance can no longer fail the whole
+  outbox. Errors from other pallets or the transport keep the retry budget.
+
 ## [0.8.2] - 2026-11-17
 
 Runtime versions this release targets:
@@ -699,7 +839,10 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.9.0
+[0.8.2]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.2
+[0.8.1]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.1
 
 [0.8.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.0
 

@@ -26,3 +26,15 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
 
     Ok(pool)
 }
+
+/// Connect to Postgres without applying migrations, for an operator check
+/// that only reads. Run against a database a newer or older release owns, it
+/// must not change the schema under that release.
+pub async fn connect_without_migrating(database_url: &str) -> anyhow::Result<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(database_url)
+        .await
+        .context("connecting to Postgres")
+}
