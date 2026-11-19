@@ -105,17 +105,19 @@ for key in DOTNS_INTAKE_FRESHNESS_MAX_AGE_SECS DOTNS_MAX_FUTURE_SKEW_SECS; do
   done
 done
 
-# The Asset Hub connection and the attester identity belong to the writer. It is
-# the only process that submits there. The dotNS lane is not optional, so a
-# writer without ASSET_HUB_RPC_URL aborts at boot rather than running half a
-# registration. ATTESTER_ACCOUNT names the authority on
-# both chains and the writer derives proxying from it, so the two must be one
-# value. device-attestation-api needs it too, since it serves GET /api/v1/attester.
-# Nothing else does, and no other service opens an Asset Hub connection.
+# The writer is the only process that submits to Asset Hub. The dotNS lane is
+# not optional, so a writer without ASSET_HUB_RPC_URL aborts at boot rather than
+# running half a registration. device-attestation-api reads LiteLabelOwner for
+# availability and the intake's digit choice, and never submits; it holds no
+# signer. ATTESTER_ACCOUNT names the authority on both chains and the writer
+# derives proxying from it, so the two must be one value. device-attestation-api
+# needs it too, since it serves GET /api/v1/attester. No other service opens an
+# Asset Hub connection.
 require_key device-attestation-chain-writer ASSET_HUB_RPC_URL
+require_key device-attestation-api ASSET_HUB_RPC_URL
 require_key device-attestation-chain-writer ATTESTER_ACCOUNT
 require_key device-attestation-api ATTESTER_ACCOUNT
-for service in device-attestation-api registration-queue username-indexer \
+for service in registration-queue username-indexer \
                invite-tickets-api invite-tickets-pool turn-api \
                notify-relay; do
   forbid_key "$service" ASSET_HUB_RPC_URL

@@ -295,7 +295,7 @@ chart every time, so a `fail` here is the last check that always runs.
      where the Asset Hub belongs to the same network as the People chain; the
      chart can at least refuse the case where there is no Asset Hub at all. */}}
 {{- if not $g.env.ASSET_HUB_RPC_URL }}
-{{- fail "ASSET_HUB_RPC_URL is empty — the dotNS lane is not optional and the writer aborts at boot without it" }}
+{{- fail "ASSET_HUB_RPC_URL is empty — the writer and device-attestation-api (or all-in-one) abort at boot without it" }}
 {{- end }}
 {{- if not (hasKey $enabled "device-attestation-chain-writer") }}
 {{- fail "device-attestation-chain-writer is not deployed — dotNS intake would be accepted and never submitted" }}

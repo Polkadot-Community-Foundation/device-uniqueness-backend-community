@@ -30,6 +30,11 @@ pub enum UsernamesError {
     },
     #[error("no digits available")]
     NoDigitsAvailable { base: String },
+    /// The subject already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` open
+    /// claims (409). Temporary: it clears as they land or their failures age
+    /// out.
+    #[error("too many open claims for subject")]
+    TooManyOpenClaims,
     /// The selected `base.digits` was taken concurrently (409).
     #[error("username already taken")]
     UsernameTaken {
@@ -86,6 +91,10 @@ pub enum UsernamesError {
     /// client retries.
     #[error("device evidence verification unavailable")]
     DeviceEvidenceUnavailable,
+    /// `INTAKE_PAUSED` is set: the outbox is draining ahead of a People
+    /// runtime upgrade, and no claim is taken until it is unset (503).
+    #[error("registration intake paused")]
+    IntakePaused,
     /// Unexpected internal failure; logged, surfaced opaquely (500).
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -115,6 +124,14 @@ impl IntoResponse for UsernamesError {
             UsernamesError::NoDigitsAvailable { base } => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": format!("No digits available for username {base}.") })),
+            )
+                .into_response(),
+            UsernamesError::TooManyOpenClaims => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "Too many pending username claims for this account. \
+                              Try again once one completes."
+                })),
             )
                 .into_response(),
             // No "re-submit without dotns.reservedUsername" escape hatch: every
@@ -196,6 +213,14 @@ impl IntoResponse for UsernamesError {
                 Json(json!({
                     "error": "DEVICE_EVIDENCE_UNAVAILABLE",
                     "message": "device evidence verification unavailable"
+                })),
+            )
+                .into_response(),
+            UsernamesError::IntakePaused => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "INTAKE_PAUSED",
+                    "message": "registration is paused for a chain upgrade; retry later"
                 })),
             )
                 .into_response(),

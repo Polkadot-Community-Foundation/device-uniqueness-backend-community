@@ -11,6 +11,7 @@ use secrecy::ExposeSecret as _;
 
 use crate::auth::key_attest::crl::CrlCache;
 use crate::auth::play_integrity::google::GoogleDecoder;
+use crate::chain::asset_hub::AssetHub;
 use crate::chain::PeopleChain;
 use crate::config::Config;
 use crate::device_check;
@@ -22,6 +23,8 @@ pub struct AppState {
     pub pool: PgPool,
     /// People Chain read client.
     pub chain: PeopleChain,
+    /// Asset Hub read client, for `LiteLabelOwner`. Never submits.
+    pub asset_hub: AssetHub,
     /// JWT issuer (Ed25519).
     pub jwt: Arc<Jwt>,
     pub config: Arc<Config>,
@@ -45,7 +48,13 @@ impl http_common::HasJwtVerifier for AppState {
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, chain: PeopleChain, jwt: Jwt, config: Config) -> Self {
+    pub fn new(
+        pool: PgPool,
+        chain: PeopleChain,
+        asset_hub: AssetHub,
+        jwt: Jwt,
+        config: Config,
+    ) -> Self {
         let limiter = RateLimiter::new(
             RateLimiterConfig::default()
                 .set_window_secs(config.auth_rate_window.as_secs())
@@ -76,6 +85,7 @@ impl AppState {
         Self {
             pool,
             chain,
+            asset_hub,
             jwt: Arc::new(jwt),
             config: Arc::new(config),
             limiter,

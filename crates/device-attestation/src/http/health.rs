@@ -11,6 +11,7 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use super::state::AppState;
+use crate::chain::asset_hub::AssetHub;
 
 /// Build the health router (mounted at the root, not under `/api/v1`).
 pub fn router() -> Router<AppState> {
@@ -63,42 +64,62 @@ pub(crate) async fn livez() -> Json<Status> {
     })
 }
 
-/// Kubernetes readiness probe — checks `db` and `chain` subsystems.
+/// Kubernetes readiness probe — checks the `db`, `chain` and `asset_hub` subsystems.
 #[utoipa::path(
     get,
     path = "/readyz",
     tag = "Liveness & Readiness",
     responses(
-        (status = 200, description = "Instance can take traffic; db and chain reachable.",
+        (status = 200, description = "Instance can take traffic; db, People Chain and Asset Hub reachable.",
          body = serde_json::Value,
-         example = json!({ "status": "ready", "service": "device-attestation", "db": "up", "chain": "up" })),
+         example = json!({ "status": "ready", "service": "device-attestation", "db": "up", "chain": "up", "asset_hub": "up" })),
         (status = 503, description = "A required subsystem is unavailable.",
          body = serde_json::Value,
          example = json!({ "status": "unavailable", "service": "device-attestation", "db": "down" }))
     )
 )]
 pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
-    match probe(state.pool.clone(), state.chain.clone()).await {
-        Err("db") => (
+    match api_probe(
+        state.pool.clone(),
+        state.chain.clone(),
+        state.asset_hub.clone(),
+    )
+    .await
+    {
+        Err(down) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "unavailable", "service": "device-attestation", "db": "down" })),
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({ "status": "unavailable", "service": "device-attestation", "chain": "down" }),
-            ),
+            Json(json!({ "status": "unavailable", "service": "device-attestation", down: "down" })),
         )
             .into_response(),
         Ok(_) => (
             StatusCode::OK,
-            Json(
-                json!({ "status": "ready", "service": "device-attestation", "db": "up", "chain": "up" }),
-            ),
+            Json(json!({
+                "status": "ready",
+                "service": "device-attestation",
+                "db": "up",
+                "chain": "up",
+                "asset_hub": "up",
+            })),
         )
             .into_response(),
     }
+}
+
+/// The API's dependency probe: [`probe`], then the Asset Hub RPC that
+/// availability and registration read `LiteLabelOwner` from. Behind the API's
+/// `/readyz` and readiness gauge (and `all-in-one`'s), so an unreachable Asset
+/// Hub takes the instance out of rotation instead of answering `500`.
+pub async fn api_probe(
+    pool: sqlx::PgPool,
+    chain: crate::PeopleChain,
+    asset_hub: AssetHub,
+) -> http_common::health::Readiness {
+    probe(pool, chain).await?;
+    if let Err(err) = asset_hub.health().await {
+        tracing::warn!(error = ?err, "readiness check failed: Asset Hub unavailable");
+        return Err("asset_hub");
+    }
+    Ok(&["db", "chain", "asset_hub"])
 }
 
 /// The dependency probe behind `/readyz` and the readiness gauges: Postgres,

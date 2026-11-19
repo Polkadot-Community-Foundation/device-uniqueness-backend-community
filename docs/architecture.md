@@ -87,7 +87,8 @@ The vocabulary above is **not** "make 11 folders." Folders appear incrementally:
 ## Classification quick-reference
 
 - **attestation** → inside `device-attestation` (NOT a service, NOT a shared lib).
-- **availability** → `device-attestation` (People Chain plus durable reservation-outbox read).
+- **availability** → `device-attestation` (Asset Hub `LiteLabelOwner`, People Chain while its
+  runtime keeps usernames, plus durable reservation-outbox read).
 - **username write** → `device-attestation`.
 - **username read/search** → `username-indexer` — true carve-out.
 - **proof of compute** → `username-indexer` (the gate protects its public read; issuance lives with it).
@@ -236,9 +237,69 @@ Operational invariants an agent must respect when touching the code.
   anything that races the check costs one fee rather than `CHAIN_WRITER_MAX_ATTEMPTS`.
 - **Availability answers for the whole claim, not just the discriminators.** `EXHAUSTED` means
   nothing claimable under this base — no free discriminator (the offered pool is `01..=99`; `00` is
-  never allocated), **or** a reservation leg that would reject the claim. Both the bare-name owner
-  and the queue length are read in the same batched `state_queryStorageAt` as the 100 discriminator
-  keys, so they cost no extra round trip and cannot disagree about their block.
+  never allocated), **or** a reservation leg that would reject the claim. On People, the bare-name
+  owner and the queue length are read in the same batched `state_queryStorageAt` as the 100
+  discriminator keys, so they cost no extra round trip and cannot disagree about their block. The
+  dotNS reads (below) are separate dry runs on Asset Hub, so they are not part of that batch and
+  can answer at a different block than the People reads; a name that changes between the two is
+  caught on chain, as any race with the check is.
+- **Asset Hub holds every lite label; People holds them only until the username removal.** Taken discriminators
+  are the union of Asset Hub's `DotnsGateway::LiteLabelOwner` (only the gateway issues lite
+  labels, so it has all of them), the outbox, and, while the People runtime's `attest` still takes
+  a username, `Resources::UsernameOwnerOf`, which also holds names registered before the dotNS
+  lane existed. Which People reads run is decided from the `attest` shape at the block the
+  request reads, as for the payload version. `device-attestation-api` reads Asset Hub through a
+  read-only client and never submits there.
+- **A failed claim gives its discriminator back.** The outbox's share of the taken set is every
+  row that can still land, plus `FAILED_TERMINAL` rows for `FAILED_DISCRIMINATOR_HOLD` (30 min)
+  after they failed. Usernames are unique only among rows that are not `FAILED_TERMINAL` (a partial
+  unique index), so a failed claim can neither exhaust a base nor block its own name for good.
+  The hold is what makes the release safe. Every People transaction the writer signs is mortal
+  for `PEOPLE_TX_MORTALITY_BLOCKS` (64), counted from the finalized block, or from the best block
+  while finality lags more than half the window behind it (the node checks mortality against its
+  best block, so a stall would otherwise leave every transaction dead on arrival). Either way a
+  transaction cannot land more than 64 blocks past the head the writer saw, and the hold covers
+  that window twice over at a 12 s block time, so a transaction still in flight for a failed row is dead before its name is offered
+  again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
+  uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
+- **A claimant holds a bounded number of open claims.** Releasing failed rows makes squatting by
+  failure temporary, but someone can still keep a base full by cycling claims that are meant to
+  fail. Intake therefore refuses a claim with `409` when its JWT subject (`account_id`, the
+  abuse-control key, below) already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` (default 3) open
+  claims, on any base: rows that are not `ASSIGNED` and still hold a discriminator, i.e. `QUEUED`,
+  `RESERVED`, `SUBMITTING`, `RETRY_AFTER`, and `FAILED_TERMINAL` within
+  `FAILED_DISCRIMINATOR_HOLD`. Counting recent failures is what bounds the attack: if a failure
+  freed its slot at once, each slot could be cycled every minute while every failure kept its
+  discriminator for 30. The count shares its predicate with the taken-set read, so the two cannot
+  drift. The cap is per claimant rather than per base on purpose: a per-base cap is itself
+  something an attacker can fill, locking everyone else out of a name with a handful of claims.
+  Per subject, a claimant can only use up its own allowance. The cost is that the bound on one base
+  is only as strong as subjects are expensive: exhausting a base's 100 discriminators takes
+  roughly 100 / cap subjects. With platform attestation enforced each subject is a real device;
+  in M0 mode (`AUTH_ENABLED=false`) subjects are free, and the per-subject rate limit and the
+  writer's signature gates are what remain. The count and the insert run in one transaction under
+  a per-subject advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at
+  the last slot, and claims by different subjects never wait on each other (a hard-mode iOS claim
+  holds the lock across its DeviceCheck call, and only that subject's other claims wait on it).
+  Voucher claims skip the cap: vouchers are minted by the operator and single-use, so they cannot
+  drive a cycling attack.
+- **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
+  `reserved_base_label` to `DotnsPopController`, which reverts, device name and all, when the
+  name exists on `DotnsRegistrar`, holds a live grant on the name whitelist, or its reservation
+  queue holds `MAX_RESERVATION_QUEUE` entries. Intake and availability make those reads first, as
+  `ReviveApi_call` dry runs, and treat any of them like People's own reservation check: a `409`
+  on the reserved name, `EXHAUSTED` on the base. This is the only reservation check left once the
+  People runtime keeps no usernames. The contracts are resolved once per process from
+  `DotnsGateway::DispatcherAddress` (through `TARGET()` where that is a `RootGatewayDispatcher`),
+  then the controller's `protocolRegistry()`, so no contract address is configured. The
+  whitelist is the exception: like the controller, every check reads it from the registry's
+  `nameWhitelist` key, so one configured later counts without a restart. Unset means no grants,
+  and a whitelist without `granteeOfNode` (dotNS before v2.0.0, whose controller does not consult
+  it) reads as no grant.
+  *Trade-off:* the queue length counts expired slots still in the live window. The controller
+  clears up to four of them before it checks, so a queue read as full can occasionally still take
+  a claim, and intake refuses it anyway. A governance change to the dispatcher address is picked
+  up on restart.
   *Trade-off:* `base.NN` is genuinely claimable by a caller that sends no `dotns.reservedUsername`,
   and reporting `EXHAUSTED` withholds it. That costs nothing in practice: every client reserves
   unconditionally and no client is planned that can register without the reservation leg, so the
@@ -249,7 +310,10 @@ Operational invariants an agent must respect when touching the code.
   registrations cost one finalization rather than N. `force_batch`, never `batch_all`: one poison row
   must not block its batch. Each row's fate comes from its own `Utility.ItemCompleted` / `ItemFailed`
   **positionally**, and only when the item count matches the calls submitted — otherwise the
-  positional mapping is discarded entirely and a batched `UsernameOwnerOf` read decides. A single-row
+  positional mapping is discarded entirely and a batched "already landed" read decides:
+  `UsernameOwnerOf` by name, or, on a People runtime whose `attest` takes no username, presence of
+  the candidate's `Resources::Consumers` record (read dynamically, since that upgrade changes the
+  record's type). A single-row
   set skips the wrapper and submits a bare `attest`. `ASSIGNED` is never inferred from an extrinsic
   succeeding, and never from `ProxyExecuted` being `Ok` around a `force_batch` (it is `Ok` even when
   every item failed).
@@ -310,18 +374,35 @@ Operational invariants an agent must respect when touching the code.
 - **Registration is authorized by `candidateSignature`, not the JWT subject.** `POST
   /api/v1/usernames` verifies the beneficiary's sr25519 signature over `pop:people-lite:register
   using || candidatePubkey || ringVrfKey` (the message the chain reconstructs for `PeopleLite.attest`;
-  Substrate signing context) before enqueuing. The JWT authenticates only the device/session — a
+  Substrate signing context) before enqueuing. It then verifies `consumerRegistrationSignature`,
+  by the same key in the same form, over the consumer registration payload for the declared
+  format, with `ATTESTER_ACCOUNT` as the runtime's `verifier`; the writer's gate repeats both
+  checks per pass. The runtime rejects either only after the signer has paid the fee, so a claim
+  that can never land is refused before it takes a discriminator. `proofOfOwnership` (a ring VRF
+  signature) is still checked for shape only. The JWT authenticates only the device/session — a
   separate per-install auth wallet — so `candidateAccountId` is deliberately **not** required to
   equal the JWT subject. Stored `account_id` (JWT subject) is the abuse-control/rate-limit key;
   `candidate_account_id` is the on-chain beneficiary the writer submits for.
 - **A claim declares the format its signatures cover.** A signature is not introspectable, so
-  `payloadVersion` names the signed-payload format; omitted means `1`, the only format so far (the
-  `candidateSignature` message above). Intake refuses a version it does not support with a `400` on
-  that field — before verifying, so a client on a newer format is told so rather than told its
-  signature is invalid — and before a row exists. The row stores it (`payload_version`), and the
-  writer logs it on retries and terminal failures, so a chain signature rejection is attributable to
-  the format the client declared. Supporting a new format is a new `PayloadVersion` variant, which the
-  candidate verifier matches exhaustively.
+  `payloadVersion` names the signed-payload format; omitted means `1`. The two formats differ in what
+  `consumerRegistrationSignature` covers: `1` includes the username base and reserved name, `2`
+  covers `(account, verifier, identifierKey)` only, for a People runtime whose `attest` no longer
+  takes usernames. The `candidateSignature` message above is the same in both. Intake refuses a version it does not
+  support with a `400` on that field — before verifying, so a client on a newer format is told so
+  rather than told its signature is invalid — and before a row exists. The row stores it
+  (`payload_version`), and the writer logs it on retries and terminal failures, so a chain signature
+  rejection is attributable to the format the client declared. Supporting a new format is a new
+  `PayloadVersion` variant, which the candidate verifier matches exhaustively.
+- **The People runtime's `attest` shape decides the accepted format.** `PeopleLite.attest`'s consumer
+  registration either carries `username` and `reserved_username` (format `1`) or does not (format
+  `2`). The backend reads which from the live runtime metadata, never from the vendored copy, the
+  same way it reads the signing context, so one release spans the runtime upgrade and runs against a
+  network that has not taken it. Boot refuses a runtime whose `attest` is neither shape. Intake takes
+  only the format the runtime accepts at that block. The writer re-reads the shape every pass and
+  builds `attest` from the row's format, which its gate has matched to the shape: a row in the
+  older format fails terminally (only the client can re-sign the consumer payload), and a row in a
+  format the runtime does not take yet is deferred without spending an attempt. So format-`1` rows
+  still in the outbox when the upgrade is enacted are lost to the People lane; drain first.
 - **`device-attestation-chain-writer` is single-instance by design** — a nonce lane is **(signing account,
   chain)**, and one process holds one lane per chain. The `writer_lease` table is a best-effort
   deploy-overlap guard only; the chain nonce + outbox reconciliation is the real serializer.
@@ -363,8 +444,15 @@ Operational invariants an agent must respect when touching the code.
   budget exists to stop a bad row retrying forever; a funding gap is not a bad row, and burning
   eight attempts in three minutes against a three-day signature would discard a claim only the
   client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
-  out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
-  rather than paying its fee eight times over.
+  out differently for the same call is terminal on the *first* pass rather than paying its fee
+  eight times over. That covers **every dispatch error from the registration pallets**
+  (`PeopleLite::*`, `Resources::*`), including ones a later runtime adds, because those pallets
+  have judged this row's own payload. The exceptions are in `NOT_THE_ROWS_FAULT`: errors about the
+  attester or the network (`NoAttestationAllowance`, `PaidRegistrationLimitReached`,
+  `TooManyLitePeople`, `LitePeopleCollectionNotCreated`). Every row would get those, so they *park*
+  like an unfunded signer: spending attempts on them would fail the whole outbox within minutes.
+  Dispatch errors from any other pallet (`Proxy::*`, `BadOrigin`) and transport or pool errors
+  keep the retry budget, none of which say anything about the row.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the
@@ -374,6 +462,23 @@ Operational invariants an agent must respect when touching the code.
   currently expose the supported `signed_at` shape, but a runtime upgrade can change it at any
   time, so it is asserted per connect and parks the lane rather than the writer.
   `dub_dotns_lane_connected` is the signal.
+- **The writer can settle dotNS pending claims, and runs that inside the dotNS lane.** The gateway
+  mints from a Root origin, which pallet-revive does not let deploy a contract, so a name whose
+  owner has no `LabelStore` stays a pending claim on `DotnsPopController` until a signed origin
+  calls `settlePendingClaims`. That call is permissionless and its signer pays the fee and the
+  store's deposit; device-name holders have no Asset Hub funds, so the writer's signer is the only party
+  placed to make it. It signs from the same account as `reserve_name`, so it shares that lane's
+  nonce and runs between the lane's passes, never beside them. Each step walks one page of the
+  controller's own enumeration of accounts with pending claims (`pendingClaimUsers`), so it needs no
+  bookkeeping of its own and also covers names other backends minted; it dry-runs each settlement
+  and submits only those that would go through, as one `Utility.force_batch` of `Revive.call`s
+  bounded by half a normal extrinsic's weight and by the signer's free balance above
+  `ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK`: `reserve_name` pays its fee up front from the same
+  balance, so settlement never spends it below what reservations need. The calls are the signer's own, never proxied: the
+  attester authority is not who pays. *Trade-off:* settling every listed account spends the
+  operator's funds on names other backends minted, so it is off unless `DOTNS_SETTLE_ENABLED` is
+  set. Nothing in DUB reads the settled label, and `DeviceNameIssued` is emitted at mint on both
+  paths, so an indexer built on it does not depend on settlement.
 - **Signing:** one canonical `ATTESTER_ACCOUNT` (SS58) names the attester authority, and **proxying
   is derived, not configured**: the writer signs `PeopleLite.attest` directly when that account is
   its own signer, and wraps it in `Proxy.proxy(real = authority, …)` otherwise. A proxied call's
@@ -410,7 +515,8 @@ Operational invariants an agent must respect when touching the code.
   vendoring a second, faster-churning metadata blob.
 - **HTTP** (`device-attestation::http`): router in `http.rs` wrapped in a tower-http stack
   (request-id → trace → 30s timeout) with graceful shutdown. Health at `/livez`, `/readyz` (gates on
-  a live Postgres `SELECT 1`), `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
+  a live Postgres `SELECT 1`, the People Chain RPC and the Asset Hub RPC),
+  `/healthcheck`; JWKS at `/.well-known/jwks.json`. `AppState` carries
   the Postgres pool, `ChainClient`, `Jwt` and `Config`, plus the rate limiter, the attestation CRL
   cache and the optional DeviceCheck / Play Integrity clients. `username-indexer` uses the same tower-http
   stack, but its `/readyz` also reports index freshness and it never publishes JWKS — it holds
