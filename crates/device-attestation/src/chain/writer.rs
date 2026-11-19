@@ -22,7 +22,6 @@ mod link;
 mod observe;
 mod passes;
 mod people;
-mod settlement;
 mod supervise;
 mod tx;
 
@@ -34,8 +33,6 @@ use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
 use people::People;
-pub use settlement::SettleConfig;
-use settlement::Settlement;
 use supervise::{drive, every, hold_lease, sleep_or_wake, supervise, until_lease_lost};
 
 /// The claim size the People lane uses when `CHAIN_WRITER_BATCH_SIZE` is unset
@@ -109,8 +106,6 @@ pub struct WriterConfig {
     pub signer_balance_floor_planck: u128,
     /// Asset Hub RPC endpoint. Required.
     pub asset_hub_rpc_url: String,
-    /// PCF fork: dotNS pending-claim settlement.
-    pub settle: SettleConfig,
 }
 
 impl WriterConfig {
@@ -157,7 +152,6 @@ impl WriterConfig {
                 10_000_000_000,
             )?),
             asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
-            settle: SettleConfig::from_env()?,
         })
     }
 }
@@ -202,7 +196,6 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     let asset_hub_rpc = config.asset_hub_rpc_url.clone();
     let dotns_link = DotnsLink::new(asset_hub_rpc, config_attester);
     let passes = Passes::new(&config, dotns_link.subscribe());
-    let settlement = Settlement::new(config.settle.clone());
     let mut writer = Writer {
         pool,
         chain,
@@ -213,7 +206,6 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
         dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
-        settlement,
     };
     writer.run_forever().await
 }
@@ -230,7 +222,6 @@ struct Writer {
     /// The periodic work this process hosts because it holds the lease; it
     /// runs only while the lease heartbeat holds.
     passes: Passes,
-    settlement: Settlement,
 }
 
 impl Writer {
@@ -279,7 +270,6 @@ impl Writer {
             people,
             dotns,
             passes,
-            settlement,
         } = self;
         let (pool, chain, signer_account, config) = (&*pool, &*chain, &*signer_account, &*config);
         let proxy_for = *proxy_for;
@@ -294,21 +284,17 @@ impl Writer {
             cx,
             config,
             async || tokio::time::sleep(config.poll_interval).await,
-            async |_| Ok(()),
             |drain| {
                 if drain.take_landed() {
                     landed.notify_one();
                 }
             },
         );
-        // Settlement signs from the dotNS lane's account, so it runs on that
-        // lane, between its passes.
         let dotns_lane = run_lane(
             dotns,
             cx,
             config,
             async || sleep_or_wake(config.poll_interval, &landed).await,
-            async |drain| settlement.tick(cx, drain).await,
             |_| {},
         );
         let periodic = every(
@@ -324,14 +310,12 @@ impl Writer {
 }
 
 /// Supervise one lane: restart it, run its passes, and restart it again after
-/// any failure but a lost lease. `before_pass` runs on the drain ahead of every
-/// pass, `after_pass` sees the drain after every pass.
+/// any failure but a lost lease. `after_pass` sees the drain after every pass.
 async fn run_lane<L: Lane>(
     drain: &mut Drain<L>,
     cx: &Cx<'_>,
     config: &WriterConfig,
     mut idle: impl AsyncFnMut(),
-    mut before_pass: impl AsyncFnMut(&mut Drain<L>) -> Result<(), WriterError>,
     mut after_pass: impl FnMut(&Drain<L>),
 ) -> WriterError {
     supervise(
@@ -341,7 +325,6 @@ async fn run_lane<L: Lane>(
         async |drain| {
             drive(
                 async || {
-                    before_pass(drain).await?;
                     let idle = drain.pass(cx).await;
                     after_pass(drain);
                     idle
