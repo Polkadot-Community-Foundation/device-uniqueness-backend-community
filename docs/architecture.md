@@ -250,6 +250,39 @@ Operational invariants an agent must respect when touching the code.
   lane existed. Which People reads run is decided from the `attest` shape at the block the
   request reads, as for the payload version. `device-attestation-api` reads Asset Hub through a
   read-only client and never submits there.
+- **A failed claim gives its discriminator back.** The outbox's share of the taken set is every
+  row that can still land, plus `FAILED_TERMINAL` rows for `FAILED_DISCRIMINATOR_HOLD` (30 min)
+  after they failed. Usernames are unique only among rows that are not `FAILED_TERMINAL` (a partial
+  unique index), so a failed claim can neither exhaust a base nor block its own name for good.
+  The hold is what makes the release safe. Every People transaction the writer signs is mortal
+  for `PEOPLE_TX_MORTALITY_BLOCKS` (64), counted from the finalized block, or from the best block
+  while finality lags more than half the window behind it (the node checks mortality against its
+  best block, so a stall would otherwise leave every transaction dead on arrival). Either way a
+  transaction cannot land more than 64 blocks past the head the writer saw, and the hold covers
+  that window twice over at a 12 s block time, so a transaction still in flight for a failed row is dead before its name is offered
+  again. If it lands anyway, the chain read above reports the name as taken, and the chain enforces
+  uniqueness regardless. Failed rows are kept for their `last_error`, not deleted.
+- **A claimant holds a bounded number of open claims.** Releasing failed rows makes squatting by
+  failure temporary, but someone can still keep a base full by cycling claims that are meant to
+  fail. Intake therefore refuses a claim with `409` when its JWT subject (`account_id`, the
+  abuse-control key, below) already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` (default 3) open
+  claims, on any base: rows that are not `ASSIGNED` and still hold a discriminator, i.e. `QUEUED`,
+  `RESERVED`, `SUBMITTING`, `RETRY_AFTER`, and `FAILED_TERMINAL` within
+  `FAILED_DISCRIMINATOR_HOLD`. Counting recent failures is what bounds the attack: if a failure
+  freed its slot at once, each slot could be cycled every minute while every failure kept its
+  discriminator for 30. The count shares its predicate with the taken-set read, so the two cannot
+  drift. The cap is per claimant rather than per base on purpose: a per-base cap is itself
+  something an attacker can fill, locking everyone else out of a name with a handful of claims.
+  Per subject, a claimant can only use up its own allowance. The cost is that the bound on one base
+  is only as strong as subjects are expensive: exhausting a base's 100 discriminators takes
+  roughly 100 / cap subjects. With platform attestation enforced each subject is a real device;
+  in M0 mode (`AUTH_ENABLED=false`) subjects are free, and the per-subject rate limit and the
+  writer's signature gates are what remain. The count and the insert run in one transaction under
+  a per-subject advisory lock (`outbox::insert_capped`), so concurrent claims cannot both pass at
+  the last slot, and claims by different subjects never wait on each other (a hard-mode iOS claim
+  holds the lock across its DeviceCheck call, and only that subject's other claims wait on it).
+  Voucher claims skip the cap: vouchers are minted by the operator and single-use, so they cannot
+  drive a cycling attack.
 - **The reservation leg is checked on the dotNS contracts too.** The gateway forwards a claim's
   `reserved_base_label` to `DotnsPopController`, which reverts, device name and all, when the
   name exists on `DotnsRegistrar`, holds a live grant on the name whitelist, or its reservation
@@ -341,7 +374,12 @@ Operational invariants an agent must respect when touching the code.
 - **Registration is authorized by `candidateSignature`, not the JWT subject.** `POST
   /api/v1/usernames` verifies the beneficiary's sr25519 signature over `pop:people-lite:register
   using || candidatePubkey || ringVrfKey` (the message the chain reconstructs for `PeopleLite.attest`;
-  Substrate signing context) before enqueuing. The JWT authenticates only the device/session — a
+  Substrate signing context) before enqueuing. It then verifies `consumerRegistrationSignature`,
+  by the same key in the same form, over the consumer registration payload for the declared
+  format, with `ATTESTER_ACCOUNT` as the runtime's `verifier`; the writer's gate repeats both
+  checks per pass. The runtime rejects either only after the signer has paid the fee, so a claim
+  that can never land is refused before it takes a discriminator. `proofOfOwnership` (a ring VRF
+  signature) is still checked for shape only. The JWT authenticates only the device/session — a
   separate per-install auth wallet — so `candidateAccountId` is deliberately **not** required to
   equal the JWT subject. Stored `account_id` (JWT subject) is the abuse-control/rate-limit key;
   `candidate_account_id` is the on-chain beneficiary the writer submits for.
@@ -406,8 +444,15 @@ Operational invariants an agent must respect when touching the code.
   budget exists to stop a bad row retrying forever; a funding gap is not a bad row, and burning
   eight attempts in three minutes against a three-day signature would discard a claim only the
   client can re-sign. The mirror of that rule is the other direction: a rejection that cannot come
-  out differently for the same call (`DETERMINISTIC_REJECTIONS`) is terminal on the *first* pass
-  rather than paying its fee eight times over.
+  out differently for the same call is terminal on the *first* pass rather than paying its fee
+  eight times over. That covers **every dispatch error from the registration pallets**
+  (`PeopleLite::*`, `Resources::*`), including ones a later runtime adds, because those pallets
+  have judged this row's own payload. The exceptions are in `NOT_THE_ROWS_FAULT`: errors about the
+  attester or the network (`NoAttestationAllowance`, `PaidRegistrationLimitReached`,
+  `TooManyLitePeople`, `LitePeopleCollectionNotCreated`). Every row would get those, so they *park*
+  like an unfunded signer: spending attempts on them would fail the whole outbox within minutes.
+  Dispatch errors from any other pallet (`Proxy::*`, `BadOrigin`) and transport or pool errors
+  keep the retry budget, none of which say anything about the row.
 - **A dotNS problem parks the dotNS lane; it never stops the writer.** Only one dotNS condition is
   a startup abort: a missing `ASSET_HUB_RPC_URL`, a config error knowable
   before any row is claimed. Everything else is runtime. Asset Hub is connected lazily on the

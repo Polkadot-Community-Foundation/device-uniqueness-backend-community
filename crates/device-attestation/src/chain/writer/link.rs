@@ -24,7 +24,10 @@ pub(super) trait Link {
     async fn ctx(&self, chain: &Self::Chain) -> anyhow::Result<Self::Ctx>;
 }
 
-pub(super) struct PeopleLink(pub PeopleChain);
+/// The People lane's link: the chain, and the attester authority
+/// (`ATTESTER_ACCOUNT`) that is `attest`'s origin, which the consumer
+/// registration signature covers.
+pub(super) struct PeopleLink(pub PeopleChain, pub [u8; 32]);
 
 /// What the People runtime accepts at one pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,6 +37,9 @@ pub(super) struct PeopleRuntime {
     /// The shape of `attest`'s consumer registration, which decides the
     /// payload version a row must carry to be submitted.
     pub attest_shape: AttestShape,
+    /// The attester authority, the `verifier` the consumer registration
+    /// signature covers.
+    pub attester: [u8; 32],
 }
 
 impl Link for PeopleLink {
@@ -49,6 +55,7 @@ impl Link for PeopleLink {
         Ok(PeopleRuntime {
             signature_form: account_signature_form(at.metadata_ref(), PEOPLE_PALLET),
             attest_shape: AttestShape::try_from(at.metadata_ref())?,
+            attester: self.1,
         })
     }
 }

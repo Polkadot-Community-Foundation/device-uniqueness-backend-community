@@ -185,6 +185,25 @@ impl PeopleChain {
         &self.client
     }
 
+    /// The node's best block: its number and its canonical hash at that
+    /// number. Read over the legacy RPC, since the client works at finalized
+    /// blocks only.
+    pub async fn best_block(&self) -> anyhow::Result<(u64, subxt::utils::H256)> {
+        use subxt::config::Header as _;
+        let header = self
+            .rpc
+            .chain_get_header(None)
+            .await?
+            .context("the node has no best block")?;
+        let number = header.number();
+        let hash = self
+            .rpc
+            .chain_get_block_hash(Some(number.into()))
+            .await?
+            .with_context(|| format!("no canonical block at best number {number}"))?;
+        Ok((number, hash))
+    }
+
     pub async fn username_owner(&self, full_username: &str) -> anyhow::Result<Option<[u8; 32]>> {
         let at = self.client.at_current_block().await?;
         let address = people::storage().resources().username_owner_of();

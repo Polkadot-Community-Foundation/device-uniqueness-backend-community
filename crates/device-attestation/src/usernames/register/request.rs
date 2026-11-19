@@ -11,7 +11,10 @@ use utoipa::ToSchema;
 
 use crate::chain::attest::PayloadVersion;
 use crate::config::Config;
-use crate::signature::{candidate_message, verify_account_signature, AccountSignatureForm};
+use crate::signature::{
+    candidate_message, verify_account_signature, verify_consumer_registration_signature,
+    AccountSignatureForm, ConsumerRegistration,
+};
 use crate::usernames::{
     error::{FieldError, UsernamesError},
     MAX_BASE_LEN,
@@ -51,7 +54,10 @@ pub struct RegisterRequest {
     /// `0x`-hex 64-byte ownership proof.
     #[schema(example = "0x...64 bytes...")]
     proof_of_ownership: String,
-    /// `0x`-hex 64-byte consumer registration signature.
+    /// `0x`-hex 64-byte sr25519 signature by the candidate over the
+    /// `PeopleLite.attest` consumer registration payload for
+    /// `payloadVersion`, in the form the People runtime accepts. Verified at
+    /// intake: one the runtime would reject is a 400 on this field.
     #[schema(example = "0x...64 bytes...")]
     consumer_registration_signature: String,
     /// `0x`-hex 65-byte identifier key.
@@ -416,6 +422,44 @@ impl RegisterRequest {
                 r.flag("candidateSignature", MSG_INVALID_SIGNATURE);
             }
         }
+        // The consumer signature is checked only once the candidate's is
+        // good: it is signed by the same key, so it says nothing new before.
+        // The runtime rejects a bad one only after the fee is paid.
+        if let (
+            true,
+            Some(candidate),
+            Some(signature),
+            Some(identifier_key),
+            Some(BaseName(base)),
+            Some(version),
+            Some(dotns),
+        ) = (
+            r.0.is_empty(),
+            &candidate,
+            &consumer_registration_signature,
+            &identifier_key,
+            &username,
+            payload_version,
+            &dotns,
+        ) {
+            let consumer = ConsumerRegistration {
+                account: &candidate.0,
+                verifier: &config.attester_account,
+                identifier_key: &identifier_key.0,
+                base,
+                reserved_username: dotns
+                    .as_ref()
+                    .and_then(|dotns| dotns.reserved_username.as_deref()),
+            };
+            if !verify_consumer_registration_signature(
+                version,
+                &consumer,
+                &signature.0,
+                signature_form,
+            ) {
+                r.flag("consumerRegistrationSignature", MSG_INVALID_SIGNATURE);
+            }
+        }
 
         match (
             candidate,
@@ -497,31 +541,68 @@ fn verify_candidate_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signature::consumer_registration_message;
     use serde_json::json;
 
     fn config() -> crate::config::Config {
         crate::config::Config::test_default()
     }
 
-    fn valid_body() -> serde_json::Value {
+    fn alice() -> subxt_signer::sr25519::Keypair {
         use std::str::FromStr as _;
-        use subxt_signer::sr25519::Keypair;
-        use subxt_signer::SecretUri;
+        subxt_signer::sr25519::Keypair::from_uri(
+            &subxt_signer::SecretUri::from_str("//Alice").unwrap(),
+        )
+        .unwrap()
+    }
 
-        let keypair = Keypair::from_uri(&SecretUri::from_str("//Alice").unwrap()).unwrap();
+    /// Re-signs `body`'s `consumerRegistrationSignature` as Alice over the
+    /// fields `body` carries now, in the plain form, for the test config's
+    /// attester. Call it after changing a field the signature covers.
+    fn sign_consumer(body: &mut serde_json::Value) {
+        let identifier_key = hex::decode(
+            body["identifierKey"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+        )
+        .unwrap();
+        let version = match body["payloadVersion"].as_u64() {
+            Some(2) => PayloadVersion::V2,
+            _ => PayloadVersion::V1,
+        };
+        let account = alice().public_key().0;
+        let message = consumer_registration_message(
+            version,
+            &ConsumerRegistration {
+                account: &account,
+                verifier: &config().attester_account,
+                identifier_key: &identifier_key,
+                base: body["username"].as_str().unwrap(),
+                reserved_username: body["dotns"]["reservedUsername"].as_str(),
+            },
+        )
+        .unwrap();
+        body["consumerRegistrationSignature"] =
+            json!(format!("0x{}", hex::encode(alice().sign(&message).0)));
+    }
+
+    fn valid_body() -> serde_json::Value {
+        let keypair = alice();
         let candidate = keypair.public_key();
         let ring = [7u8; 32];
         let signature = keypair.sign(&candidate_message(&candidate.0, &ring)).0;
 
-        json!({
+        let mut body = json!({
             "candidateAccountId": candidate.to_account_id().to_string(),
             "username": "aliceuser",
             "candidateSignature": format!("0x{}", hex::encode(signature)),
             "ringVrfKey": format!("0x{}", hex::encode(ring)),
             "proofOfOwnership": format!("0x{}", "03".repeat(64)),
-            "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
             "identifierKey": format!("0x{}", "05".repeat(65))
-        })
+        });
+        sign_consumer(&mut body);
+        body
     }
 
     fn validate(
@@ -600,6 +681,59 @@ mod tests {
                 "Invalid signature.".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn a_consumer_signature_the_runtime_would_reject_is_a_400() {
+        let invalid = || {
+            [(
+                "consumerRegistrationSignature".to_string(),
+                "Invalid signature.".to_string(),
+            )]
+        };
+
+        let mut garbage = valid_body();
+        garbage["consumerRegistrationSignature"] = json!(format!("0x{}", "04".repeat(64)));
+        assert_eq!(errors_of(garbage), invalid(), "well-formed but unsigned");
+
+        // Signed for one base, claimed under another: the runtime signs the
+        // base, so the claim could never land.
+        let mut other_base = valid_body();
+        other_base["username"] = json!("malloryuser");
+        assert_eq!(errors_of(other_base), invalid(), "base not the one signed");
+
+        // The reserved name is covered too.
+        let mut reserved = valid_body();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        reserved["dotns"] = dotns_block(now, Some("aliceuser"), &config());
+        assert_eq!(errors_of(reserved), invalid(), "reserved name not signed");
+
+        // Signed for another attester.
+        let mut other_attester = config();
+        other_attester.attester_account = [0xbb; 32];
+        assert!(matches!(
+            validate(&valid_body(), &other_attester),
+            Err(UsernamesError::InvalidBody(errors))
+                if errors.len() == 1 && errors[0].field == "consumerRegistrationSignature"
+        ));
+
+        // A format-1 signature declared as format 2.
+        let mut upgraded = valid_body();
+        upgraded["payloadVersion"] = json!(2);
+        let Err(UsernamesError::InvalidBody(errors)) = validate_upgraded(&upgraded) else {
+            panic!("a format-1 consumer signature must not pass as format 2");
+        };
+        assert_eq!(errors[0].field, "consumerRegistrationSignature");
+    }
+
+    #[test]
+    fn a_bad_candidate_signature_is_reported_alone() {
+        // The consumer signature is not checked behind a bad candidate one,
+        // so the response names the field the client must fix first.
+        let mut body = valid_body();
+        body["candidateSignature"] = json!(format!("0x{}", "ab".repeat(64)));
+        body["consumerRegistrationSignature"] = json!(format!("0x{}", "04".repeat(64)));
+        assert_eq!(fields_of(body), ["candidateSignature"]);
     }
 
     #[test]
@@ -795,6 +929,7 @@ mod tests {
 
         let mut valid = valid_body();
         valid["dotns"] = dotns_block(now, Some("reservedname"), &enabled);
+        sign_consumer(&mut valid);
         let parsed = validate(&valid, &enabled).expect("valid dotns");
         let dotns = parsed.dotns.expect("dotns parsed");
         assert_eq!(dotns.reserved_username.as_deref(), Some("reservedname"));
@@ -821,6 +956,7 @@ mod tests {
 
         let mut with = valid_body();
         with["dotns"] = dotns_block(now, Some("aliceuser"), &config);
+        sign_consumer(&mut with);
         assert_eq!(
             reserved_name(&validate(&with, &config).expect("valid")),
             Some("aliceuser")
@@ -835,6 +971,7 @@ mod tests {
         let mut body = valid_body();
         assert_eq!(body["username"], json!("aliceuser"));
         body["dotns"] = dotns_block(now, Some("reservedname"), &config);
+        sign_consumer(&mut body);
 
         let parsed = validate(&body, &config).expect("valid");
         assert_eq!(reserved_name(&parsed), Some("reservedname"));
@@ -947,6 +1084,7 @@ mod tests {
         let mut at_bound = valid_body();
         let exact = "a".repeat(MAX_DOTNS_LABEL_LEN);
         at_bound["dotns"] = dotns_block(now, Some(&exact), &config);
+        sign_consumer(&mut at_bound);
         assert!(validate(&at_bound, &config).is_ok());
     }
 
@@ -1041,9 +1179,11 @@ mod tests {
 
     #[test]
     fn version_two_is_accepted_once_the_runtime_takes_it() {
-        // The candidate message did not change, so the same signature holds.
+        // The candidate message did not change, so the same signature holds;
+        // the consumer message did, so the client re-signs that one.
         let mut body = valid_body();
         body["payloadVersion"] = json!(2);
+        sign_consumer(&mut body);
         let parsed = validate_upgraded(&body).expect("format 2 is valid on an upgraded runtime");
         assert_eq!(
             parsed.payload_version,

@@ -10,6 +10,30 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Added
 
+- **A JWT subject holds at most 3 open username claims at a time
+  (`USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT`, `0` disables).** An open claim is a
+  row that has not landed and still holds a discriminator: `QUEUED`,
+  `RESERVED`, `SUBMITTING` or `RETRY_AFTER`, or `FAILED_TERMINAL` within the
+  30 minutes its discriminator is held. The count spans every base. A subject
+  that already holds that many gets a `409` (`Too many pending username claims
+  for this account. Try again once one completes.`) until one lands or a
+  failure ages out. Because recent failures count, a claim that fails fast
+  frees no slot early, so one subject cycling claims that are meant to fail
+  cannot hold more than the cap's worth of discriminators. The cap is the
+  subject's own, so other subjects' claims never use it up. Concurrent claims
+  are serialised per subject, so the cap holds under load. Voucher claims are
+  exempt. Migration `0013` indexes the count.
+- **`consumerRegistrationSignature` is verified, at intake and before
+  submission.** It used to be checked for shape only, so a claim with a
+  correct `candidateSignature` and random bytes here was accepted, took a
+  discriminator, and failed on chain after the signer paid its fee. Intake now
+  rebuilds the payload the runtime verifies, `(account, verifier,
+  identifierKey, base, reservedUsername)` for format `1` and `(account,
+  verifier, identifierKey)` for format `2`, with `ATTESTER_ACCOUNT` as the
+  verifier, and answers a signature that does not verify with a `400` on that
+  field. The writer's gate checks it again, so rows stored before this release
+  fail without paying a fee. Clients that sign as the runtime expects see no
+  change.
 - **The writer can settle dotNS pending claims (`DOTNS_SETTLE_ENABLED`, off
   by default).** A gateway-minted name whose owner has no `LabelStore` stays a
   pending claim on `DotnsPopController`, with no label in a store and no
@@ -84,6 +108,34 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ### Fixed
 
+- **A failed claim no longer holds its username for ever.** A
+  `FAILED_TERMINAL` outbox row used to keep its discriminator permanently, so
+  99 failed claims, garbage ones included, exhausted a base for good. It now
+  releases the discriminator 30 minutes after failing
+  (`FAILED_DISCRIMINATOR_HOLD`). Migration `0012` replaces the table-wide
+  unique constraint on `full_username` with a partial unique index that skips
+  failed rows. To make the release safe, People registration transactions are
+  now **mortal for 64 blocks** where they used to be immortal: a transaction
+  not included in that window is dropped and the row is resubmitted under a
+  fresh nonce. The window counts from the finalized block, or from the best
+  block while finality lags more than 32 blocks behind it, so a finality stall
+  cannot make every transaction dead on arrival and fail the outbox. The node
+  refuses an expired transaction as `Transaction has a bad signature` (the
+  runtime checks it against a later block's hash), and a birth block reorged
+  off the best chain the same way. The writer defers either, like an ancient
+  birth block, without spending an attempt, and signs afresh on the next pass.
+- **A rejected claim fails on the first pass instead of paying for eight.**
+  The writer used to fail at once only on three `Resources` reservation
+  errors. Any other rejection of the claim, such as a bad
+  `proofOfOwnership` that only had its shape checked at intake, was
+  resubmitted up to `CHAIN_WRITER_MAX_ATTEMPTS`
+  times, with a fee each time. Now every `PeopleLite::*` / `Resources::*`
+  dispatch error fails the row immediately, except four that are about the
+  attester or the network: `NoAttestationAllowance`,
+  `PaidRegistrationLimitReached`, `TooManyLitePeople` and
+  `LitePeopleCollectionNotCreated`. Those park the row like an unfunded
+  signer, so running out of attestation allowance can no longer fail the whole
+  outbox. Errors from other pallets or the transport keep the retry budget.
 - **`all-in-one` serves `/api/v1/turn/issue-with-proof`.** It verifies proofs
   against the People Chain's rings, as `turn-api` does, where it used to
   answer every one with `503 ring roots not yet available`.

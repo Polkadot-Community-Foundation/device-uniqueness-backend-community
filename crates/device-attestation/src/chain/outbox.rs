@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU16;
 
 use sqlx::{PgPool, Row as _};
 use time::OffsetDateTime;
@@ -181,8 +182,81 @@ pub struct NewReservation {
 pub enum InsertError {
     #[error("username already taken")]
     Conflict,
+    /// The claimant already holds its cap of [open claims](open_claims). Only
+    /// [`insert_capped`] returns this.
+    #[error("too many open claims for this account")]
+    TooManyOpenClaims,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+/// Advisory-lock class for [`insert_capped`]. The second key is
+/// `hashtext(account_id)`, so claims by different subjects never wait on each
+/// other. Two-key advisory locks never collide with single-key ones such as
+/// the DeviceCheck claim lock.
+const OPEN_CLAIMS_LOCK_CLASS: i32 = 0x0DB0_0C1A;
+
+/// Insert a claim, refusing it with [`InsertError::TooManyOpenClaims`] when
+/// its claimant (`account_id`, the JWT subject) already holds `max_open`
+/// [open claims](open_claims), on any base. `None` inserts without a cap.
+///
+/// This is what stops one subject from cycling claims to keep a base full. A
+/// failed row keeps its discriminator for [`FAILED_DISCRIMINATOR_HOLD`], so it
+/// counts until then: a claim that fails fast frees no slot early, and the
+/// discriminators one subject's unlanded rows hold never exceed the cap. The
+/// cap is the claimant's own, so nobody else's claims can use it up.
+///
+/// The count and the insert run under a per-subject advisory lock in one
+/// transaction, so concurrent claims cannot both pass at `max_open - 1`. On a
+/// caller's transaction it runs as a savepoint, and the lock is held until the
+/// caller commits. `queue_group` is `Some` for the `QUEUED` intake lane.
+pub async fn insert_capped<'a, A>(
+    conn: A,
+    r: &NewReservation,
+    queue_group: Option<i32>,
+    max_open: Option<NonZeroU16>,
+) -> Result<i64, InsertError>
+where
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
+{
+    let mut tx = conn.begin().await?;
+    if let Some(max_open) = max_open {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(OPEN_CLAIMS_LOCK_CLASS)
+            .bind(&r.account_id)
+            .execute(&mut *tx)
+            .await?;
+        if open_claims(&mut *tx, &r.account_id).await? >= i64::from(max_open.get()) {
+            return Err(InsertError::TooManyOpenClaims);
+        }
+    }
+    let id = match queue_group {
+        Some(group) => insert_with(&mut *tx, r, Status::Queued, group).await?,
+        None => insert_with(&mut *tx, r, Status::Reserved, 1).await?,
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// How many open claims `account_id` (a JWT subject) has, on any base: rows
+/// that hold a discriminator and are not `ASSIGNED`. That is every row that can still land (`QUEUED`, `RESERVED`,
+/// `SUBMITTING`, `RETRY_AFTER`) plus `FAILED_TERMINAL` rows still inside
+/// [`FAILED_DISCRIMINATOR_HOLD`], the same rows [`allocated_discriminators`]
+/// counts as taken.
+pub async fn open_claims<'e, E>(executor: E, account_id: &str) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let sql = format!(
+        "SELECT count(*) FROM username_reservations \
+         WHERE account_id = $1 AND status <> '{assigned}' AND {HOLDS_DISCRIMINATOR}",
+        assigned = Status::Assigned.as_str(),
+    );
+    sqlx::query_scalar(&sql)
+        .bind(account_id)
+        .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
+        .fetch_one(executor)
+        .await
 }
 
 pub async fn insert<'e, E>(executor: E, r: &NewReservation) -> Result<i64, InsertError>
@@ -254,17 +328,46 @@ where
     Ok(row.try_get::<i64, _>("id")?)
 }
 
+/// How long a `FAILED_TERMINAL` row keeps its discriminator after it failed.
+///
+/// A failed row can still have a transaction in flight: the last submission
+/// may have timed out rather than been rejected. Every People transaction the
+/// writer signs is mortal for
+/// [`PEOPLE_TX_MORTALITY_BLOCKS`](super::writer::PEOPLE_TX_MORTALITY_BLOCKS),
+/// so once that many blocks have passed it can no longer land. This hold
+/// covers that window at a conservative block time, with room for a stalled
+/// chain. Releasing too early is not a uniqueness violation, since the chain
+/// enforces that; it only means a new claim on the same name may fail on chain.
+///
+/// Measured from `updated_at`, which is stamped when the row turns
+/// `FAILED_TERMINAL` and not written again afterwards. Anything that touched it
+/// later would only lengthen the hold.
+pub const FAILED_DISCRIMINATOR_HOLD: time::Duration = time::Duration::minutes(30);
+
+/// The SQL predicate for a row that holds its discriminator: any status but
+/// `FAILED_TERMINAL`, or failed within [`FAILED_DISCRIMINATOR_HOLD`], bound
+/// in seconds as `$2`. [`allocated_discriminators`] and [`open_claims`] share
+/// it, so the cap counts exactly the failed rows that still take a
+/// discriminator.
+const HOLDS_DISCRIMINATOR: &str = "(status <> 'FAILED_TERMINAL' \
+     OR updated_at > now() - make_interval(secs => $2::float8))";
+
+/// The discriminators the outbox holds under `base`: every row that can still
+/// land, plus `FAILED_TERMINAL` rows failed within
+/// [`FAILED_DISCRIMINATOR_HOLD`]. Older failed rows release theirs, so failed
+/// claims cannot exhaust a base permanently.
 pub async fn allocated_discriminators(
     pool: &PgPool,
     base: &str,
 ) -> Result<BTreeSet<u8>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT digits FROM username_reservations \
-         WHERE base = $1",
-    )
-    .bind(base)
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "SELECT digits FROM username_reservations WHERE base = $1 AND {HOLDS_DISCRIMINATOR}"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(base)
+        .bind(FAILED_DISCRIMINATOR_HOLD.whole_seconds())
+        .fetch_all(pool)
+        .await?;
 
     rows.into_iter()
         .map(|row| {

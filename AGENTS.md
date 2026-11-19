@@ -73,7 +73,7 @@ Each service's boundary, persistence, endpoints, and data-flow invariants are in
   It checks **one** network build (`DUB_NETWORK`, default `testnet`). CI runs it for both, so
   run `DUB_NETWORK=polkadot just check` too when touching anything invite-tickets or
   chain-types.
-- `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 12 suites / 30 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
+- `just test-live-db` (also `just test-live`) — the deterministic Postgres gate: 12 suites / 34 ignored tests against a per-run isolated Compose project. CI runs it after `just check`; run both before declaring done.
 - `just test-live-chain` — optional Postgres + live People Chain suites; external RPC availability keeps it outside the merge/release gate.
 - `just test-live-providers` — optional credentialed APNs/FCM smokes; runs only the providers configured in the environment and fails if neither is configured.
 - `just coverage-db` — canonical deterministic coverage (offline + Postgres). `just coverage-full` additionally merges the optional live-chain suites.

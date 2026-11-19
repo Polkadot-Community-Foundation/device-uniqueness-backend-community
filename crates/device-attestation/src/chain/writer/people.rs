@@ -4,12 +4,15 @@
 use anyhow::Result;
 use chain_types::{PeopleConfig, PeopleExtrinsicParamsBuilder};
 use sqlx::PgPool;
-use subxt::{dynamic::Value, tx::DynamicPayload, utils::AccountId32};
+use subxt::{
+    config::transaction_extensions::CheckMortalityParams, dynamic::Value, tx::DynamicPayload,
+    utils::AccountId32,
+};
 use time::OffsetDateTime;
 
 use super::link::PeopleRuntime;
 use super::{
-    engine::{finalize, parse_candidate, Cx, UNFUNDED_PARK_BACKOFF_SECS},
+    engine::{finalize, parse_candidate, Cx, PARK_BACKOFF_SECS},
     error::{Op, WriterError},
     events::{check_proxied_call, item_results},
     lane::{observe_defer, park_until, row_backoff, Gate, Lane, Outcome},
@@ -23,11 +26,17 @@ use crate::chain::{
     outbox::{self, Guard, Reservation},
     people::PeopleChain,
 };
-use crate::signature::verify_candidate_signature;
+use crate::signature::{
+    verify_candidate_signature, verify_consumer_registration_signature, ConsumerRegistration,
+};
 
 /// The gate's verdict on a candidate signature the runtime would reject as
 /// `InvalidAttestationSignature`. Terminal: only the client can re-sign.
 const BAD_CANDIDATE_SIGNATURE: &str = "candidate signature does not verify";
+
+/// The gate's verdict on a consumer registration signature the runtime would
+/// reject, after charging the fee. Terminal: only the client can re-sign.
+const BAD_CONSUMER_SIGNATURE: &str = "consumer registration signature does not verify";
 
 /// How long a row signed for a runtime that is not live yet waits before the
 /// gate looks again. Long enough not to spin a pass on it, short enough that
@@ -35,18 +44,22 @@ const BAD_CANDIDATE_SIGNATURE: &str = "candidate signature does not verify";
 const PENDING_RUNTIME_DEFER_SECS: i64 = 60;
 
 /// The payload-version half of the gate: whether a row signed in `declared`
-/// can be submitted to a runtime that takes `accepted`.
+/// can be submitted to a runtime that takes `accepted`, and if so, its format.
 ///
 /// An older format than the runtime takes is terminal: the consumer signature
 /// covers fields the call no longer carries, and only the client can re-sign.
 /// A newer one waits: it was accepted for a runtime upgrade that is not
 /// enacted here yet, and becomes submittable when it is.
-fn check_payload_version(declared: u16, accepted: PayloadVersion, now: i64) -> Result<(), Gate> {
+fn check_payload_version(
+    declared: u16,
+    accepted: PayloadVersion,
+    now: i64,
+) -> Result<PayloadVersion, Gate> {
     let declared = PayloadVersion::try_from(declared)
         .map_err(|_| Gate::Failed(format!("unsupported payload version {declared}")))?;
     match (declared, accepted) {
         (PayloadVersion::V1, PayloadVersion::V1) | (PayloadVersion::V2, PayloadVersion::V2) => {
-            Ok(())
+            Ok(declared)
         }
         (PayloadVersion::V1, PayloadVersion::V2) => Err(Gate::Failed(format!(
             "payload version {declared} is no longer accepted: the runtime takes {accepted}"
@@ -88,13 +101,15 @@ impl Lane for People {
 
     /// Checks the row against the runtime at this pass, offline, so a row the
     /// chain would reject never spends an attempt or a fee: its payload
-    /// version must be the one `attest`'s shape takes, and its candidate
-    /// signature must verify in the form the runtime accepts.
+    /// version must be the one `attest`'s shape takes, and its candidate and
+    /// consumer registration signatures must verify in the form the runtime
+    /// accepts. Intake checks both too; the gate catches rows stored before
+    /// it did, and a runtime that changed form since.
     ///
     /// Passing the gate is what lets the transaction builder take the
     /// `attest` shape from the row's payload version.
     fn gate(r: &Reservation, runtime: PeopleRuntime, now: i64) -> Result<[u8; 32], Gate> {
-        check_payload_version(
+        let version = check_payload_version(
             r.payload_version,
             runtime.attest_shape.payload_version(),
             now,
@@ -107,6 +122,25 @@ impl Lane for People {
             &runtime.signature_form,
         ) {
             return Err(Gate::Failed(BAD_CANDIDATE_SIGNATURE.to_string()));
+        }
+        let consumer = ConsumerRegistration {
+            account: &candidate,
+            verifier: &runtime.attester,
+            identifier_key: &r.identifier_key,
+            // The runtime signs the username up to its `.`, as `base` is.
+            base: r
+                .full_username
+                .split_once('.')
+                .map_or(r.full_username.as_str(), |(base, _)| base),
+            reserved_username: r.reserved_username.as_deref(),
+        };
+        if !verify_consumer_registration_signature(
+            version,
+            &consumer,
+            &r.consumer_registration_signature,
+            &runtime.signature_form,
+        ) {
+            return Err(Gate::Failed(BAD_CONSUMER_SIGNATURE.to_string()));
         }
         Ok(candidate)
     }
@@ -222,9 +256,10 @@ impl Lane for People {
                     id = r.id,
                     username = %r.full_username,
                     attempt = r.attempt,
-                    backoff_secs = UNFUNDED_PARK_BACKOFF_SECS,
+                    backoff_secs = PARK_BACKOFF_SECS,
                     reason,
-                    "registration parked without spending an attempt; the signer cannot pay fees"
+                    "registration parked without spending an attempt; the signer cannot pay fees, \
+                     or the runtime refuses every registration right now (see reason)"
                 );
             }
             Outcome::Defer {
@@ -280,9 +315,49 @@ async fn sign(
     >,
 > {
     let payload = People::tx(rows, cx.proxy_for.as_ref());
-    let params = PeopleExtrinsicParamsBuilder::new().nonce(nonce).build();
     let at = chain.online().at_current_block().await?;
+    let finalized = (at.block_number(), at.block_hash());
+    let (birth_n, birth_hash) = match chain.best_block().await {
+        Ok(best) => birth_block(finalized, best),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "best block unreadable; registration transaction dated from the finalized block"
+            );
+            finalized
+        }
+    };
+    let params = PeopleExtrinsicParamsBuilder::new()
+        .nonce(nonce)
+        .mortality(CheckMortalityParams::mortal_from_unchecked(
+            super::PEOPLE_TX_MORTALITY_BLOCKS,
+            birth_n,
+            birth_hash,
+        ))
+        .build();
     Ok(chain_client::create_signed_v4(&at, &payload, cx.signer, params).await?)
+}
+
+/// The block a registration transaction's mortality counts from, given the
+/// finalized and best blocks as `(number, hash)`.
+///
+/// The finalized block is the safe choice: it cannot be reorganised away,
+/// which would void the transaction. But the node checks mortality against its
+/// best block, so a transaction dated from a finalized block
+/// [`PEOPLE_TX_MORTALITY_BLOCKS`](super::PEOPLE_TX_MORTALITY_BLOCKS) or more
+/// behind it is dead on arrival, and one dated from a block nearly that far
+/// behind dies before it can be included. So while finality keeps up (lag up
+/// to half the window) the transaction is dated from the finalized block, and
+/// beyond that from the best one. Either way it cannot land more than the
+/// window's length past the head the writer saw, which is what
+/// [`FAILED_DISCRIMINATOR_HOLD`](crate::chain::outbox::FAILED_DISCRIMINATOR_HOLD)
+/// relies on.
+fn birth_block<H>(finalized: (u64, H), best: (u64, H)) -> (u64, H) {
+    if best.0.saturating_sub(finalized.0) <= super::PEOPLE_TX_MORTALITY_BLOCKS / 2 {
+        finalized
+    } else {
+        best
+    }
 }
 
 async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str, nonce: u64) -> Result<(), WriterError> {
@@ -305,13 +380,16 @@ async fn mark(cx: &Cx<'_>, r: &Reservation, tx_hash: &str, nonce: u64) -> Result
 mod tests {
     use super::*;
     use crate::chain::attest::AttestShape;
-    use crate::chain::writer::fixtures::{reservation, signed_people_reservation};
+    use crate::chain::writer::fixtures::{
+        reservation, sign_people_consumer, signed_people_reservation, PEOPLE_ATTESTER as ATTESTER,
+    };
     use crate::signature::AccountSignatureForm;
 
     fn runtime(signature_form: AccountSignatureForm) -> PeopleRuntime {
         PeopleRuntime {
             signature_form,
             attest_shape: AttestShape::WithUsername,
+            attester: ATTESTER,
         }
     }
 
@@ -319,6 +397,7 @@ mod tests {
         PeopleRuntime {
             signature_form,
             attest_shape: AttestShape::WithoutUsername,
+            attester: ATTESTER,
         }
     }
 
@@ -381,6 +460,81 @@ mod tests {
     }
 
     #[test]
+    fn a_transaction_is_dated_from_finality_unless_finality_lags_half_the_window() {
+        let half = crate::chain::writer::PEOPLE_TX_MORTALITY_BLOCKS / 2;
+        assert_eq!(birth_block((100, 'f'), (100, 'b')), (100, 'f'));
+        assert_eq!(
+            birth_block((100, 'f'), (100 + half, 'b')),
+            (100, 'f'),
+            "at least half the window is left after a finalized birth"
+        );
+        assert_eq!(
+            birth_block((100, 'f'), (101 + half, 'b')),
+            (101 + half, 'b'),
+            "a finality stall must not leave the transaction dead on arrival"
+        );
+        assert_eq!(
+            birth_block((100, 'f'), (99, 'b')),
+            (100, 'f'),
+            "a best block behind finality (a lagging node) keeps the finalized one"
+        );
+    }
+
+    #[test]
+    fn a_consumer_signature_the_runtime_would_reject_fails_before_submission() {
+        let (r, _) = signed_people_reservation();
+        let plain = || runtime(AccountSignatureForm::Plain);
+
+        let mut garbage = r.clone();
+        garbage.consumer_registration_signature = vec![4; 64];
+        assert_eq!(
+            failure(People::gate(&garbage, plain(), 0)),
+            BAD_CONSUMER_SIGNATURE
+        );
+
+        // The base is covered, the discriminator is not: the backend picks it
+        // after the client signed.
+        let mut other_digits = r.clone();
+        other_digits.full_username = "testing.17".to_string();
+        assert!(People::gate(&other_digits, plain(), 0).is_ok());
+        let mut other_base = r.clone();
+        other_base.full_username = "mallory.42".to_string();
+        assert_eq!(
+            failure(People::gate(&other_base, plain(), 0)),
+            BAD_CONSUMER_SIGNATURE
+        );
+
+        let mut reserved = r.clone();
+        reserved.reserved_username = Some("testing".to_string());
+        assert_eq!(
+            failure(People::gate(&reserved, plain(), 0)),
+            BAD_CONSUMER_SIGNATURE
+        );
+
+        // Signed for another attester than the one this writer attests as.
+        let other_attester = PeopleRuntime {
+            attester: [0xbb; 32],
+            ..plain()
+        };
+        assert_eq!(
+            failure(People::gate(&r, other_attester, 0)),
+            BAD_CONSUMER_SIGNATURE
+        );
+
+        // A format-1 consumer signature stored as format 2.
+        let mut relabelled = r.clone();
+        relabelled.payload_version = 2;
+        assert_eq!(
+            failure(People::gate(
+                &relabelled,
+                upgraded(AccountSignatureForm::Plain),
+                0
+            )),
+            BAD_CONSUMER_SIGNATURE
+        );
+    }
+
+    #[test]
     fn a_row_in_the_format_the_runtime_takes_passes() {
         let (mut r, candidate) = signed_people_reservation();
         assert_eq!(
@@ -390,6 +544,7 @@ mod tests {
         );
 
         r.payload_version = 2;
+        sign_people_consumer(&mut r);
         assert_eq!(
             People::gate(&r, upgraded(AccountSignatureForm::Plain), 0).ok(),
             Some(candidate),

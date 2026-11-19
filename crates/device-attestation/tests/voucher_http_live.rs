@@ -48,6 +48,22 @@ fn claim_body(base: &str, voucher: Option<&str>) -> serde_json::Value {
     message.extend_from_slice(&candidate.0);
     message.extend_from_slice(&ring);
     let signature = keypair.sign(&message).0;
+    // The format-1 consumer registration payload, SCALE-encoded as the
+    // runtime's `signing_payload` builds it: account, verifier (the test
+    // config's attester), identifier key, the base as a compact-length byte
+    // string, and no reserved name.
+    let identifier_key = [5u8; 65];
+    let base_len = u8::try_from(base.len()).expect("base under 64 bytes") << 2;
+    let consumer = [
+        &candidate.0[..],
+        &Config::test_default().attester_account,
+        &identifier_key,
+        &[base_len],
+        base.as_bytes(),
+        &[0],
+    ]
+    .concat();
+    let consumer_signature = keypair.sign(&consumer).0;
 
     let mut body = serde_json::json!({
         "candidateAccountId": candidate.to_account_id().to_string(),
@@ -55,8 +71,8 @@ fn claim_body(base: &str, voucher: Option<&str>) -> serde_json::Value {
         "candidateSignature": format!("0x{}", hex::encode(signature)),
         "ringVrfKey": format!("0x{}", hex::encode(ring)),
         "proofOfOwnership": format!("0x{}", "03".repeat(64)),
-        "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
-        "identifierKey": format!("0x{}", "05".repeat(65))
+        "consumerRegistrationSignature": format!("0x{}", hex::encode(consumer_signature)),
+        "identifierKey": format!("0x{}", hex::encode(identifier_key))
     });
     if let Some(key) = voucher {
         body["lifetimePoUDVoucher"] = serde_json::json!(key);

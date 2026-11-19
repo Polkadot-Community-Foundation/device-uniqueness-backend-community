@@ -45,6 +45,17 @@ const DEFAULT_BATCH_SIZE: u16 = 25;
 /// Deliberately small.
 const DEFAULT_DOTNS_BATCH_SIZE: u16 = 3;
 
+/// How many blocks a People registration transaction stays valid after the
+/// block it is dated from (see `people::birth_block`): the finalized block, or
+/// the best one while finality lags.
+///
+/// Mortality is what puts a bound on a failed row: once this many blocks have
+/// passed, nothing the writer signed for it can still land, so
+/// [`outbox::FAILED_DISCRIMINATOR_HOLD`](super::outbox::FAILED_DISCRIMINATOR_HOLD)
+/// can safely release its discriminator. An immortal transaction would stay
+/// valid until its nonce was spent, with no such bound.
+pub const PEOPLE_TX_MORTALITY_BLOCKS: u64 = 64;
+
 /// Chain-writer configuration, loaded from the environment.
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
@@ -217,7 +228,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         signer_account,
         proxy_for,
         config,
-        people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
+        people: Drain::new(batch_max, PeopleLink(chain_for_lane, config_attester)),
         dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
         settler,
@@ -426,6 +437,19 @@ fn cx_of<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_row_is_held_well_past_its_last_transaction_dying() {
+        // A People block time no network this backend serves exceeds.
+        const SLOWEST_BLOCK_SECS: i64 = 12;
+        let mortality_window = time::Duration::seconds(
+            i64::try_from(PEOPLE_TX_MORTALITY_BLOCKS).unwrap() * SLOWEST_BLOCK_SECS,
+        );
+        assert!(
+            super::super::outbox::FAILED_DISCRIMINATOR_HOLD >= mortality_window * 2,
+            "the hold must cover the mortality window twice over, for a stalled chain"
+        );
+    }
 
     const FROM_ENV_VARS: &[&str] = &[
         "DEVICE_ATTESTATION_DATABASE_URL",

@@ -106,7 +106,9 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
         (status = 400, description = "Validation failed (with per-field `fields`; an unsupported \
             `payloadVersion`, or one the connected People runtime does not take — `1` once \
             `PeopleLite.attest` dropped the username, `2` before — is reported on that field \
-            rather than as an invalid signature), malformed JSON, \
+            rather than as an invalid signature; `candidateSignature` and \
+            `consumerRegistrationSignature` are both verified, the consumer one only once the \
+            candidate one is good), malformed JSON, \
             a `lifetimePoUDVoucher` that is unknown, already used, or expired \
             (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), \
             a device-evidence field of the wrong JSON type (in every Widevine mode, like any \
@@ -129,7 +131,12 @@ const DEVICE_TOKEN_HEADER: &str = "Device-Token-iOS";
             outcome.",
          body = serde_json::Value,
          example = json!({ "error": "DEVICE_EVIDENCE_INVALID", "message": "device evidence invalid" })),
-        (status = 409, description = "Preferred digits taken, no digits available, username taken, or \
+        (status = 409, description = "Preferred digits taken, no digits available, username taken, \
+            too many pending claims for the authenticated account (it already holds \
+            `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` claims, default 3, on any base, that have not \
+            landed and still hold a discriminator: in flight, or failed within the last 30 minutes; \
+            `{\"error\": \"Too many pending username claims for this account. Try again once one \
+            completes.\"}`; temporary, and voucher claims are exempt), or \
             the claim carries `dotns.reservedUsername` for a personhood name that is already owned \
             or whose reservation queue is full — checked against the reserved name itself, which \
             `attest` takes as its own argument and which need not be `username`. The runtime checks \
@@ -556,15 +563,18 @@ async fn reserve(
         base: new.base.clone(),
         digits: new.digits.clone(),
     };
+    let busy = || UsernamesError::TooManyOpenClaims;
+    let cap = state.config.max_open_claims_per_subject;
 
     if let Some(device) = widevine_device {
         let mut tx = state.pool.begin().await.map_err(|e| {
             tracing::error!(error = ?e, "begin reservation transaction failed");
             UsernamesError::PersistenceFailed
         })?;
-        let id = match insert_reservation(&mut *tx, new, queue_group).await {
+        let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
             Ok(id) => id,
             Err(InsertError::Conflict) => return Err(conflict()),
+            Err(InsertError::TooManyOpenClaims) => return Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 return Err(UsernamesError::PersistenceFailed);
@@ -590,9 +600,10 @@ async fn reserve(
     }
 
     let Some(token) = mark_token else {
-        return match insert_reservation(&state.pool, new, queue_group).await {
+        return match insert_reservation(&state.pool, new, queue_group, cap).await {
             Ok(id) => Ok(ReserveOutcome::Reserved(id)),
             Err(InsertError::Conflict) => Err(conflict()),
+            Err(InsertError::TooManyOpenClaims) => Err(busy()),
             Err(InsertError::Db(e)) => {
                 tracing::error!(error = ?e, "reservation outbox insert failed");
                 Err(UsernamesError::PersistenceFailed)
@@ -642,9 +653,10 @@ async fn reserve(
 
     // Insert first: an insert failure leaves the transaction untouched and
     // never marks the device, so the slot is preserved.
-    let id = match insert_reservation(&mut *tx, new, queue_group).await {
+    let id = match insert_reservation(&mut *tx, new, queue_group, cap).await {
         Ok(id) => id,
         Err(InsertError::Conflict) => return Err(conflict()),
+        Err(InsertError::TooManyOpenClaims) => return Err(busy()),
         Err(InsertError::Db(e)) => {
             tracing::error!(error = ?e, "reservation outbox insert failed");
             return Err(UsernamesError::PersistenceFailed);
@@ -669,20 +681,20 @@ async fn reserve(
 }
 
 /// Insert the outbox row on either intake lane: `QUEUED` with its priority
-/// group when the queue lane is on, plain `RESERVED` otherwise. Generic over
-/// the executor so it runs on the pool or inside the DeviceCheck transaction.
-async fn insert_reservation<'e, E>(
-    executor: E,
+/// group when the queue lane is on, plain `RESERVED` otherwise. Refused with
+/// [`InsertError::TooManyOpenClaims`] when the subject already holds `cap`
+/// open claims.
+/// Runs on the pool, or inside the DeviceCheck or Widevine transaction.
+async fn insert_reservation<'a, A>(
+    conn: A,
     new: &NewReservation,
     queue_group: Option<u8>,
+    cap: Option<std::num::NonZeroU16>,
 ) -> Result<i64, InsertError>
 where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
 {
-    match queue_group {
-        Some(group) => outbox::insert_queued(executor, new, i32::from(group)).await,
-        None => outbox::insert(executor, new).await,
-    }
+    outbox::insert_capped(conn, new, queue_group.map(i32::from), cap).await
 }
 
 /// Assemble the outbox row from the validated request (shared by the voucher

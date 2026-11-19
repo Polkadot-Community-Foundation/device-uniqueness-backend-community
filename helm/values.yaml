@@ -189,6 +189,9 @@ workloads:
       # true answers POST /api/v1/usernames with 503 INTAKE_PAUSED, to drain the
       # outbox ahead of a People runtime upgrade.
       INTAKE_PAUSED: "false"
+      # Most open username claims one JWT subject may hold at once, on any
+      # base (in flight, or failed within the last 30 min). 0 disables.
+      USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT: "3"
       JWT_ISSUER: "polkadot-app"
       ANDROID_PACKAGE_NAMES: ""
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ""
@@ -284,6 +287,9 @@ workloads:
       # true answers POST /api/v1/usernames with 503 INTAKE_PAUSED, to drain the
       # outbox ahead of a People runtime upgrade.
       INTAKE_PAUSED: "false"
+      # Most open username claims one JWT subject may hold at once, on any
+      # base (in flight, or failed within the last 30 min). 0 disables.
+      USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT: "3"
       IOS_PACKAGE_NAMES: ""
       JWT_ISSUER: "polkadot-app"
       PLAY_INTEGRITY_MODE: "strict"

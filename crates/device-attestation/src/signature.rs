@@ -17,7 +17,10 @@
 //! `indiv_support::context::signing_payload` builds it for the personhood
 //! product.
 
+use subxt::ext::codec::Encode as _;
 use subxt_signer::sr25519::{verify, PublicKey, Signature};
+
+use crate::chain::attest::PayloadVersion;
 
 /// The pallet that verifies `PeopleLite.attest`'s candidate signature.
 pub(crate) const PEOPLE_PALLET: &str = "PeopleLite";
@@ -113,6 +116,71 @@ pub(crate) fn verify_candidate_signature(
 /// Builds the message a candidate signs for `PeopleLite.attest`.
 pub(crate) fn candidate_message(candidate_pubkey: &[u8; 32], ring_vrf_key: &[u8]) -> Vec<u8> {
     [POP_REGISTER_PREFIX, candidate_pubkey, ring_vrf_key].concat()
+}
+
+/// What `consumerRegistrationSignature` covers: the fields of
+/// `PeopleLite.attest`'s consumer registration plus the attester (the
+/// runtime's `verifier`, the call's origin).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConsumerRegistration<'a> {
+    /// The candidate, who signs.
+    pub account: &'a [u8; 32],
+    /// The attester authority (`ATTESTER_ACCOUNT`), `attest`'s origin.
+    pub verifier: &'a [u8; 32],
+    /// The 65-byte communication identifier key.
+    pub identifier_key: &'a [u8],
+    /// The username base, without the `.` and the discriminator. Format `1`
+    /// only.
+    pub base: &'a str,
+    /// The reserved personhood name, if any. Format `1` only.
+    pub reserved_username: Option<&'a str>,
+}
+
+/// Builds the message the candidate signs for `attest`'s consumer
+/// registration in `version`, as the runtime's
+/// `LiteConsumerRegistrationParams::signing_payload` does:
+///
+/// - `1`: `(account, verifier, identifier_key, base, reserved_username)`
+///   SCALE-encoded. The runtime signs the username up to its `.`, so the
+///   discriminator the backend picks later is not covered.
+/// - `2`: `(account, verifier, identifier_key)` SCALE-encoded.
+///
+/// `None` when `identifier_key` is not 65 bytes, which the runtime's type
+/// cannot hold.
+pub(crate) fn consumer_registration_message(
+    version: PayloadVersion,
+    c: &ConsumerRegistration<'_>,
+) -> Option<Vec<u8>> {
+    let identifier_key = <&[u8; 65]>::try_from(c.identifier_key).ok()?;
+    Some(match version {
+        PayloadVersion::V1 => (
+            c.account,
+            c.verifier,
+            identifier_key,
+            c.base.as_bytes(),
+            c.reserved_username.map(str::as_bytes),
+        )
+            .encode(),
+        PayloadVersion::V2 => (c.account, c.verifier, identifier_key).encode(),
+    })
+}
+
+/// Verifies `signature` is the candidate's consent to the consumer
+/// registration `c` in `version`, in `signature_form`, the form the People
+/// runtime accepts. The runtime checks it in the same form as the candidate
+/// signature.
+///
+/// The runtime rejects a bad one only after the transaction has paid its fee,
+/// so this is what keeps a claim that can never land out of the outbox.
+pub(crate) fn verify_consumer_registration_signature(
+    version: PayloadVersion,
+    c: &ConsumerRegistration<'_>,
+    signature: &[u8],
+    signature_form: &AccountSignatureForm,
+) -> bool {
+    consumer_registration_message(version, c).is_some_and(|message| {
+        verify_account_signature(signature, &message, c.account, signature_form)
+    })
 }
 
 #[cfg(test)]
@@ -269,5 +337,128 @@ mod tests {
             &ring_vrf_key,
             &plain
         ));
+    }
+
+    /// The byte layout the runtime's `signing_payload` SCALE-encodes:
+    /// fixed-size accounts and identifier key raw, the base as a
+    /// compact-length-prefixed byte string, the reserved name as an `Option`.
+    #[test]
+    fn consumer_registration_message_matches_the_runtime_encoding() {
+        let account = [1u8; 32];
+        let verifier = [2u8; 32];
+        let identifier_key = [3u8; 65];
+        let c = ConsumerRegistration {
+            account: &account,
+            verifier: &verifier,
+            identifier_key: &identifier_key,
+            base: "aliceuser",
+            reserved_username: Some("alice"),
+        };
+        let head = [&account[..], &verifier[..], &identifier_key[..]].concat();
+
+        assert_eq!(
+            consumer_registration_message(PayloadVersion::V1, &c).unwrap(),
+            [&head[..], &[9 << 2], b"aliceuser", &[1, 5 << 2], b"alice"].concat()
+        );
+        let unreserved = ConsumerRegistration {
+            reserved_username: None,
+            ..c
+        };
+        assert_eq!(
+            consumer_registration_message(PayloadVersion::V1, &unreserved).unwrap(),
+            [&head[..], &[9 << 2], b"aliceuser", &[0]].concat()
+        );
+        assert_eq!(
+            consumer_registration_message(PayloadVersion::V2, &c).unwrap(),
+            head,
+            "format 2 covers neither the base nor the reserved name"
+        );
+        assert_eq!(
+            consumer_registration_message(
+                PayloadVersion::V2,
+                &ConsumerRegistration {
+                    identifier_key: &[3u8; 64],
+                    ..c
+                }
+            ),
+            None,
+            "an identifier key the runtime cannot hold has no message"
+        );
+    }
+
+    #[test]
+    fn consumer_registration_signature_binds_every_signed_field() {
+        let keypair = alice();
+        let account = keypair.public_key().0;
+        let verifier = [2u8; 32];
+        let identifier_key = [3u8; 65];
+        let form = AccountSignatureForm::InContext(signing_context(b"paseo"));
+        let c = ConsumerRegistration {
+            account: &account,
+            verifier: &verifier,
+            identifier_key: &identifier_key,
+            base: "aliceuser",
+            reserved_username: None,
+        };
+        let sign = |version| {
+            let message = consumer_registration_message(version, &c).unwrap();
+            keypair
+                .sign(&[&signing_context(b"paseo")[..], &message].concat())
+                .0
+        };
+        let v1 = sign(PayloadVersion::V1);
+        let v2 = sign(PayloadVersion::V2);
+        let verifies = |version, c: &ConsumerRegistration<'_>, signature: &[u8]| {
+            verify_consumer_registration_signature(version, c, signature, &form)
+        };
+
+        assert!(verifies(PayloadVersion::V1, &c, &v1));
+        assert!(verifies(PayloadVersion::V2, &c, &v2));
+        assert!(!verifies(PayloadVersion::V2, &c, &v1), "wrong format");
+        assert!(!verifies(
+            PayloadVersion::V1,
+            &ConsumerRegistration {
+                base: "mallory",
+                ..c
+            },
+            &v1
+        ));
+        assert!(!verifies(
+            PayloadVersion::V1,
+            &ConsumerRegistration {
+                reserved_username: Some("alice"),
+                ..c
+            },
+            &v1
+        ));
+        assert!(
+            !verifies(
+                PayloadVersion::V2,
+                &ConsumerRegistration {
+                    verifier: &[9u8; 32],
+                    ..c
+                },
+                &v2
+            ),
+            "signed for another attester"
+        );
+        assert!(
+            verifies(
+                PayloadVersion::V2,
+                &ConsumerRegistration {
+                    base: "mallory",
+                    ..c
+                },
+                &v2
+            ),
+            "format 2 does not cover the base"
+        );
+        assert!(!verify_consumer_registration_signature(
+            PayloadVersion::V1,
+            &c,
+            &v1,
+            &AccountSignatureForm::Plain
+        ));
+        assert!(!verifies(PayloadVersion::V1, &c, &[0u8; 64]), "garbage");
     }
 }

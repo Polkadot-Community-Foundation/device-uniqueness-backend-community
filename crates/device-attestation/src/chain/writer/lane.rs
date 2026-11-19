@@ -9,8 +9,8 @@ use time::OffsetDateTime;
 
 use super::{
     engine::{
-        Cx, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE, STALE_NONCE_BACKOFF_SECS,
-        UNFUNDED_PARK_BACKOFF_SECS,
+        Cx, PARK_BACKOFF_SECS, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE,
+        STALE_NONCE_BACKOFF_SECS,
     },
     error::WriterError,
     link::Link as ChainLink,
@@ -207,7 +207,7 @@ pub(super) fn observe_defer(
 }
 
 pub(super) fn park_until() -> OffsetDateTime {
-    OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS)
+    OffsetDateTime::now_utc() + time::Duration::seconds(PARK_BACKOFF_SECS)
 }
 
 pub(super) fn row_backoff(attempt: i32) -> time::Duration {

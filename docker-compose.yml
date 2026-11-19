@@ -97,6 +97,8 @@ services:
       REGISTRATION_VOUCHERS_ENABLED: ${REGISTRATION_VOUCHERS_ENABLED:-false}
       # Outbox drain: true answers every new claim with a 503.
       INTAKE_PAUSED: ${INTAKE_PAUSED:-false}
+      # Open claims one JWT subject may hold at once, across all bases; 0 disables the cap.
+      USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT: ${USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT:-3}
       # ANDROID_ATTESTATION_CRL_* are left out on purpose: the built-in
       # defaults are correct and .env.example forbids overriding them outside tests.
       QUEUE_ENABLED: ${QUEUE_ENABLED:-false}
