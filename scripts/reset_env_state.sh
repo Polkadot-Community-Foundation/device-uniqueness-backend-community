@@ -7,13 +7,13 @@
 #
 #   deleted  username_reservations  the registration outbox. ASSIGNED rows name
 #                                   usernames no chain will confirm, and every
-#                                   row — whatever its status — permanently
-#                                   occupies a discriminator, because
-#                                   `allocated_discriminators` unions the whole
-#                                   table into availability with no status
-#                                   filter. Left in place, a base with 100
-#                                   historical rows reports EXHAUSTED against an
-#                                   empty chain.
+#                                   row except a FAILED_TERMINAL one older than
+#                                   `FAILED_DISCRIMINATOR_HOLD` occupies a
+#                                   discriminator: `allocated_discriminators`
+#                                   unions those rows into availability. Left in
+#                                   place, a base with 100 historical ASSIGNED
+#                                   rows reports EXHAUSTED against an empty
+#                                   chain.
 #   deleted  writer_lease           expires on its own, but clearing it lets the
 #                                   restarted writer claim immediately instead of
 #                                   waiting out a lease from before the reset.

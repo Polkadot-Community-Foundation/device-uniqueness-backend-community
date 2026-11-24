@@ -52,7 +52,13 @@ pub(super) fn record_submit_outcome(lane: &'static str, outcome: &'static str) {
 }
 
 pub(super) async fn record_outbox_gauges(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for (status, depth) in outbox::depth_by_status(pool).await? {
+    let depths = outbox::depth_by_status(pool).await?;
+    let undrained: i64 = outbox::undrained(&depths)
+        .iter()
+        .map(|(_, rows)| rows)
+        .sum();
+    metrics::gauge!("dub_outbox_undrained").set(undrained as f64);
+    for (status, depth) in depths {
         let status = status.as_str();
         metrics::gauge!("dub_outbox_depth", "status" => status).set(depth.depth as f64);
         metrics::gauge!("dub_outbox_oldest_age_seconds", "status" => status)

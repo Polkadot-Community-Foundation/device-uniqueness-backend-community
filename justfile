@@ -23,7 +23,7 @@ lint:
 test:
     cargo test --workspace
 
-# Canonical deterministic live gate: 12 suites / 30 ignored tests against three
+# Canonical deterministic live gate: 12 suites / 34 ignored tests against three
 # per-run scratch Postgres containers. CI invokes the same script directly.
 test-live: test-live-db
 

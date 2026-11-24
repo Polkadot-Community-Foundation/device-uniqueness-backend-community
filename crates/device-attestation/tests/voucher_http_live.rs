@@ -10,6 +10,7 @@ use http_body_util::BodyExt as _;
 use sqlx::Row as _;
 use tower::ServiceExt as _;
 
+use device_attestation::chain::asset_hub::AssetHub;
 use device_attestation::eligibility;
 use device_attestation::{AppState, Config, Jwt, PeopleChain};
 
@@ -47,6 +48,22 @@ fn claim_body(base: &str, voucher: Option<&str>) -> serde_json::Value {
     message.extend_from_slice(&candidate.0);
     message.extend_from_slice(&ring);
     let signature = keypair.sign(&message).0;
+    // The format-1 consumer registration payload, SCALE-encoded as the
+    // runtime's `signing_payload` builds it: account, verifier (the test
+    // config's attester), identifier key, the base as a compact-length byte
+    // string, and no reserved name.
+    let identifier_key = [5u8; 65];
+    let base_len = u8::try_from(base.len()).expect("base under 64 bytes") << 2;
+    let consumer = [
+        &candidate.0[..],
+        &Config::test_default().attester_account,
+        &identifier_key,
+        &[base_len],
+        base.as_bytes(),
+        &[0],
+    ]
+    .concat();
+    let consumer_signature = keypair.sign(&consumer).0;
 
     let mut body = serde_json::json!({
         "candidateAccountId": candidate.to_account_id().to_string(),
@@ -54,8 +71,8 @@ fn claim_body(base: &str, voucher: Option<&str>) -> serde_json::Value {
         "candidateSignature": format!("0x{}", hex::encode(signature)),
         "ringVrfKey": format!("0x{}", hex::encode(ring)),
         "proofOfOwnership": format!("0x{}", "03".repeat(64)),
-        "consumerRegistrationSignature": format!("0x{}", "04".repeat(64)),
-        "identifierKey": format!("0x{}", "05".repeat(65))
+        "consumerRegistrationSignature": format!("0x{}", hex::encode(consumer_signature)),
+        "identifierKey": format!("0x{}", hex::encode(identifier_key))
     });
     if let Some(key) = voucher {
         body["lifetimePoUDVoucher"] = serde_json::json!(key);
@@ -98,8 +115,9 @@ fn unique_base(prefix: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres (DEVICE_ATTESTATION_TEST_DATABASE_URL) and a reachable People Chain RPC \
-            (PEOPLE_RPC_URL or the Paseo default); run with --ignored"]
+#[ignore = "requires Postgres (DEVICE_ATTESTATION_TEST_DATABASE_URL) and reachable People Chain \
+            and Asset Hub RPCs (PEOPLE_RPC_URL and ASSET_HUB_RPC_URL, or the Paseo defaults); \
+            run with --ignored"]
 async fn voucher_claim_is_instant_over_the_production_router() {
     let database_url = std::env::var("DEVICE_ATTESTATION_TEST_DATABASE_URL")
         .expect("DEVICE_ATTESTATION_TEST_DATABASE_URL is required");
@@ -109,12 +127,18 @@ async fn voucher_claim_is_instant_over_the_production_router() {
     let rpc_url = std::env::var("PEOPLE_RPC_URL")
         .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
     let chain = PeopleChain::connect(&rpc_url).await.expect("live RPC");
+    let asset_hub_url = std::env::var("ASSET_HUB_RPC_URL")
+        .unwrap_or_else(|_| "wss://paseo-asset-hub-next-rpc.polkadot.io".to_string());
+    let asset_hub = AssetHub::connect_for_reads(&asset_hub_url)
+        .await
+        .expect("live Asset Hub RPC");
 
     let mut config = Config::test_default();
     config.queue_enabled = true;
     config.registration_vouchers_enabled = true;
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    let app = device_attestation::routes(AppState::new(pool.clone(), chain, jwt, config));
+    let app =
+        device_attestation::routes(AppState::new(pool.clone(), chain, asset_hub, jwt, config));
     let token = mint_token();
 
     let base = unique_base("vhttp");
