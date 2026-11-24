@@ -22,6 +22,7 @@ mod link;
 mod observe;
 mod passes;
 mod people;
+mod settle;
 mod supervise;
 mod tx;
 
@@ -33,6 +34,7 @@ use link::{DotnsLink, PeopleLink};
 use observe::{record_writer_info, zero_init_submit_outcomes};
 use passes::Passes;
 use people::People;
+use settle::{SettleConfig, Settler};
 use supervise::{drive, every, hold_lease, sleep_or_wake, supervise, until_lease_lost};
 
 /// The claim size the People lane uses when `CHAIN_WRITER_BATCH_SIZE` is unset
@@ -42,6 +44,17 @@ const DEFAULT_BATCH_SIZE: u16 = 25;
 /// The same, for the dotNS (Asset Hub) lane and `CHAIN_WRITER_DOTNS_BATCH_SIZE`.
 /// Deliberately small.
 const DEFAULT_DOTNS_BATCH_SIZE: u16 = 3;
+
+/// How many blocks a People registration transaction stays valid after the
+/// block it is dated from (see `people::birth_block`): the finalized block, or
+/// the best one while finality lags.
+///
+/// Mortality is what puts a bound on a failed row: once this many blocks have
+/// passed, nothing the writer signed for it can still land, so
+/// [`outbox::FAILED_DISCRIMINATOR_HOLD`](super::outbox::FAILED_DISCRIMINATOR_HOLD)
+/// can safely release its discriminator. An immortal transaction would stay
+/// valid until its nonce was spent, with no such bound.
+pub const PEOPLE_TX_MORTALITY_BLOCKS: u64 = 64;
 
 /// Chain-writer configuration, loaded from the environment.
 #[derive(Debug, Clone)]
@@ -106,6 +119,10 @@ pub struct WriterConfig {
     pub signer_balance_floor_planck: u128,
     /// Asset Hub RPC endpoint. Required.
     pub asset_hub_rpc_url: String,
+    /// Settling dotNS pending claims from the signer. Off unless
+    /// `DOTNS_SETTLE_ENABLED` is set: the signer pays every settled account's
+    /// `LabelStore` deposit.
+    settle: SettleConfig,
 }
 
 impl WriterConfig {
@@ -152,6 +169,12 @@ impl WriterConfig {
                 10_000_000_000,
             )?),
             asset_hub_rpc_url: http_common::config::required_var("ASSET_HUB_RPC_URL")?,
+            settle: SettleConfig {
+                enabled: crate::config::env_bool("DOTNS_SETTLE_ENABLED", false)?,
+                interval: Duration::from_secs(strict("DOTNS_SETTLE_INTERVAL_SECS", 60)?),
+                claim_limit: strict("DOTNS_SETTLE_CLAIM_LIMIT", 10)?,
+                max_accounts: strict("DOTNS_SETTLE_MAX_ACCOUNTS", 5)?,
+            },
         })
     }
 }
@@ -173,6 +196,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
 
     tracing::info!(
         asset_hub_rpc = %config.asset_hub_rpc_url,
+        settle = config.settle.enabled,
         "dotns lane connects on the first pass"
     );
     tracing::info!(
@@ -196,6 +220,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     let asset_hub_rpc = config.asset_hub_rpc_url.clone();
     let dotns_link = DotnsLink::new(asset_hub_rpc, config_attester);
     let passes = Passes::new(&config, dotns_link.subscribe());
+    let settler = Settler::new(config.settle, config.signer_balance_floor_planck);
     let mut writer = Writer {
         pool,
         chain,
@@ -203,9 +228,10 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         signer_account,
         proxy_for,
         config,
-        people: Drain::new(batch_max, PeopleLink(chain_for_lane)),
+        people: Drain::new(batch_max, PeopleLink(chain_for_lane, config_attester)),
         dotns: Drain::new(dotns_batch_max, dotns_link),
         passes,
+        settler,
     };
     writer.run_forever().await
 }
@@ -222,6 +248,8 @@ struct Writer {
     /// The periodic work this process hosts because it holds the lease; it
     /// runs only while the lease heartbeat holds.
     passes: Passes,
+    /// Settles dotNS pending claims between the dotNS lane's passes.
+    settler: Settler,
 }
 
 impl Writer {
@@ -270,6 +298,7 @@ impl Writer {
             people,
             dotns,
             passes,
+            settler,
         } = self;
         let (pool, chain, signer_account, config) = (&*pool, &*chain, &*signer_account, &*config);
         let proxy_for = *proxy_for;
@@ -289,13 +318,17 @@ impl Writer {
                     landed.notify_one();
                 }
             },
+            async |_| {},
         );
+        // Settlement shares the dotNS lane's signer nonce, so it runs inside
+        // that lane, after a pass with nothing left to do.
         let dotns_lane = run_lane(
             dotns,
             cx,
             config,
             async || sleep_or_wake(config.poll_interval, &landed).await,
             |_| {},
+            async |drain| settler.step(drain, cx).await,
         );
         let periodic = every(
             async || {
@@ -310,13 +343,16 @@ impl Writer {
 }
 
 /// Supervise one lane: restart it, run its passes, and restart it again after
-/// any failure but a lost lease. `after_pass` sees the drain after every pass.
+/// any failure but a lost lease. `after_pass` sees the drain after every pass,
+/// and `between` gets it after a pass that left nothing to do, before the lane
+/// idles.
 async fn run_lane<L: Lane>(
     drain: &mut Drain<L>,
     cx: &Cx<'_>,
     config: &WriterConfig,
     mut idle: impl AsyncFnMut(),
     mut after_pass: impl FnMut(&Drain<L>),
+    mut between: impl AsyncFnMut(&mut Drain<L>),
 ) -> WriterError {
     supervise(
         L::NAME,
@@ -327,6 +363,9 @@ async fn run_lane<L: Lane>(
                 async || {
                     let idle = drain.pass(cx).await;
                     after_pass(drain);
+                    if matches!(idle, Ok(true)) {
+                        between(drain).await;
+                    }
                     idle
                 },
                 &mut idle,
@@ -399,6 +438,19 @@ fn cx_of<'a>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_failed_row_is_held_well_past_its_last_transaction_dying() {
+        // A People block time no network this backend serves exceeds.
+        const SLOWEST_BLOCK_SECS: i64 = 12;
+        let mortality_window = time::Duration::seconds(
+            i64::try_from(PEOPLE_TX_MORTALITY_BLOCKS).unwrap() * SLOWEST_BLOCK_SECS,
+        );
+        assert!(
+            super::super::outbox::FAILED_DISCRIMINATOR_HOLD >= mortality_window * 2,
+            "the hold must cover the mortality window twice over, for a stalled chain"
+        );
+    }
+
     const FROM_ENV_VARS: &[&str] = &[
         "DEVICE_ATTESTATION_DATABASE_URL",
         "PEOPLE_RPC_URL",
@@ -418,6 +470,10 @@ mod tests {
         "ATTESTER_ALLOWANCE_FLOOR",
         "ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK",
         "ASSET_HUB_RPC_URL",
+        "DOTNS_SETTLE_ENABLED",
+        "DOTNS_SETTLE_INTERVAL_SECS",
+        "DOTNS_SETTLE_CLAIM_LIMIT",
+        "DOTNS_SETTLE_MAX_ACCOUNTS",
     ];
 
     const REQUIRED_ENV: &[(&str, &str)] = &[
@@ -473,6 +529,10 @@ mod tests {
             ("ATTESTER_ALLOWANCE_FLOOR", "250"),
             ("ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK", "123456789012"),
             ("ASSET_HUB_RPC_URL", "wss://asset-hub.example"),
+            ("DOTNS_SETTLE_ENABLED", "true"),
+            ("DOTNS_SETTLE_INTERVAL_SECS", "30"),
+            ("DOTNS_SETTLE_CLAIM_LIMIT", "4"),
+            ("DOTNS_SETTLE_MAX_ACCOUNTS", "2"),
         ])
         .unwrap();
         assert_eq!(
@@ -497,6 +557,16 @@ mod tests {
         assert_eq!(config.resource_poll_interval, Duration::from_secs(120));
         assert_eq!(config.allowance_floor, 250);
         assert_eq!(config.signer_balance_floor_planck, 123_456_789_012);
+        assert_eq!(
+            config.settle,
+            SettleConfig {
+                enabled: true,
+                interval: Duration::from_secs(30),
+                claim_limit: 4,
+                max_accounts: 2,
+            },
+            "every settlement knob is read"
+        );
 
         let config = from_env_with(REQUIRED_ENV).unwrap();
         assert_eq!(
@@ -525,6 +595,16 @@ mod tests {
         assert_eq!(config.resource_poll_interval, Duration::from_secs(60));
         assert_eq!(config.allowance_floor, 100);
         assert_eq!(config.signer_balance_floor_planck, 10_000_000_000);
+        assert_eq!(
+            config.settle,
+            SettleConfig {
+                enabled: false,
+                interval: Duration::from_secs(60),
+                claim_limit: 10,
+                max_accounts: 5,
+            },
+            "settlement spends the signer's funds, so it is off unless asked for"
+        );
 
         let mut vars = REQUIRED_ENV.to_vec();
         vars.push(("CHAIN_WRITER_HOLDER_ID", "   "));

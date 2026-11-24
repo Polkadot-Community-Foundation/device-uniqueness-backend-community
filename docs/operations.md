@@ -117,7 +117,7 @@ The values you must decide, at minimum:
 | `COMPOSE_PROFILES` | `invite-tickets` on `testnet`; **empty** on `polkadot`, whose image has no such roles. |
 | `ENV_ID` | This environment's name; suffixes every network alias. |
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
-| `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required.** Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
+| `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required** by both `device-attestation-api` (reads `LiteLabelOwner` for availability and the digit choice) and the writer (submits `reserve_name`). Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
 | `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
@@ -515,12 +515,32 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 ```
 
 - `RETRY_AFTER` retries automatically, up to 8 attempts.
-- `FAILED_TERMINAL` never retries — inspect `last_error`. A signature rejection
+- `FAILED_TERMINAL` never retries — inspect `last_error`. It holds its
+  discriminator for 30 minutes after failing (`FAILED_DISCRIMINATOR_HOLD`) and
+  then releases it, so the same `full_username` can appear again on a newer row.
+  The failed row stays for the record. A signature rejection
   (`PeopleLite.InvalidAttestationSignature`) that clusters on one client build
   is usually a payload-format change: the row's `payload_version` (also a field
   on the writer's retry and terminal logs) is the format that claim declared, so
   `group by payload_version` separates a client that signs a new format under an
   old declaration from individually bad signatures.
+- `last_error` `payload version 1 is no longer accepted: the runtime takes 2`
+  means the row was claimed before the People runtime dropped the username from
+  `PeopleLite.attest` and was still in the outbox when the upgrade was enacted.
+  It is terminal: the client must claim again, signing format `2`. Drain the
+  outbox before that upgrade to avoid it. A row deferred with `payload version 2
+  awaits the runtime upgrade` was accepted by a writer or intake on the newer
+  runtime and is waiting for this one; it spends no attempt. The writer logs the
+  connected runtime's shape and accepted payload version at boot (`connected
+  People runtime's attest shape`).
+- **While that upgrade's stepped migration runs**, blocks carry inherents only,
+  so nothing the writer submits is included. Each submission waits out
+  `CHAIN_WRITER_FINALIZE_SECS` and is deferred as `finalization timed out`
+  without spending an attempt, and the lane resumes once the migration has
+  finished. Expect a burst of `outcome="deferred"` for the length of the
+  migration. The writer's "already landed" read only tests whether the
+  candidate has a consumer record, so a half-translated `Consumers` does not
+  mislead it.
 - **Not every failure spends one of those 8.** A refusal that belongs to the
   *signer* rather than the row — its next nonce still held by an earlier
   transaction of ours waiting in the node's pool, or a submission the writer
@@ -534,7 +554,9 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
   while `outcome="ok"` stays flat is one slow inclusion holding the lane, and it
   clears itself; a sustained one is a pool or RPC problem worth looking at.
 - Independent check: query `Resources.UsernameOwnerOf("<base>.<NN>")` on the
-  People Chain.
+  People Chain. On a runtime whose `PeopleLite.attest` takes no username, query
+  `Resources.Consumers(<candidate account>)` instead: that runtime records the
+  account, not the name.
 - A pass submits its whole claimed set as **one** `Utility.force_batch`, so rows
   share a `tx_hash` and a `nonce`. Many rows on one hash is normal, not a
   duplicate submission.
@@ -612,7 +634,10 @@ sudo docker compose exec -T postgres psql -U device_attestation -d device_attest
 - `FAILED_TERMINAL` — inspect `dotns_last_error`. Common causes: `dotns signature
   does not verify` (the client bound it to a different attester than
   `GET /api/v1/attester` returns), `lite label reserved by another account`, or a
-  contract revert.
+  contract revert. A `QueueFull` revert means the reserved name's queue filled
+  after intake checked it. A name registered, or granted on the dotNS name
+  whitelist, in the meantime reverts with `PersonhoodNameUnavailable`, which
+  shows as an undecoded contract failure until the gateway decodes it.
 - `ABANDONED` — the People half reached `FAILED_TERMINAL`, so this half was never
   attempted. Nothing is wrong with the reservation; there is no username to
   attach a name to. Diagnose the People `last_error`.
@@ -632,6 +657,55 @@ registration in its own half.
 `dub_account_free_balance_planck` carries `chain` on **every** series, People
 included. A selector written as `{role="signer"}` alone matches both chains —
 always pin `chain="people"` or `chain="asset-hub"` in alerts and dashboards.
+
+### Settling pending claims
+
+The gateway mints from a Root origin, and pallet-revive does not let Root
+deploy a contract. A name whose owner has no `LabelStore` yet is therefore kept
+by `DotnsPopController` as a **pending claim**: the name is owned, but its label
+is not in the owner's store, and `NameRegistered` is not emitted, until a signed
+origin calls `settlePendingClaims`. Pending claims never lapse.
+
+With `DOTNS_SETTLE_ENABLED=true` the writer settles them. Every
+`DOTNS_SETTLE_INTERVAL_SECS`, after a dotNS pass that found nothing to do, it:
+
+1. reads the signer's Asset Hub free balance, and does nothing that step if it
+   is at or below `ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK`;
+2. maps the signer in pallet-revive (`Revive.map_account`) if it is not mapped
+   yet, and does nothing else that step;
+3. reads one page of `pendingClaimUsers` (up to `DOTNS_SETTLE_MAX_ACCOUNTS`);
+4. dry-runs `settlePendingClaims(user, DOTNS_SETTLE_CLAIM_LIMIT)` for each, from
+   the signer, and skips any that would revert;
+5. submits the rest as one `Utility.force_batch` of `Revive.call`s, signed by
+   the signer itself (never proxied), with a quarter more weight and a tenth
+   more deposit than the dry run used. The batch stops at half of a normal
+   extrinsic's weight, so it never fills a block the lane also needs, and at
+   the deposits the balance holds above the floor, so it never spends what
+   `reserve_name` needs for its fees.
+
+The walk keeps its place in the controller's set between steps. It reads a page
+again until every account on it has settled or been passed over (its dry run
+reverts, its call failed in the block, or it does not fit an extrinsic on its
+own), because the set fills a settled account's slot with its last account.
+Passed accounts are remembered by address and tried again once the walk
+reaches the end of the set and starts over.
+
+It covers every account the controller lists, including names other backends
+minted. **The signer pays**: each settled account costs the fee plus its new
+`LabelStore` deposit, about 0.53 PAS on Paseo Next, where about 9,800 accounts
+were pending when this was written. Fund the signer for the backlog before
+turning it on. Settlement stops at `ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK`
+(logging `dotns settlement paused`) and resumes by itself once the signer is
+topped up, so set the floor to cover the reservation fees the signer must pay
+until a top-up lands. On Paseo Next a settlement needs about 1.2 MB of proof, so a step
+settles two accounts; at the default interval the backlog takes days.
+
+Watch `dub_dotns_pending_claim_accounts` (the controller's live count, read
+each step) fall, and `dub_dotns_settle_total{outcome}`: `ok` settled, `failed`
+submitted but rejected in the block, `revert` skipped after the dry run. A
+step whose dry run fails as a whole logs `work between passes failed` with the
+dispatch error: `StorageDepositNotEnoughFunds` (Revive error `0x17`) means the
+signer cannot pay the deposit.
 
 ## Writer rules
 
@@ -688,6 +762,54 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 | `TURN_SECRET` (`coturn`) | **Does** invalidate outstanding credentials (up to `TURN_TTL_SECS` old), because the relay recomputes the HMAC. Update the relay and every `turn-api` together, then recreate each service — a mismatch means the relay rejects everything this service mints. |
 | `POC_HMAC_SECRET` | Invalidates outstanding puzzles (≤90s old); in-flight solvers get a `402` and request a new one. Safe to rotate any time. |
 
+## Draining the outbox for a People runtime upgrade
+
+A People runtime upgrade that changes `PeopleLite.attest`'s consumer
+registration (dropping the username and reserved name from it) also changes what the consumer signature covers. A row signed for the old
+runtime cannot land on the new one: the writer fails it as
+`payload version 1 is no longer accepted`, and only the client can claim again.
+Drain the outbox before the upgrade is enacted so no row is caught by it.
+
+1. **Ship both sides of the new format before the upgrade is scheduled.**
+   - A backend release that handles both shapes (payload version `2`). It keeps
+     working on either side of the upgrade.
+   - App releases that sign the new consumer message, `(account, verifier,
+     identifierKey)`, and send `payloadVersion: 2` once the runtime has taken
+     the upgrade. Intake accepts only the version the connected runtime takes,
+     so after step 5 a client that still signs the old message and omits
+     `payloadVersion` gets a `400` on `payloadVersion` for every claim. Until
+     those releases are out and adopted, resuming intake only moves the outage
+     from the writer to the clients.
+2. **Pause intake.** Set `INTAKE_PAUSED=true` for `device-attestation-api` (or
+   `all-in-one`) and recreate it:
+   `sudo docker compose up -d device-attestation-api`. `POST /api/v1/usernames`
+   now answers `503` `INTAKE_PAUSED` before it reads or writes anything. The
+   writer and the `registration-queue` advancer keep running, so the outbox only
+   shrinks. Leave the advancer up: with `QUEUE_ENABLED` on, `QUEUED` rows only
+   leave the queue through it.
+3. **Wait for the drain.**
+
+   ```bash
+   sudo docker compose exec device-attestation-chain-writer dub --outbox-drained
+   ```
+
+   It exits `0` and prints `drained` once every People-lane row is `ASSIGNED`
+   or `FAILED_TERMINAL`. Otherwise it prints each other status that still has
+   rows, with its count, and exits `1`. It reads
+   `DEVICE_ATTESTATION_DATABASE_URL`, which the writer container already has,
+   and never migrates. The `dub_outbox_undrained` gauge reports the same count from the
+   writer. A row in `RETRY_AFTER` takes up to its 8 attempts with backoff, so
+   allow minutes, not seconds. The dotNS half is not counted: Asset Hub is not
+   part of this upgrade.
+4. **Enact the upgrade.** Expect `submission deferred` while its stepped
+   migration runs (see [Registration outbox](#registration-outbox)). The writer
+   logs nothing new to act on.
+5. **Resume intake.** Unset `INTAKE_PAUSED` and recreate the service. Intake now
+   accepts only payload version `2`, which the upgraded runtime takes.
+
+A row still undrained at step 4 is not lost silently: it fails with
+`payload version 1 is no longer accepted`, and its client has to claim again.
+
 ## After a chain wipe
 
 Test networks get re-spawned. Two databases hold state derived from the chain
@@ -703,10 +825,9 @@ do.
 
 **The device-attestation database needs a decision, so it is a script.** Its
 outbox is not derivable from anything: `username_reservations` rows name
-usernames no chain will confirm, and each one keeps occupying a discriminator
-regardless of status, because availability unions the whole table with no status
-filter — a base with 100 historical rows reports `EXHAUSTED` against an empty
-chain. But the same database also holds `app_attest_keys` (per-install device
+usernames no chain will confirm, and every row except an old `FAILED_TERMINAL`
+one keeps occupying a discriminator, `ASSIGNED` rows included. A base with 100
+historical assigned rows reports `EXHAUSTED` against an empty chain. But the same database also holds `app_attest_keys` (per-install device
 keys; clearing them makes every tester reinstall) and `registration_vouchers`.
 
 ```bash
@@ -813,12 +934,15 @@ you expect.
 
 | Symptom | Action |
 |---|---|
+| `POST /api/v1/usernames` answers `409` `Too many pending username claims for this account` | The caller's JWT subject already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` (default 3) open claims, on any base: rows still `QUEUED`, `RESERVED`, `SUBMITTING` or `RETRY_AFTER`, plus `FAILED_TERMINAL` rows for 30 minutes after they failed. It clears as they land or the failures age out. To see what it holds: `select base, status, count(*) from username_reservations where account_id = '<subject>' and status <> 'ASSIGNED' and (status <> 'FAILED_TERMINAL' or updated_at > now() - interval '30 minutes') group by 1, 2;`. Recent `FAILED_TERMINAL` rows dominating is a client whose claims keep failing on chain (read their `last_error`) or someone cycling claims that fail. One honest subject waiting on a long queue (`QUEUE_ENABLED`) with several claims is rare; raise the cap if it is not, or set it to `0` to disable it. To spot many subjects converging on one base (the cap no longer bounds that), `select account_id, count(*) from username_reservations where base = '<base>' and status <> 'ASSIGNED' group by 1 order by 2 desc;`. |
+| `POST /api/v1/usernames` answers `503` `INTAKE_PAUSED` | `INTAKE_PAUSED=true` is set for an [outbox drain](#draining-the-outbox-for-a-people-runtime-upgrade). Unset it once the upgrade is through. |
 | `readyz`: `chain: down` | People Chain RPC unreachable or changed — check `PEOPLE_RPC_URL`. |
-| Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | The signer cannot pay fees on that chain. Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
+| `readyz`: `asset_hub: down` | Asset Hub RPC unreachable — check `ASSET_HUB_RPC_URL`. Only `device-attestation-api` (and `all-in-one`) gate on it: availability and registration read `LiteLabelOwner` there. |
+| Writer: `registration parked without spending an attempt` / `dotns reservation parked …` | Usually the signer cannot pay fees on that chain. For registrations it can also be the runtime refusing every claim right now: the `reason` names `PeopleLite::NoAttestationAllowance`, `PaidRegistrationLimitReached`, `TooManyLitePeople` or `LitePeopleCollectionNotCreated`. Those are dispatch errors, so unlike a funding park each parked pass pays one fee for the batch it submitted; fix the attester's allowance or the runtime setup and the rows resume on their own. For a funding park: Rows are held in `RETRY_AFTER` at an unchanged `attempt` and resume by themselves once funded — nothing is lost and no restart is needed. Fund the signer named in the accompanying `chain-writer signer balance below floor` warning (`ATTESTER_SIGNER_BALANCE_FLOOR_PLANCK` is the threshold, and the two chains hold **separate** balances for the same account). A park that persists past a top-up is not a funding problem: read the `reason` field. |
 | Writer: `submission deferred without spending an attempt` | The signer's next nonce is held by an earlier transaction of ours still in the node's pool (`priority of the transaction is too low`, `Transaction Already Imported`) or a submit passed `CHAIN_WRITER_FINALIZE_SECS` without being seen finalized. Rows wait 30s at an unchanged `attempt` and resume by themselves; nothing is lost and no restart is needed. Expect a short burst behind one slow inclusion — that is the mechanism working. Persisting for many minutes means the incumbent transaction is not being included: check finality lag and the RPC endpoint, and confirm the signer can pay fees (an unfunded signer parks instead, see the row above). Do **not** restart the writer to clear it — a restart re-reads the nonce and hits the same pool. |
 | Writer: `submission deferred …; the signer's nonce was already consumed on chain` | The node refused the signed nonce as `Transaction is outdated`: it is below the signer's current nonce. The writer reads its nonce with `system_accountNextIndex` (best block plus our pool transactions), so an occasional one after a reconnect or finalize timeout is expected; rows wait 6s at an unchanged `attempt` and re-read. A steady stream means **something else is signing from the writer's account** on that chain (another deployment or a manual script) — find and stop it; the writer cannot out-race it. |
-| Writer: `rejected deterministically, not retried` in `last_error` | Another submission would buy the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. All three causes are the row's `reserved_username` (the personhood name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds stays consumed until the row is deleted. |
-| Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request, and the writer resolves `UsernameOwnerOf` (People) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes it on People, so readiness can stay green. Repoint `PEOPLE_RPC_URL` (and `ASSET_HUB_RPC_URL`) at a full node. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
+| Writer: `rejected deterministically, not retried` in `last_error` | `PeopleLite` or `Resources` rejected the row's own payload in an included block. Another submission would get the same answer, so the row fails on the first pass instead of paying `CHAIN_WRITER_MAX_ATTEMPTS` fees. Any error from those two pallets does this except `NoAttestationAllowance`, `PaidRegistrationLimitReached`, `TooManyLitePeople` and `LitePeopleCollectionNotCreated`: they are about the attester or the network, so they park the row instead (row above). **Payload rejections** (`InvalidAttestationSignature`, `InvalidProofOfOwnership`, `InvalidConsumerRegistrationAccount`, `KeyAlreadyInUse`, `AccountInUse`) mean the client sent a bad or already-used claim. A burst from one client build is a client bug (`group by payload_version`, see Registration outbox); a burst across many fresh subjects for one base is someone trying to exhaust that base. **Reservation rejections** come from the row's `reserved_username` (the personhood name) leg, which `attest` checks **before** it writes the lite username: `Resources::UsernameReservationTaken` (that name is owned by someone else), `Resources::QueueFull` (its reservation queue is at `MaxReservationQueueLength`, 10 on next-people-paseo), `Resources::AlreadyHasReservation` (the candidate already reserved another name). Intake refuses these claims with a `409` before a row exists, so a row that reaches here raced that check — a queue that filled in between. The writer **cannot** resubmit without the reservation: the consumer signature covers `reserved_username`, so only the client can re-sign. The client must re-register for another `dotns.reservedUsername` — dropping the reservation leg is not an option any client implements. Note `QueueFull` is not immutable in principle — entries expire and `remove_expired_username_reservation` is permissionless — but nothing drains within the seconds the backoff spans. The lite username is unaffected only if `status` is `ASSIGNED`; if it is `FAILED_TERMINAL` the discriminator that row holds is released 30 minutes after it failed (`FAILED_DISCRIMINATOR_HOLD`). |
+| Availability checks failing while `readyz` is green | The endpoint does not serve the legacy `state_queryStorageAt` method (a trimmed or `chainHead`-only RPC or proxy). Availability reads all 100 `{base}.{NN}` keys in one such request on each chain it reads, and the writer resolves `UsernameOwnerOf` or `Consumers` (People, depending on the runtime) and `LiteLabelOwner` (Asset Hub) for a whole claimed set the same way, so writer passes fail wholesale too — but `readyz` only probes that each chain answers, not that it serves this method, so readiness can stay green. Repoint `PEOPLE_RPC_URL` and `ASSET_HUB_RPC_URL` at full nodes. A response that is incomplete, doubled, or for another block also fails closed by design — never as "available". |
 | Claims returning `422 Pool exhausted` (`testnet` builds only) | The ticket pool drained. Check `invite-tickets-pool` logs: `ticket batch finalized … registered=0` means the inviter is out of `AvailableInvites` quota or unauthorized; `pool tick failed` means RPC or signer trouble. Pool size is logged each tick — treat sustained `available < ~10% of POOL_TARGET_SIZE` as the alert threshold. |
 | `invite-tickets-pool`: `another maintainer instance holds the pool lock` (`testnet` builds only) | A second replica or a stuck deploy overlap. Scale back to exactly one. |
 | `unknown role: invite-tickets-api` / `-pool` at startup | A `polkadot` image was started with `COMPOSE_PROFILES=invite-tickets`. That runtime has no `Game` / `ProofOfInk`, so the build has no such roles. Clear `COMPOSE_PROFILES` in `.env`, or rebuild with `DUB_NETWORK=testnet` if you meant the other network. |
@@ -828,7 +952,8 @@ you expect.
 | At boot: `live runtime and the vendored metadata disagree` | The chain was upgraded under the vendored blob. Harmless on its own — most upgrades change nothing this workspace signs — but it is the early warning for the row below, which is the same drift seen minutes to days later as a failed write or a silent invite-ticket pool. Every connection also logs `connected to the chain` with the live `spec_version` / `transaction_version`, on People and Asset Hub alike. |
 | `The extrinsic payload is not compatible with the live chain` | The runtime changed shape under the vendored metadata. Refresh `crates/chain-types/metadata/metadata.<network>.scale` (the one this build's `DUB_NETWORK` names — the boot warning logs it as `vendored_metadata`) with the `subxt metadata` command in the `chain-types` crate docs, `subxt diff` the blobs to see what moved, then rebuild. |
 | Every extrinsic rejected by the node with a wasm trap in `validate_transaction` (no `Invalid::…` reason at all) | The transaction did not **decode**, so the runtime panicked before validating anything — the extension payload is the wrong shape for the extrinsic format. A v4 signed extrinsic carries no extension-version byte and must be encoded with extension version **0**, which on these runtimes is a shorter list than the highest version they declare. The writer encodes version 0 itself (`chain_client::create_signed_v4`); `invite-tickets` signs through subxt's `create_signed`, where 0.50 encoded the highest version and produced exactly this trap and 0.51 fixed it. `chain-types`' `a_v4_extrinsic_resolves_to_extension_version_zero` fails in CI if a dependency bump regresses it. Seeing this in the wild means either that regression or a tuple that cannot satisfy a name version 0 declares. Distinguish from the row below: a *bad signature* decoded fine and failed a check. |
-| Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0 | The chain was reset: the process still holds the old genesis hash, captured when its client connected. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
+| Writer: rows deferred now and then with `Transaction has a bad signature` (or, rarely, `ancient birth block`) | Nothing to do. A registration transaction is mortal for 64 blocks, and once that window has passed the runtime checks it against a later block's hash, so an expired transaction is refused as a bad signature. A birth block reorged off the best chain is refused the same way. The writer defers the row without spending an attempt and signs it afresh on the next pass. It dates transactions from the finalized block, or from the best block once finality lags more than 32 blocks behind, so this should be occasional. A steady run means the node's best and finalized heads disagree with what the writer read: check the RPC node's sync and the relay chain's finality. |
+| Every extrinsic failing with `Transaction has a bad signature`, nonce back at 0, on every pass | The chain was reset: the process still holds the old genesis hash, captured when its client connected. The writer defers these rows rather than failing them, so nothing is lost, but nothing lands either. **Restart the service** — reconnecting alone does not re-read it. Then re-check the [chain prerequisites](#chain-prerequisites). |
 | Writer exits at boot | Bad `CHAIN_WRITER_SIGNER_SURI`, or Postgres unreachable. |
 | `device-attestation-api` never healthy | It blocks on the People Chain RPC at startup. Check connectivity to `PEOPLE_RPC_URL`. |
 | `username-indexer` never healthy | Check its Postgres, its RPC, and its bootstrap logs. |

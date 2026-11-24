@@ -16,12 +16,13 @@ use utoipa::ToSchema;
 
 use crate::http::state::AppState;
 
+use super::claim_state;
+use super::ClaimState;
 use super::{
-    available_digits, base_state,
+    available_digits,
     error::{FieldError, UsernamesError, UsernamesResult},
     is_valid_base,
 };
-use crate::chain::people::BaseState;
 
 const MAX_USERNAMES: usize = 100;
 
@@ -66,12 +67,15 @@ pub(crate) struct NameAvailability {
     security(("bearer_jwt" = [])),
     request_body = AvailableRequest,
     responses(
-        (status = 200, description = "Per-base availability read from People Chain UsernameOwnerOf \
-            plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. \
-            `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the \
-            bare personhood name is owned or its reservation queue is full — the last two would \
-            make a claim carrying `dotns.reservedUsername` fail on chain and take the lite \
-            username with it.",
+        (status = 200, description = "Per-base availability read from Asset Hub \
+            `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the \
+            People runtime still keeps usernames, and pending outbox reservations, tagged \
+            `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable \
+            under this base: no free discriminator, or the bare personhood name is registered on \
+            `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its \
+            `DotnsPopController` reservation queue is full (on People too, while its runtime \
+            keeps usernames). Any of those would make a claim carrying \
+            `dotns.reservedUsername` fail on chain and take the device name with it.",
          body = AvailableV1Response,
          example = json!({ "_tag": "v1", "value": {
              "tallesx": { "status": "AVAILABLE", "availableDigits": [1, 2, 3] },
@@ -88,7 +92,7 @@ pub(crate) struct NameAvailability {
          body = serde_json::Value),
         (status = 429, description = "Subject rate limit exceeded (with `Retry-After`).",
          body = serde_json::Value),
-        (status = 500, description = "People Chain failure or reservation-outbox failure.",
+        (status = 500, description = "People Chain, Asset Hub, or reservation-outbox failure.",
          body = serde_json::Value,
          example = json!({ "error": "Internal server error. Please try again." }))
     )
@@ -163,11 +167,11 @@ async fn availability_for(state: &AppState, base: &str) -> UsernamesResult<NameA
         });
     }
 
-    Ok(availability_of(&base_state(state, base).await?))
+    Ok(availability_of(&claim_state(state, base).await?))
 }
 
 /// The availability verdict for one base, given everything read about it.
-fn availability_of(state: &BaseState) -> NameAvailability {
+fn availability_of(state: &ClaimState) -> NameAvailability {
     // Pool is 01..=99 (00 is never offered); available = pool minus taken.
     let digits = available_digits(&state.taken);
     if digits.is_empty() || state.rejects_reservations() {
@@ -186,6 +190,8 @@ fn availability_of(state: &BaseState) -> NameAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::people::ReservationState;
+    use crate::usernames::Reservation;
     use serde_json::json;
 
     #[test]
@@ -232,18 +238,33 @@ mod tests {
         );
     }
 
-    fn base_state(taken: impl IntoIterator<Item = u8>) -> BaseState {
-        BaseState {
-            taken: taken.into_iter().collect(),
-            full_name_owned: false,
-            queue_len: 0,
+    /// A reservation state with `queue_len` of 10 queued.
+    fn queue(queue_len: u32, unavailable: bool) -> ReservationState {
+        ReservationState {
+            personhood_name_unavailable: unavailable,
+            queue_len,
             queue_capacity: 10,
+        }
+    }
+
+    /// The bare base as dotNS sees it, on a People runtime without usernames.
+    fn on_dotns(queue_len: u32, unavailable: bool) -> Reservation {
+        Reservation {
+            people: None,
+            dotns: queue(queue_len, unavailable),
+        }
+    }
+
+    fn with_taken(taken: impl IntoIterator<Item = u8>) -> ClaimState {
+        ClaimState {
+            taken: taken.into_iter().collect(),
+            reservation: on_dotns(0, false),
         }
     }
 
     #[test]
     fn a_base_with_free_digits_is_available() {
-        let availability = availability_of(&base_state([1, 2, 3]));
+        let availability = availability_of(&with_taken([1, 2, 3]));
         assert_eq!(availability.status, "AVAILABLE");
         let digits = availability.available_digits.expect("digits");
         assert_eq!(digits.len(), 96);
@@ -252,30 +273,58 @@ mod tests {
 
     #[test]
     fn a_base_with_no_free_digits_is_exhausted_even_though_00_is_free() {
-        let availability = availability_of(&base_state(1..=99));
+        let availability = availability_of(&with_taken(1..=99));
         assert_eq!(availability.status, "EXHAUSTED");
         assert!(availability.available_digits.is_none());
     }
 
     #[test]
     fn a_base_whose_reservation_leg_would_be_rejected_is_exhausted() {
-        let owned = BaseState {
-            full_name_owned: true,
-            ..base_state([])
+        let owned = ClaimState {
+            reservation: on_dotns(0, true),
+            ..with_taken([])
         };
-        assert_eq!(availability_of(&owned).status, "EXHAUSTED");
+        assert_eq!(
+            availability_of(&owned).status,
+            "EXHAUSTED",
+            "the bare name is on DotnsRegistrar"
+        );
 
-        let queue_full = BaseState {
-            queue_len: 10,
-            ..base_state([])
+        let queue_full = ClaimState {
+            reservation: on_dotns(10, false),
+            ..with_taken([])
         };
-        assert_eq!(availability_of(&queue_full).status, "EXHAUSTED");
+        assert_eq!(
+            availability_of(&queue_full).status,
+            "EXHAUSTED",
+            "the DotnsPopController queue is full"
+        );
 
-        let queue_nearly_full = BaseState {
-            queue_len: 9,
-            ..base_state([])
+        let queue_nearly_full = ClaimState {
+            reservation: on_dotns(9, false),
+            ..with_taken([])
         };
-        assert_eq!(availability_of(&queue_nearly_full).status, "AVAILABLE");
+        assert_eq!(
+            availability_of(&queue_nearly_full).status,
+            "AVAILABLE",
+            "one queue slot left"
+        );
+    }
+
+    #[test]
+    fn a_people_runtime_with_usernames_can_reject_a_base_dotns_accepts() {
+        let owned_on_people = ClaimState {
+            reservation: Reservation {
+                people: Some(queue(0, true)),
+                dotns: queue(0, false),
+            },
+            ..with_taken([1, 2])
+        };
+        assert_eq!(
+            availability_of(&owned_on_people).status,
+            "EXHAUSTED",
+            "People still checks its own reservation leg before the username removal"
+        );
     }
 
     #[test]

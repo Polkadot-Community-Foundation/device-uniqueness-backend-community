@@ -456,7 +456,7 @@
             }
           },
           "400": {
-            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion` is reported on that field rather than as an invalid signature), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
+            "description": "Validation failed (with per-field `fields`; an unsupported `payloadVersion`, or one the connected People runtime does not take — `1` once `PeopleLite.attest` dropped the username, `2` before — is reported on that field rather than as an invalid signature; `candidateSignature` and `consumerRegistrationSignature` are both verified, the consumer one only once the candidate one is good), malformed JSON, a `lifetimePoUDVoucher` that is unknown, already used, or expired (`{\"error\": \"Voucher already used\"}` — a voucher failure rejects the claim outright), a device-evidence field of the wrong JSON type (in every Widevine mode, like any other field), or — with `WIDEVINE_DEDUP_ENFORCE` — structurally malformed device evidence (`{\"error\": \"DEVICE_EVIDENCE_MALFORMED\"}`: partial fields, bad base64, or wrong field sizes — the specific reason is logged server-side, never returned).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -493,7 +493,7 @@
             }
           },
           "409": {
-            "description": "Preferred digits taken, no digits available, username taken, or the claim carries `dotns.reservedUsername` for a personhood name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
+            "description": "Preferred digits taken, no digits available, username taken, too many pending claims for the authenticated account (it already holds `USERNAME_MAX_OPEN_CLAIMS_PER_SUBJECT` claims, default 3, on any base, that have not landed and still hold a discriminator: in flight, or failed within the last 30 minutes; `{\"error\": \"Too many pending username claims for this account. Try again once one completes.\"}`; temporary, and voucher claims are exempt), or the claim carries `dotns.reservedUsername` for a personhood name that is already owned or whose reservation queue is full — checked against the reserved name itself, which `attest` takes as its own argument and which need not be `username`. The runtime checks that leg *before* it writes the lite username, and the consumer signature covers it, so submitting would cost the whole registration and no server-side retry could rescue it. Re-sign for another `dotns.reservedUsername`.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -534,7 +534,7 @@
             }
           },
           "503": {
-            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), or the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable).",
+            "description": "The DeviceCheck free slot could not be marked used at Apple after a successful gate (upstream write failure; retryable), the enforced Widevine dedup gate could not fetch the attestation revocation list (`DEVICE_EVIDENCE_UNAVAILABLE`; retryable), or intake is paused while the outbox drains ahead of a People runtime upgrade (`INTAKE_PAUSED`; retryable once the upgrade is through, and the claim may need re-signing in the payload version the upgraded runtime takes).",
             "content": {
               "application/json": {
                 "schema": {},
@@ -571,7 +571,7 @@
         },
         "responses": {
           "200": {
-            "description": "Per-base availability read from People Chain UsernameOwnerOf plus pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare personhood name is owned or its reservation queue is full — the last two would make a claim carrying `dotns.reservedUsername` fail on chain and take the lite username with it.",
+            "description": "Per-base availability read from Asset Hub `DotnsGateway::LiteLabelOwner`, People Chain `Resources::UsernameOwnerOf` while the People runtime still keeps usernames, and pending outbox reservations, tagged `{_tag: \"v1\", value}` with availableDigits. `EXHAUSTED` means nothing claimable under this base: no free discriminator, or the bare personhood name is registered on `DotnsRegistrar`, holds a live grant on the dotNS name whitelist, or its `DotnsPopController` reservation queue is full (on People too, while its runtime keeps usernames). Any of those would make a claim carrying `dotns.reservedUsername` fail on chain and take the device name with it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -633,7 +633,7 @@
             }
           },
           "500": {
-            "description": "People Chain failure or reservation-outbox failure.",
+            "description": "People Chain, Asset Hub, or reservation-outbox failure.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -706,11 +706,11 @@
         "tags": [
           "Liveness & Readiness"
         ],
-        "summary": "Kubernetes readiness probe — checks `db` and `chain` subsystems.",
+        "summary": "Kubernetes readiness probe — checks the `db`, `chain` and `asset_hub` subsystems.",
         "operationId": "readyz",
         "responses": {
           "200": {
-            "description": "Instance can take traffic; db and chain reachable.",
+            "description": "Instance can take traffic; db, People Chain and Asset Hub reachable.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -718,7 +718,8 @@
                   "status": "ready",
                   "service": "device-attestation",
                   "db": "up",
-                  "chain": "up"
+                  "chain": "up",
+                  "asset_hub": "up"
                 }
               }
             }
@@ -1365,7 +1366,7 @@
           },
           "consumerRegistrationSignature": {
             "type": "string",
-            "description": "`0x`-hex 64-byte consumer registration signature.",
+            "description": "`0x`-hex 64-byte sr25519 signature by the candidate over the\n`PeopleLite.attest` consumer registration payload for\n`payloadVersion`, in the form the People runtime accepts. Verified at\nintake: one the runtime would reject is a 400 on this field.",
             "example": "0x...64 bytes..."
           },
           "identifierKey": {
@@ -1376,9 +1377,10 @@
           "payloadVersion": {
             "type": "integer",
             "format": "int32",
-            "description": "The format of the payloads this claim's signatures cover.\nAn unsupported version is a 400 before anything is stored. Omitted\nmeans `1`, the only format today.",
+            "description": "The format of the payloads this claim's signatures cover. Omitted\nmeans `1`. `1`: `consumerRegistrationSignature` covers the username\nbase and the reserved name. `2`: it covers `(account, verifier,\nidentifierKey)` only, for a People runtime whose `PeopleLite.attest`\ntakes no username. The `candidateSignature` message is the same in\nboth. Intake takes only the version the connected People runtime\naccepts; any other is a 400 on this field before anything is stored.",
             "default": 1,
             "example": 1,
+            "maximum": 2,
             "minimum": 1
           },
           "lifetimePoUDVoucher": {

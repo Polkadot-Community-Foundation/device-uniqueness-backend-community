@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use tokio::sync::watch;
 
 use crate::chain::asset_hub::{AssetHub, ValidityWindow};
+use crate::chain::attest::AttestShape;
 use crate::chain::people::PeopleChain;
 use crate::signature::{account_signature_form, AccountSignatureForm, DOTNS_PALLET, PEOPLE_PALLET};
 
@@ -23,19 +24,39 @@ pub(super) trait Link {
     async fn ctx(&self, chain: &Self::Chain) -> anyhow::Result<Self::Ctx>;
 }
 
-pub(super) struct PeopleLink(pub PeopleChain);
+/// The People lane's link: the chain, and the attester authority
+/// (`ATTESTER_ACCOUNT`) that is `attest`'s origin, which the consumer
+/// registration signature covers.
+pub(super) struct PeopleLink(pub PeopleChain, pub [u8; 32]);
+
+/// What the People runtime accepts at one pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PeopleRuntime {
+    /// The form the runtime accepts for the candidate signature.
+    pub signature_form: AccountSignatureForm,
+    /// The shape of `attest`'s consumer registration, which decides the
+    /// payload version a row must carry to be submitted.
+    pub attest_shape: AttestShape,
+    /// The attester authority, the `verifier` the consumer registration
+    /// signature covers.
+    pub attester: [u8; 32],
+}
 
 impl Link for PeopleLink {
     type Chain = PeopleChain;
-    type Ctx = AccountSignatureForm;
+    type Ctx = PeopleRuntime;
 
     async fn up(&mut self) -> Option<PeopleChain> {
         Some(self.0.clone())
     }
 
-    async fn ctx(&self, chain: &PeopleChain) -> anyhow::Result<AccountSignatureForm> {
+    async fn ctx(&self, chain: &PeopleChain) -> anyhow::Result<PeopleRuntime> {
         let at = chain.online().at_current_block().await?;
-        Ok(account_signature_form(at.metadata_ref(), PEOPLE_PALLET))
+        Ok(PeopleRuntime {
+            signature_form: account_signature_form(at.metadata_ref(), PEOPLE_PALLET),
+            attest_shape: AttestShape::try_from(at.metadata_ref())?,
+            attester: self.1,
+        })
     }
 }
 

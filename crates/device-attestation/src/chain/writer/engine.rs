@@ -33,6 +33,7 @@ use super::{
     lane::{signer_defer, BatchLane, Defer, Gate, Lane, Outcome},
     link::Link as _,
 };
+use crate::chain::registry::Claim;
 use crate::chain::{
     lease,
     outbox::{Guard, Reservation},
@@ -209,6 +210,37 @@ impl<L: Lane> Drain<L> {
         self.landed.swap(false, Ordering::Relaxed)
     }
 
+    /// Run `work` between this lane's passes, against its chain and with its
+    /// next account nonce, so a submission that is not a row's never races the
+    /// lane's own. `work` says whether it spent the nonce. Skipped while the
+    /// lane's chain is unreachable; a failure is logged and forgets the cached
+    /// nonce, since the one it was handed may or may not have been used.
+    pub(super) async fn aside(
+        &mut self,
+        cx: &Cx<'_>,
+        what: &'static str,
+        work: impl AsyncFnOnce(&L::Chain, u64) -> Result<bool>,
+    ) {
+        let Some(chain) = self.link.up().await else {
+            return;
+        };
+        let nonce = match self.next_nonce(cx, &chain).await {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                tracing::warn!(lane = L::NAME, what, error = %e, "nonce read failed; skipping");
+                return;
+            }
+        };
+        match work(&chain, nonce).await {
+            Ok(true) => self.nonce = Some(nonce + 1),
+            Ok(false) => {}
+            Err(e) => {
+                self.nonce = None;
+                tracing::warn!(lane = L::NAME, what, error = %e, "work between passes failed");
+            }
+        }
+    }
+
     /// Run a due reconcile against a reachable chain. Failures other than a
     /// lost lease are logged, not returned, and leave the reconcile due: the
     /// rows a failed read left behind stay `SUBMITTING`, and the next pass
@@ -339,11 +371,11 @@ impl<L: Lane> Drain<L> {
             return Ok(Vec::new());
         }
 
-        let names: Vec<&str> = gated
+        let claims: Vec<Claim<'_>> = gated
             .iter()
-            .map(|(r, _)| r.full_username.as_str())
+            .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
             .collect();
-        let owners = match chain.owners(&names).await {
+        let owners = match chain.owners(&claims).await {
             Ok(owners) => owners,
             Err(e) => {
                 self.retry_batch(cx, &gated, &format!("owner read failed: {e}"))
@@ -394,7 +426,11 @@ impl<L: Lane> Drain<L> {
             Err(e) => {
                 self.nonce = None;
                 let reason = e.to_string();
-                let observed = chain.owner(&r.full_username).await.ok().flatten();
+                let observed = chain
+                    .owner((r.full_username.as_str(), candidate))
+                    .await
+                    .ok()
+                    .flatten();
                 self.settle(cx, r, candidate, observed, &reason).await
             }
         }
@@ -469,11 +505,11 @@ impl<L: Lane> Drain<L> {
 
         // One read for every item the chain rejected: an already-registered
         // name is success, and only chain state can tell that from a failure.
-        let failed: Vec<&str> = rows
+        let failed: Vec<Claim<'_>> = rows
             .iter()
             .zip(&items)
             .filter(|(_, item)| item.is_err())
-            .map(|((r, _), _)| r.full_username.as_str())
+            .map(|((r, candidate), _)| (r.full_username.as_str(), *candidate))
             .collect();
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => L::NAME)
             .increment(failed.len() as u64);
@@ -541,8 +577,11 @@ impl<L: Lane> Drain<L> {
         rows: &[(&Reservation, [u8; 32])],
         reason: &str,
     ) -> Result<(), WriterError> {
-        let names: Vec<&str> = rows.iter().map(|(r, _)| r.full_username.as_str()).collect();
-        let owners = match chain.owners(&names).await {
+        let claims: Vec<Claim<'_>> = rows
+            .iter()
+            .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
+            .collect();
+        let owners = match chain.owners(&claims).await {
             Ok(owners) => owners,
             Err(e) => {
                 return self
@@ -678,11 +717,11 @@ impl<L: Lane> Drain<L> {
 
         let mut unread = 0usize;
         for chunk in parsed.chunks(RECONCILE_READ_CHUNK) {
-            let names: Vec<&str> = chunk
+            let claims: Vec<Claim<'_>> = chunk
                 .iter()
-                .map(|(r, _)| r.full_username.as_str())
+                .map(|(r, candidate)| (r.full_username.as_str(), *candidate))
                 .collect();
-            let owners = match chain.owners(&names).await {
+            let owners = match chain.owners(&claims).await {
                 Ok(owners) => owners,
                 Err(e) => {
                     tracing::warn!(
@@ -731,7 +770,7 @@ const ALREADY_REGISTERED: &str = "PeopleLite::AlreadyRegistered";
 
 const UNFUNDED_SIGNER: &str = "Inability to pay some fees";
 
-pub(super) const UNFUNDED_PARK_BACKOFF_SECS: i64 = 300;
+pub(super) const PARK_BACKOFF_SECS: i64 = 300;
 
 /// Node refusals that say *the signer's next nonce is contested* — or that we
 /// never got a verdict at all — not *this row is wrong*.
@@ -759,6 +798,21 @@ const SIGNER_CONTENTION: &[&str] = &[
     // Pool: the identical transaction is already queued. Resubmitting cannot
     // improve on that; waiting can.
     "Transaction Already Imported",
+    // Pool: the writer's own signature on the transaction does not check
+    // (`BadProof`). The row cannot cause this: the signatures it carries are
+    // checked by `PeopleLite` at dispatch and fail as `PeopleLite::` errors.
+    // What does cause it is the mortality the writer signed. Once a mortal
+    // transaction's 64 blocks have passed, the runtime reads its era as
+    // starting at a later block, whose hash is not the one signed, so an
+    // expired transaction is refused here and not as an ancient birth block.
+    // A birth block reorged off the best chain is refused the same way. The
+    // next pass signs afresh against the current head.
+    "Transaction has a bad signature",
+    // Pool: the block the transaction's mortality counts from is out of the
+    // node's reach (`AncientBirthBlock`). With a 64-block era this needs a
+    // birth block older than the chain keeps hashes for, so it is rare; an
+    // expired transaction shows up as a bad signature instead.
+    "Transaction has an ancient birth block",
     // Transport, not verdict: the subscription or the socket died while the
     // transaction was in flight. It may already be in a pool holding our nonce,
     // so the row learns nothing from this and everything behind it is refused
@@ -801,30 +855,54 @@ fn is_signer_contention(reason: &str) -> bool {
             .any(|refusal| reason.contains(refusal))
 }
 
-/// Rejections that another submission cannot talk the runtime out of, so the
-/// row fails on the first pass rather than paying `max_attempts` fees for the
-/// same answer.
+/// The pallets whose dispatch errors are a verdict on the row itself.
 ///
-/// All three come from `attest`'s optional `reserved_username` leg, which the
-/// runtime checks *before* it writes the lite username — so they cost the whole
-/// registration. The intake preflight refuses these claims before a row exists;
-/// what reaches here raced that check (a queue that filled in between). The
-/// writer cannot resubmit without the reservation, because the consumer
-/// signature covers it — only the client can re-sign.
+/// The registration call is `PeopleLite.attest`, and its reservation leg runs
+/// in `Resources`. When either pallet rejects the call in an included block,
+/// it has checked this row's own payload or candidate: a signature, the ring
+/// key, the account, the username, the reservation. Submitting the same bytes
+/// again gets the same answer and costs another fee. So by default a row
+/// rejected by one of these pallets fails on the first pass, including for
+/// errors a future runtime adds, unless the error is listed in
+/// [`NOT_THE_ROWS_FAULT`].
 ///
-/// `QueueFull` is not immutable in principle: entries expire and
-/// `remove_expired_username_reservation` is permissionless. But nothing drains
-/// within the seconds our backoff spans, so retrying only buys more fees.
-const DETERMINISTIC_REJECTIONS: &[&str] = &[
-    "Resources::UsernameReservationTaken",
-    "Resources::QueueFull",
-    "Resources::AlreadyHasReservation",
+/// This only covers dispatch errors, which subxt renders as `Pallet::Variant`.
+/// Transport and pool errors carry no verdict about the row. They keep the
+/// retry budget, or the deferrals above.
+const REGISTRATION_PALLETS: &[&str] = &["PeopleLite::", "Resources::"];
+
+/// Errors from [`REGISTRATION_PALLETS`] that are about the attester or the
+/// network, not the row. Every row in the outbox would get the same answer, so
+/// failing on them would empty the queue: at once on the first pass, or within
+/// minutes if they spent the retry budget. They park instead, like an unfunded
+/// signer: the row waits [`PARK_BACKOFF_SECS`] at an unchanged attempt and is
+/// never failed for it. Unlike an unfunded signer these are dispatch errors,
+/// so each parked pass pays one transaction fee for the batch it submitted.
+///
+/// `PeopleLite::AlreadyRegistered` is not listed. It means success and is
+/// handled before this check.
+const NOT_THE_ROWS_FAULT: &[&str] = &[
+    // The attester has used up its attestation allowance.
+    "PeopleLite::NoAttestationAllowance",
+    // The paid registrations for the current period are used up.
+    "PeopleLite::PaidRegistrationLimitReached",
+    // The network-wide `MaxLitePeople` cap is reached.
+    "PeopleLite::TooManyLitePeople",
+    // The runtime has not set up the lite-people collection yet.
+    "PeopleLite::LitePeopleCollectionNotCreated",
 ];
 
-fn is_deterministic_rejection(reason: &str) -> bool {
-    DETERMINISTIC_REJECTIONS
+fn is_attester_condition(reason: &str) -> bool {
+    NOT_THE_ROWS_FAULT
         .iter()
-        .any(|rejection| reason.contains(rejection))
+        .any(|error| reason.contains(error))
+}
+
+fn is_deterministic_rejection(reason: &str) -> bool {
+    REGISTRATION_PALLETS
+        .iter()
+        .any(|pallet| reason.contains(pallet))
+        && !is_attester_condition(reason)
 }
 
 pub(super) fn terminal_reason(reason: &str) -> String {
@@ -844,7 +922,7 @@ pub(super) fn classify_submit_failure(
 ) -> SubmitFailureAction {
     if observed_owner == Some(candidate) || reason.contains(ALREADY_REGISTERED) {
         SubmitFailureAction::Assign
-    } else if reason.contains(UNFUNDED_SIGNER) {
+    } else if reason.contains(UNFUNDED_SIGNER) || is_attester_condition(reason) {
         SubmitFailureAction::Park
     } else if is_signer_contention(reason) {
         // Deliberately ahead of the max-attempts check: a row that has already
@@ -867,9 +945,9 @@ mod tests {
          (e.g. account balance too low)";
 
     #[test]
-    fn failed_attest_retries_then_fails_without_becoming_assigned() {
+    fn an_unrecognised_failure_retries_then_fails_without_becoming_assigned() {
         let candidate = [7; 32];
-        let reason = "PeopleLite.InvalidAttestationSignature";
+        let reason = "Rpc error: the node answered something unexpected";
 
         assert_eq!(
             classify_submit_failure(reason, None, candidate, 1, 3),
@@ -879,6 +957,76 @@ mod tests {
             classify_submit_failure(reason, None, candidate, 3, 3),
             SubmitFailureAction::Fail
         );
+    }
+
+    #[test]
+    fn a_rejected_payload_fails_on_the_first_pass() {
+        // Garbage that passes intake's shape checks. Every resubmission would
+        // get the same verdict and pay another fee.
+        let candidate = [7; 32];
+        for error in [
+            "PeopleLite::InvalidAttestationSignature",
+            "PeopleLite::InvalidProofOfOwnership",
+            "PeopleLite::InvalidConsumerRegistrationAccount",
+            "PeopleLite::KeyAlreadyInUse",
+            "PeopleLite::AccountInUse",
+            "Resources::InvalidProofOfOwnership",
+            "Resources::UsernameTaken",
+            // An error a later runtime adds is the row's too, by default.
+            "PeopleLite::SomethingNew",
+        ] {
+            for reason in [error.to_string(), format!("proxied call failed: {error}")] {
+                assert_eq!(
+                    classify_submit_failure(&reason, None, candidate, 1, 8),
+                    SubmitFailureAction::Fail,
+                    "{reason} should fail on the first pass"
+                );
+                assert!(
+                    terminal_reason(&reason).starts_with("rejected deterministically"),
+                    "{reason} should be reported as a deterministic rejection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_registration_error_about_the_attester_parks_and_never_fails_the_row() {
+        // Every row would get these, so failing on them, at once or once the
+        // budget ran out, would empty the outbox.
+        let candidate = [7; 32];
+        for error in NOT_THE_ROWS_FAULT {
+            let reason = format!("proxied call failed: {error}");
+            for completed in [1, 8, 99] {
+                assert_eq!(
+                    classify_submit_failure(&reason, None, candidate, completed, 8),
+                    SubmitFailureAction::Park,
+                    "{error} is not the row's fault (attempt {completed})"
+                );
+            }
+            assert_eq!(
+                classify_submit_failure(&reason, Some(candidate), candidate, 99, 8),
+                SubmitFailureAction::Assign,
+                "a row the chain shows as landed is landed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dispatch_error_outside_the_registration_pallets_keeps_the_retry_budget() {
+        // A broken proxy or an unauthorised attester is the signer's fault,
+        // and every row would get the same answer.
+        let candidate = [7; 32];
+        for reason in [
+            "Proxy::NotProxy",
+            "proxied call failed: BadOrigin",
+            "Utility::TooManyCalls",
+        ] {
+            assert_eq!(
+                classify_submit_failure(reason, None, candidate, 1, 8),
+                SubmitFailureAction::Retry,
+                "{reason} is not a verdict on the row"
+            );
+        }
     }
 
     #[test]
@@ -914,7 +1062,7 @@ mod tests {
         );
         assert_eq!(
             classify_submit_failure(
-                "proxied call failed: Resources::Whatever",
+                "proxied call failed: Proxy::Whatever",
                 None,
                 candidate,
                 1,
@@ -1055,7 +1203,7 @@ mod tests {
         let candidate = [7; 32];
         assert_eq!(
             classify_submit_failure(
-                "PeopleLite.InvalidAttestationSignature",
+                "Rpc error: the node answered something unexpected",
                 None,
                 candidate,
                 8,
