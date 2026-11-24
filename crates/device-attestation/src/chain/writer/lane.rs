@@ -9,8 +9,8 @@ use time::OffsetDateTime;
 
 use super::{
     engine::{
-        Cx, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE, STALE_NONCE_BACKOFF_SECS,
-        UNFUNDED_PARK_BACKOFF_SECS,
+        Cx, PARK_BACKOFF_SECS, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE,
+        STALE_NONCE_BACKOFF_SECS,
     },
     error::WriterError,
     link::Link as ChainLink,
@@ -56,7 +56,10 @@ pub(super) enum Defer {
     /// condition rather than the row's, but nothing is queued ahead of it: the
     /// next pass re-reads the nonce and goes again.
     StaleNonce,
-    /// DotNS signature future-dated, doesn't count as attempt since we just need to wait.
+    /// The row will become submittable without anyone touching it: a dotNS
+    /// signature dated ahead of the gateway's skew bound, or a People row
+    /// signed for a runtime upgrade not enacted yet. Spends no attempt;
+    /// `reason` says which.
     NotYet,
 }
 
@@ -198,13 +201,13 @@ pub(super) fn observe_defer(
             username = %r.full_username,
             until = %until,
             reason,
-            "dotns reservation deferred; not yet within the gateway's skew bound"
+            "submission deferred without spending an attempt; the row is not submittable yet"
         ),
     }
 }
 
 pub(super) fn park_until() -> OffsetDateTime {
-    OffsetDateTime::now_utc() + time::Duration::seconds(UNFUNDED_PARK_BACKOFF_SECS)
+    OffsetDateTime::now_utc() + time::Duration::seconds(PARK_BACKOFF_SECS)
 }
 
 pub(super) fn row_backoff(attempt: i32) -> time::Duration {

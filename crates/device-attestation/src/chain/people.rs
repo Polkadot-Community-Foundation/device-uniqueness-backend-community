@@ -9,7 +9,9 @@ use chain_types::{people, PeopleConfig};
 use subxt::{config::RpcConfigFor, utils::AccountId32, OnlineClient};
 use subxt_rpcs::{LegacyRpcMethods, RpcClient};
 
-use crate::{check_pallet_call_args, extract_call_fields, Pallet};
+use crate::chain::attest::AttestShape;
+use crate::chain::registry::Claim;
+use crate::{check_pallet_call_arg_names, extract_call_fields, Pallet};
 
 /// The People Chain client pinned to one block.
 pub type PeopleAt = subxt::client::ClientAtBlock<
@@ -17,33 +19,51 @@ pub type PeopleAt = subxt::client::ClientAtBlock<
     subxt::client::OnlineClientAtBlockImpl<PeopleConfig>,
 >;
 
-const DISCRIMINATORS: u8 = 100;
+/// How many `.NN` suffixes a base has, `00` included: the keys an
+/// availability read asks for.
+pub(crate) const DISCRIMINATORS: u8 = 100;
 
 const PALLET: &str = "PeopleLite";
 
-const HEALTH_PROBE_USERNAME: &str = "readyz-probe.00";
+/// The pallet that keeps consumer records. Read dynamically, because the
+/// username removal changes `Consumers`' value type, which a vendored storage
+/// address would refuse to read.
+const RESOURCES_PALLET: &str = "Resources";
+
+/// The account whose `PeopleLite::AttestationAllowance` key `/readyz` asks
+/// for. Any account works: the probe needs the read served, not a value.
+const HEALTH_PROBE_ACCOUNT: [u8; 32] = [0; 32];
+
 fn owner_key(
     username: impl AsRef<[u8]>,
 ) -> people::runtime_types::bounded_collections::bounded_vec::BoundedVec<u8> {
     people::runtime_types::bounded_collections::bounded_vec::BoundedVec(username.as_ref().to_vec())
 }
 
+/// Whether one chain would take a reservation of a bare personhood name: on
+/// People's `Resources`, or on the dotNS contracts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReservationState {
-    /// The bare name is owned as a personhood username.
-    pub full_name_owned: bool,
+    /// The bare name cannot be reserved: it is already registered as a
+    /// personhood name, or, on dotNS, it holds a live name-whitelist grant.
+    pub personhood_name_unavailable: bool,
     /// Accounts queued for the bare name.
     pub queue_len: u32,
+    /// The most accounts the queue takes.
     pub queue_capacity: u32,
 }
 
 impl ReservationState {
+    /// Whether the queue holds as many accounts as it takes.
+    #[must_use]
     pub fn queue_full(&self) -> bool {
         self.queue_len >= self.queue_capacity
     }
 
+    /// Whether a claim reserving the name would be rejected.
+    #[must_use]
     pub fn rejects(&self) -> bool {
-        self.full_name_owned || self.queue_full()
+        self.personhood_name_unavailable || self.queue_full()
     }
 }
 
@@ -63,7 +83,7 @@ pub struct BaseState {
 impl BaseState {
     pub fn reservation(&self) -> ReservationState {
         ReservationState {
-            full_name_owned: self.full_name_owned,
+            personhood_name_unavailable: self.full_name_owned,
             queue_len: self.queue_len,
             queue_capacity: self.queue_capacity,
         }
@@ -101,20 +121,35 @@ impl PeopleChain {
         Ok(self_)
     }
 
+    /// Refuses to start against a runtime whose `attest` this backend cannot
+    /// build: the arguments must be the vendored ones by name, and the consumer
+    /// registration one of the two shapes [`AttestShape`] knows. Which of the
+    /// two is read again per pass, since the runtime can upgrade while we run.
     async fn check_attest_shape(&self) -> anyhow::Result<()> {
-        let vendored_call =
-            extract_call_fields(chain_types::metadata_arc(), PALLET, "attest", true)?;
-        let call = extract_call_fields(
-            self.client.at_current_block().await?.metadata(),
+        let vendored_call = extract_call_fields(
+            chain_types::metadata_arc(),
             PALLET,
             "attest",
-            false,
+            /* vendored= */ true,
         )?;
-        check_pallet_call_args(
+        let metadata = self.client.at_current_block().await?.metadata();
+        let call = extract_call_fields(
+            metadata.clone(),
+            PALLET,
+            "attest",
+            /* vendored= */ false,
+        )?;
+        check_pallet_call_arg_names(
             vendored_call.fields.as_slice(),
             Pallet::PeopleLite,
             call.fields.as_slice(),
         )?;
+        let shape = AttestShape::try_from(&*metadata)?;
+        tracing::info!(
+            ?shape,
+            payload_version = %shape.payload_version(),
+            "connected People runtime's attest shape"
+        );
         Ok(())
     }
 
@@ -125,16 +160,20 @@ impl PeopleChain {
         }
     }
 
+    /// Proves the node serves `state_queryStorageAt`, which every batched read
+    /// here relies on. The key is `PeopleLite::AttestationAllowance`, which
+    /// exists before and after the username removal.
     pub async fn health(&self) -> anyhow::Result<()> {
         let at = self
             .client
             .at_current_block()
             .await
             .context("People Chain unreachable")?;
+        let address = subxt::dynamic::storage::<_, u32>(PALLET, "AttestationAllowance");
         let key = at
             .storage()
-            .entry(people::storage().resources().username_owner_of())?
-            .fetch_key((owner_key(HEALTH_PROBE_USERNAME),))?;
+            .entry(address)?
+            .fetch_key((AccountId32(HEALTH_PROBE_ACCOUNT),))?;
         self.rpc
             .state_query_storage_at([key.as_slice()], Some(at.block_hash()))
             .await
@@ -144,6 +183,25 @@ impl PeopleChain {
 
     pub fn online(&self) -> &OnlineClient<PeopleConfig> {
         &self.client
+    }
+
+    /// The node's best block: its number and its canonical hash at that
+    /// number. Read over the legacy RPC, since the client works at finalized
+    /// blocks only.
+    pub async fn best_block(&self) -> anyhow::Result<(u64, subxt::utils::H256)> {
+        use subxt::config::Header as _;
+        let header = self
+            .rpc
+            .chain_get_header(None)
+            .await?
+            .context("the node has no best block")?;
+        let number = header.number();
+        let hash = self
+            .rpc
+            .chain_get_block_hash(Some(number.into()))
+            .await?
+            .with_context(|| format!("no canonical block at best number {number}"))?;
+        Ok((number, hash))
     }
 
     pub async fn username_owner(&self, full_username: &str) -> anyhow::Result<Option<[u8; 32]>> {
@@ -280,7 +338,7 @@ impl PeopleChain {
         };
 
         Ok(ReservationState {
-            full_name_owned: full_name.is_some(),
+            personhood_name_unavailable: full_name.is_some(),
             queue_len: match reservation_queue {
                 Some(bytes) => decode_queue_len(bytes)?,
                 None => 0,
@@ -303,10 +361,18 @@ impl PeopleChain {
         if names.is_empty() {
             return Ok(HashMap::new());
         }
-        let unique: BTreeSet<&str> = names.iter().copied().collect();
-
         let at = self.client.at_current_block().await?;
-        let block_hash = at.block_hash();
+        self.username_owners_at(names, &at).await
+    }
+
+    /// The owners of those of `names` registered in
+    /// `Resources::UsernameOwnerOf` at `at`, in one batched read.
+    async fn username_owners_at(
+        &self,
+        names: &[&str],
+        at: &PeopleAt,
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
         let entry = at
             .storage()
             .entry(people::storage().resources().username_owner_of())?;
@@ -315,10 +381,61 @@ impl PeopleChain {
             .map(|name| entry.fetch_key((owner_key(name),)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let values = storage::fetch_many(&self.rpc, &keys, block_hash)
+        let values = storage::fetch_many(&self.rpc, &keys, at.block_hash())
             .await
             .context("reading username owners")?;
         Ok(storage::owners_by_name(&unique, values)?)
+    }
+
+    /// Which of `claims` the People Chain shows as registered to their
+    /// candidate, keyed by name, at the current block. The writer's "already
+    /// landed" read.
+    ///
+    /// A runtime whose `attest` takes the username records it in
+    /// `Resources::UsernameOwnerOf`, so the name is the key and its owner may
+    /// be someone else. One without it records only the consumer, so a claim
+    /// has landed once its candidate is in `Resources::Consumers`. The shape
+    /// is read at the same block as the storage, so a read that straddles the
+    /// runtime upgrade still asks the storage that block has.
+    ///
+    /// The account-keyed read only tests for presence, so it is right while
+    /// the stepped migration is still translating `Consumers` records.
+    pub async fn registered_owners(
+        &self,
+        claims: &[Claim<'_>],
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        if claims.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let at = self.client.at_current_block().await?;
+        match AttestShape::try_from(at.metadata_ref())? {
+            AttestShape::WithUsername => {
+                let names: Vec<&str> = claims.iter().map(|(name, _)| *name).collect();
+                self.username_owners_at(&names, &at).await
+            }
+            AttestShape::WithoutUsername => self.registered_consumers_at(claims, &at).await,
+        }
+    }
+
+    /// Each of `claims` whose candidate has a `Resources::Consumers` record at
+    /// `at`, as `name -> candidate`, in one batched read.
+    async fn registered_consumers_at(
+        &self,
+        claims: &[Claim<'_>],
+        at: &PeopleAt,
+    ) -> anyhow::Result<HashMap<String, [u8; 32]>> {
+        let address =
+            subxt::dynamic::storage::<_, subxt::dynamic::Value>(RESOURCES_PALLET, "Consumers");
+        let entry = at.storage().entry(address)?;
+        let mut keys: Vec<Vec<u8>> = Vec::with_capacity(claims.len());
+        for (_, candidate) in claims {
+            keys.push(entry.fetch_key((AccountId32(*candidate),))?);
+        }
+
+        let present = storage::fetch_present(&self.rpc, &keys, at.block_hash())
+            .await
+            .context("reading consumer records")?;
+        Ok(owners_of_registered(claims, &present))
     }
 
     pub async fn next_nonce(&self, account: &AccountId32) -> anyhow::Result<u64> {
@@ -327,6 +444,20 @@ impl PeopleChain {
             .await
             .context("system_accountNextIndex on People Chain")
     }
+}
+
+/// Each claim whose candidate's key is in `present`, as `name -> candidate`.
+#[must_use]
+fn owners_of_registered(
+    claims: &[Claim<'_>],
+    present: &BTreeSet<usize>,
+) -> HashMap<String, [u8; 32]> {
+    claims
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| present.contains(index))
+        .map(|(_, (name, candidate))| ((*name).to_owned(), *candidate))
+        .collect()
 }
 
 #[cfg(test)]
@@ -339,6 +470,37 @@ mod tests {
             .map(|i| ([i as u8; 32], 1_750_000_000u64 + i as u64))
             .collect::<Vec<_>>()
             .encode()
+    }
+
+    #[test]
+    fn a_claim_whose_candidate_is_a_consumer_reads_as_owned_by_it() {
+        let claims: [Claim<'_>; 3] = [
+            ("alice.01", [1; 32]),
+            ("bob.02", [2; 32]),
+            ("carol.03", [3; 32]),
+        ];
+        let present = BTreeSet::from([0, 2]);
+
+        let owners = owners_of_registered(&claims, &present);
+
+        assert_eq!(
+            owners,
+            HashMap::from([
+                ("alice.01".to_owned(), [1; 32]),
+                ("carol.03".to_owned(), [3; 32])
+            ]),
+            "only the claims whose consumer record exists have landed, each to its own candidate"
+        );
+    }
+
+    #[test]
+    fn no_consumer_record_means_nothing_landed() {
+        let claims: [Claim<'_>; 1] = [("alice.01", [1; 32])];
+
+        assert!(
+            owners_of_registered(&claims, &BTreeSet::new()).is_empty(),
+            "an absent consumer record must leave the claim submittable"
+        );
     }
 
     #[test]
@@ -380,7 +542,7 @@ mod tests {
                 queue_capacity: 10,
             };
             let standalone = ReservationState {
-                full_name_owned,
+                personhood_name_unavailable: full_name_owned,
                 queue_len,
                 queue_capacity: 10,
             };

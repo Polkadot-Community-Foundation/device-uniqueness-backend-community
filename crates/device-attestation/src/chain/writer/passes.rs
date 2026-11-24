@@ -17,19 +17,20 @@ use crate::chain::{asset_hub::AssetHub, people::PeopleChain};
 /// How long one attester-resource read may take.
 const RESOURCE_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-// A job that fires on its own interval.
-struct Ticker {
+/// A job that fires on its own interval.
+pub(super) struct Ticker {
     every: Duration,
     last: Option<Instant>,
 }
 
 impl Ticker {
-    fn new(every: Duration) -> Self {
+    /// A job due now, then every `every`.
+    pub(super) fn new(every: Duration) -> Self {
         Self { every, last: None }
     }
 
-    // Whether the job is due, marking it run if so.
-    fn due(&mut self) -> bool {
+    /// Whether the job is due, marking it run if so.
+    pub(super) fn due(&mut self) -> bool {
         if self.last.is_none_or(|t| t.elapsed() >= self.every) {
             self.last = Some(Instant::now());
             return true;

@@ -4,8 +4,10 @@
 use subxt::{
     dynamic::{self, Value},
     tx::DynamicPayload,
+    utils::H160,
 };
 
+use crate::chain::attest::PayloadVersion;
 use crate::chain::outbox::Reservation;
 
 pub(super) fn build_registration_tx(
@@ -133,12 +135,13 @@ fn attest_call(r: &Reservation, candidate: &[u8; 32]) -> Value {
     )
 }
 
+/// `attest`'s arguments in the shape the row's payload version was signed for.
+///
+/// The People gate passes a row only when its payload version is the one the
+/// live runtime's `attest` shape takes (`chain::attest`), so the version
+/// decides the shape here. A version the gate would refuse never gets here.
 fn attest_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
-    let reserved_username = match &r.reserved_username {
-        Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
-        None => Value::unnamed_variant("None", []),
-    };
-    let consumer = Value::named_composite(vec![
+    let mut consumer = vec![
         (
             "signature".to_string(),
             sr25519_signature(&r.consumer_registration_signature),
@@ -148,12 +151,26 @@ fn attest_args(r: &Reservation, candidate: &[u8; 32]) -> Vec<Value> {
             "identifier_key".to_string(),
             Value::from_bytes(&r.identifier_key),
         ),
-        (
-            "username".to_string(),
-            Value::from_bytes(r.full_username.as_bytes()),
-        ),
-        ("reserved_username".to_string(), reserved_username),
-    ]);
+    ];
+    match PayloadVersion::try_from(r.payload_version) {
+        Ok(PayloadVersion::V2) => {}
+        // The gate refuses a version it does not know, so only format 1 takes
+        // the `Err` arm here; it keeps the shape this builder always had.
+        Ok(PayloadVersion::V1) | Err(_) => {
+            let reserved_username = match &r.reserved_username {
+                Some(name) => Value::unnamed_variant("Some", [Value::from_bytes(name.as_bytes())]),
+                None => Value::unnamed_variant("None", []),
+            };
+            consumer.extend([
+                (
+                    "username".to_string(),
+                    Value::from_bytes(r.full_username.as_bytes()),
+                ),
+                ("reserved_username".to_string(), reserved_username),
+            ]);
+        }
+    }
+    let consumer = Value::named_composite(consumer);
     vec![
         Value::from_bytes(candidate),
         sr25519_signature(&r.candidate_signature),
@@ -167,9 +184,56 @@ fn sr25519_signature(bytes: &[u8]) -> Value {
     Value::unnamed_variant("Sr25519", [Value::from_bytes(bytes)])
 }
 
+/// One `Revive.call` from the signer, with no value transferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ContractCall<'a> {
+    /// The contract called.
+    pub dest: H160,
+    /// The `(ref_time, proof_size)` weight limit.
+    pub weight_limit: (u64, u64),
+    /// The most storage deposit the call may charge, in planck.
+    pub storage_deposit_limit: u128,
+    /// The ABI calldata.
+    pub data: &'a [u8],
+}
+
+/// `Utility.force_batch` of `calls`, each a `Revive.call` from the signer
+/// itself, never proxied: the signer pays for them.
+pub(super) fn build_contract_batch_tx(calls: &[ContractCall<'_>]) -> DynamicPayload<Vec<Value>> {
+    let calls = Value::unnamed_composite(calls.iter().map(revive_call).collect::<Vec<_>>());
+    dynamic::tx("Utility", "force_batch", vec![calls])
+}
+
+/// `Revive.map_account`, which pallet-revive requires of a signed origin before
+/// it can call a contract.
+pub(super) fn build_map_account_tx() -> DynamicPayload<Vec<Value>> {
+    dynamic::tx("Revive", "map_account", Vec::new())
+}
+
+fn revive_call(call: &ContractCall<'_>) -> Value {
+    let (ref_time, proof_size) = call.weight_limit;
+    Value::unnamed_variant(
+        "Revive",
+        [Value::unnamed_variant(
+            "call",
+            [
+                Value::from_bytes(call.dest.as_bytes()),
+                Value::u128(0),
+                Value::named_composite([
+                    ("ref_time", Value::u128(u128::from(ref_time))),
+                    ("proof_size", Value::u128(u128::from(proof_size))),
+                ]),
+                Value::u128(call.storage_deposit_limit),
+                Value::from_bytes(call.data),
+            ],
+        )],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::attest::AttestShape;
     use crate::chain::writer::fixtures::*;
 
     #[test]
@@ -304,6 +368,109 @@ mod tests {
                     reserve_name_args(&r, &candidate)
                 )]
             )
+        );
+    }
+
+    /// The field names of the consumer registration `attest_args` builds.
+    fn consumer_fields(r: &Reservation) -> Vec<String> {
+        use subxt::ext::scale_value::{Composite, ValueDef, Variant};
+
+        let args: Vec<Value> = attest_args(r, &[7; 32]);
+        let ValueDef::Variant(Variant { name, values }) = &args[4].value else {
+            panic!("consumer registration is not an Option");
+        };
+        assert_eq!(name, "Some", "attest always enrols the consumer");
+        let Composite::Unnamed(inner) = values else {
+            panic!("Some carries no value");
+        };
+        let ValueDef::Composite(Composite::Named(fields)) = &inner[0].value else {
+            panic!("consumer registration is not a named struct");
+        };
+        fields.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    #[test]
+    fn a_version_one_row_sends_the_username() {
+        let reservation = reservation();
+        assert_eq!(
+            reservation.payload_version, 1,
+            "the fixture is a format-1 row"
+        );
+        assert_eq!(
+            consumer_fields(&reservation),
+            [
+                "signature",
+                "account",
+                "identifier_key",
+                "username",
+                "reserved_username"
+            ],
+            "format 1 builds the consumer struct that carries the username and reserved name"
+        );
+    }
+
+    #[test]
+    fn a_version_two_row_sends_no_username() {
+        let mut reservation = other_reservation();
+        reservation.payload_version = 2;
+        // The reserved name stays on the row for the dotNS lane, but `attest`
+        // no longer takes it.
+        assert!(
+            reservation.reserved_username.is_some(),
+            "the fixture must carry a reserved name for this test to mean anything"
+        );
+        assert_eq!(
+            consumer_fields(&reservation),
+            ["signature", "account", "identifier_key"],
+            "format 2 builds the consumer struct without the username or reserved name"
+        );
+    }
+
+    #[test]
+    fn a_version_one_row_matches_the_vendored_call() {
+        let metadata = chain_types::metadata_arc();
+        let call = metadata
+            .pallet_by_name("PeopleLite")
+            .expect("vendored runtime has PeopleLite")
+            .call_variant_by_name("attest")
+            .expect("vendored PeopleLite has attest");
+        assert_eq!(
+            attest_args(&reservation(), &[7; 32]).len(),
+            call.fields.len(),
+            "attest_args must build every argument the vendored call declares"
+        );
+        assert_eq!(
+            AttestShape::try_from(&*metadata).expect("vendored attest has a known shape"),
+            AttestShape::WithUsername,
+            "the vendored runtime takes format 1, which the fixture row carries"
+        );
+    }
+
+    #[test]
+    fn a_contract_batch_is_a_force_batch_of_revive_calls() {
+        let data = [1, 2, 3];
+        let call = ContractCall {
+            dest: H160::repeat_byte(7),
+            weight_limit: (10, 20),
+            storage_deposit_limit: 30,
+            data: &data,
+        };
+
+        let payload = build_contract_batch_tx(&[call, call]);
+
+        assert_eq!(payload.pallet_name(), "Utility", "never proxied");
+        assert_eq!(
+            payload.call_name(),
+            "force_batch",
+            "one item failing spares the rest"
+        );
+        assert_eq!(
+            payload.call_data(),
+            &vec![Value::unnamed_composite([
+                revive_call(&call),
+                revive_call(&call)
+            ])],
+            "one Revive.call per settlement, in order"
         );
     }
 }

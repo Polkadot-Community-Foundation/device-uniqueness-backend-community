@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::http::Request;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use device_attestation::chain::asset_hub::AssetHub;
 use device_attestation::{AppState, Config, Jwt, PeopleChain};
 use http_body_util::BodyExt as _;
 use sha2::{Digest as _, Sha256};
@@ -43,11 +44,36 @@ async fn dead_chain_client() -> PeopleChain {
     PeopleChain::from_parts(client, rpc)
 }
 
+/// An Asset Hub client that answers nothing: the auth routes never read it.
+async fn dead_asset_hub_client() -> AssetHub {
+    use subxt_rpcs::client::mock_rpc_client::Json;
+    use subxt_rpcs::client::{MockRpcClient, RpcClient};
+
+    let mock = MockRpcClient::builder()
+        .method_handler("chain_getBlockHash", |_params| async {
+            Json(serde_json::json!(format!("0x{}", "00".repeat(32))))
+        })
+        .build();
+    let rpc = RpcClient::new(mock);
+    let backend = subxt::backend::LegacyBackend::builder().build(rpc.clone());
+    let client =
+        subxt::OnlineClient::<chain_types::AssetHubConfig>::from_backend(Arc::new(backend))
+            .await
+            .expect("offline client from mock backend");
+    AssetHub::from_parts(client, rpc)
+}
+
 async fn app(pool: sqlx::PgPool, configure: impl FnOnce(&mut Config)) -> axum::Router {
     let mut config = Config::test_default();
     configure(&mut config);
     let jwt = Jwt::new(&JWT_SEED, config.jwt_issuer.clone());
-    device_attestation::routes(AppState::new(pool, dead_chain_client().await, jwt, config))
+    device_attestation::routes(AppState::new(
+        pool,
+        dead_chain_client().await,
+        dead_asset_hub_client().await,
+        jwt,
+        config,
+    ))
 }
 
 async fn read_json(response: axum::response::Response) -> (u16, serde_json::Value) {

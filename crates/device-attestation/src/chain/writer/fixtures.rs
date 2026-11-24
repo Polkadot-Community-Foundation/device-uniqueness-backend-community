@@ -66,13 +66,21 @@ pub(super) fn other_reservation() -> Reservation {
     }
 }
 
-/// A reservation whose candidate signed the `PeopleLite.attest` message over
-/// the plain form, with the candidate's account.
-pub(super) fn signed_people_reservation() -> (Reservation, [u8; 32]) {
-    let keypair = subxt_signer::sr25519::Keypair::from_uri(
+/// The attester the People lane fixtures' consumer signatures cover.
+pub(super) const PEOPLE_ATTESTER: [u8; 32] = [21u8; 32];
+
+fn people_candidate() -> subxt_signer::sr25519::Keypair {
+    subxt_signer::sr25519::Keypair::from_uri(
         &subxt_signer::SecretUri::from_str("//people-writer-test").expect("valid uri"),
     )
-    .expect("keypair");
+    .expect("keypair")
+}
+
+/// A reservation whose candidate signed the `PeopleLite.attest` message and
+/// the format-1 consumer registration for [`PEOPLE_ATTESTER`] over the plain
+/// form, with the candidate's account.
+pub(super) fn signed_people_reservation() -> (Reservation, [u8; 32]) {
+    let keypair = people_candidate();
     let candidate = keypair.public_key().0;
 
     let mut r = reservation();
@@ -84,7 +92,29 @@ pub(super) fn signed_people_reservation() -> (Reservation, [u8; 32]) {
         ))
         .0
         .to_vec();
+    sign_people_consumer(&mut r);
     (r, candidate)
+}
+
+/// Re-signs `r`'s consumer registration over its fields and payload version
+/// now, as [`signed_people_reservation`]'s candidate.
+pub(super) fn sign_people_consumer(r: &mut Reservation) {
+    let keypair = people_candidate();
+    let candidate = keypair.public_key().0;
+    let version = crate::chain::attest::PayloadVersion::try_from(r.payload_version)
+        .expect("a known payload version");
+    let message = crate::signature::consumer_registration_message(
+        version,
+        &crate::signature::ConsumerRegistration {
+            account: &candidate,
+            verifier: &PEOPLE_ATTESTER,
+            identifier_key: &r.identifier_key,
+            base: r.full_username.split_once('.').expect("base.digits").0,
+            reserved_username: r.reserved_username.as_deref(),
+        },
+    )
+    .expect("a 65-byte identifier key");
+    r.consumer_registration_signature = keypair.sign(&message).0.to_vec();
 }
 
 pub(super) fn signed_reservation() -> (Reservation, [u8; 32], [u8; 32]) {
