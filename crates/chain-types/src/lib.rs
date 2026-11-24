@@ -596,6 +596,20 @@ mod tests {
     /// pointed at a node that has not upgraded yet can still sign.
     const KNOWN_RUNTIMES: &[KnownRuntime] = &[
         KnownRuntime {
+            env: "polkadot",
+            spec_name: "people-polkadot",
+            spec_version: 2_006_000,
+            tuple: TUPLE_EXTENSIONS,
+            extensions: PEOPLE_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
+            env: "polkadot asset hub",
+            spec_name: "statemint",
+            spec_version: 2_006_000,
+            tuple: ASSET_HUB_TUPLE_EXTENSIONS,
+            extensions: ASSET_HUB_POLKADOT_2005000_EXTENSIONS,
+        },
+        KnownRuntime {
             env: "polkadot-test",
             spec_name: "people-polkadot",
             spec_version: 2_005_003,
@@ -869,7 +883,7 @@ mod tests {
     }
 
     #[cfg(dub_network = "polkadot")]
-    const VENDORED_VERSION: (u32, u32) = (2_005_003, 0);
+    const VENDORED_VERSION: (u32, u32) = (2_006_000, 0);
     #[cfg(not(dub_network = "polkadot"))]
     const VENDORED_VERSION: (u32, u32) = (3_005_000, 7);
 
