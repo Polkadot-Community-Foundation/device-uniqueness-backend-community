@@ -8,6 +8,26 @@ Pre-1.0, a breaking change bumps the **minor**. Pin an exact `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-27
+
+Runtime versions this release targets:
+
+| build      | People runtime      | spec_version |
+| ---------- | ------------------- | ------------ |
+| `testnet`  | `next-people-paseo` | 3006000      |
+| `polkadot` | `people-polkadot`   | 2005003      |
+
+Non-breaking: a drop-in replacement for 0.8.2, with no configuration or
+database change. It does not include anything from 0.9.0.
+
+### Changed
+
+- **Vendored `testnet` metadata refreshed to v0.3.6.** `testnet` now builds
+  against `next-people-paseo` / `next-asset-hub-paseo` `3006000`
+  (individuality v0.3.6). No transaction-extension changes. `3005000` stays in
+  `KNOWN_RUNTIMES`, so a binary pointed at a node that has not upgraded yet
+  still signs.
+
 ## [0.8.2] - 2026-11-17
 
 Runtime versions this release targets:
@@ -699,7 +719,8 @@ same build:
   the literal placeholder `<base64-secret>`, and `turn-api` refuses to boot on
   invalid base64 — so the documented quickstart crash-looped one service.
 
-[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/paritytech/device-uniqueness-backend-community/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.3
 
 [0.8.0]: https://github.com/paritytech/device-uniqueness-backend-community/releases/tag/v0.8.0
 
