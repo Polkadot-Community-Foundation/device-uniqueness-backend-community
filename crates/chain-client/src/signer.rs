@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_local_signer_signs_sr25519_as_before() {
+    async fn a_local_signer_signs_sr25519() {
         let signer = ChainSigner::from_source(&SignerSource::Secret(SecretString::from("//Alice")))
             .await
             .unwrap();

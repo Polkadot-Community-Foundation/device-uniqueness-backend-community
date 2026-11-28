@@ -1034,10 +1034,10 @@ mod tests {
 
     #[test]
     fn project_id_alone_selects_metadata_credentials() {
-        let cfg = config(&[("FCM_PROJECT_ID", "pcf-push-devnet")])
+        let cfg = config(&[("FCM_PROJECT_ID", "my-firebase-project")])
             .unwrap()
             .expect("configured");
-        assert_eq!(cfg.project_id, "pcf-push-devnet");
+        assert_eq!(cfg.project_id, "my-firebase-project");
         assert!(matches!(
             cfg.credentials,
             FcmCredentials::Metadata {
@@ -1072,10 +1072,10 @@ mod tests {
             "Upper-case-proj",
             "1starts-with-digit",
             "ends-with-hyphen-",
-            " pcf-push-devnet",
-            "pcf-push-devnet\n",
-            "pcf/../other-proj",
-            "pcf-push?x=1",
+            " my-firebase-project",
+            "my-firebase-project\n",
+            "my/../other-proj",
+            "my-project?x=1",
             "123456789012",
             "a-project-id-that-is-longer-than-thirty",
             "prøject-id",
@@ -1093,7 +1093,7 @@ mod tests {
         }
         for good in [
             "abcdef",
-            "pcf-polkadot-app",
+            "example-project",
             "a2345678901234567890123456789z",
         ] {
             assert!(
@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn expected_email_pins_the_metadata_identity_and_is_validated() {
         let cfg = config(&[
-            ("FCM_PROJECT_ID", "pcf-push-devnet"),
+            ("FCM_PROJECT_ID", "my-firebase-project"),
             ("FCM_SERVICE_ACCOUNT_EMAIL", SENDER),
         ])
         .unwrap()
@@ -1193,7 +1193,7 @@ mod tests {
         ));
         // Blank counts as unset.
         let cfg = config(&[
-            ("FCM_PROJECT_ID", "pcf-push-devnet"),
+            ("FCM_PROJECT_ID", "my-firebase-project"),
             ("FCM_SERVICE_ACCOUNT_EMAIL", " "),
         ])
         .unwrap()
@@ -1227,7 +1227,7 @@ mod tests {
                         "FCM_SERVICE_ACCOUNT_JSON",
                         service_account_json().leak() as &str,
                     ),
-                    ("FCM_PROJECT_ID", "pcf-push-devnet"),
+                    ("FCM_PROJECT_ID", "my-firebase-project"),
                     ("FCM_SERVICE_ACCOUNT_EMAIL", SENDER),
                 ],
                 "FCM_PROJECT_ID",
@@ -1252,7 +1252,7 @@ mod tests {
             assert!(
                 matches!(
                     config(&[
-                        ("FCM_PROJECT_ID", "pcf-push-devnet"),
+                        ("FCM_PROJECT_ID", "my-firebase-project"),
                         ("FCM_SERVICE_ACCOUNT_EMAIL", bad)
                     ]),
                     Err(ConfigError::Invalid {
@@ -1265,7 +1265,7 @@ mod tests {
         }
     }
 
-    const SENDER: &str = "fcm-push-sender@pcf-push-devnet.iam.gserviceaccount.com";
+    const SENDER: &str = "fcm-push-sender@my-firebase-project.iam.gserviceaccount.com";
 
     /// A stand-in for the metadata server under `/sa` (`/token`, `/email`,
     /// `/scopes`), and for Google's token endpoint (`/oauth`) and FCM
@@ -1400,7 +1400,7 @@ mod tests {
     }
 
     fn metadata_provider(base: &str) -> FcmProvider {
-        provider_at(base, &[("FCM_PROJECT_ID", "pcf-push-devnet")])
+        provider_at(base, &[("FCM_PROJECT_ID", "my-firebase-project")])
     }
 
     async fn metadata_server(status: u16, token: Value) -> (String, Arc<Mock>) {
@@ -1672,7 +1672,7 @@ mod tests {
         let provider = provider_at(
             &url,
             &[
-                ("FCM_PROJECT_ID", "pcf-push-devnet"),
+                ("FCM_PROJECT_ID", "my-firebase-project"),
                 ("FCM_SERVICE_ACCOUNT_EMAIL", SENDER),
             ],
         );
@@ -1691,7 +1691,7 @@ mod tests {
         let provider = provider_at(
             &url,
             &[
-                ("FCM_PROJECT_ID", "pcf-push-devnet"),
+                ("FCM_PROJECT_ID", "my-firebase-project"),
                 ("FCM_SERVICE_ACCOUNT_EMAIL", SENDER),
             ],
         );
@@ -1795,11 +1795,11 @@ mod tests {
         ));
     }
 
-    // The key path's client-visible strings, pinned to what they were before
-    // the metadata source existed. They embed reqwest's own error wording, so a
-    // reqwest upgrade that rewords it fails here: the client sees these strings.
+    // The key path's client-visible strings, pinned exactly. They embed
+    // reqwest's own error wording, so a reqwest upgrade that rewords it fails
+    // here: the client sees these strings.
     #[tokio::test]
-    async fn key_path_token_exchange_errors_are_unchanged() {
+    async fn key_path_token_exchange_errors_are_pinned() {
         let body = json!({"error": "invalid_grant", "error_description": "Invalid JWT Signature."})
             .to_string();
         let mut mock = Mock::new(200, good_token());
@@ -1906,7 +1906,7 @@ mod tests {
     #[tokio::test]
     async fn a_failure_answers_for_the_hold_then_is_retried() {
         let (url, mock) = metadata_server(503, json!("unavailable")).await;
-        let cfg = config(&[("FCM_PROJECT_ID", "pcf-push-devnet")])
+        let cfg = config(&[("FCM_PROJECT_ID", "my-firebase-project")])
             .unwrap()
             .expect("configured");
         let provider =
@@ -1967,7 +1967,7 @@ mod tests {
         let provider = provider_at(
             &url,
             &[
-                ("FCM_PROJECT_ID", "pcf-push-devnet"),
+                ("FCM_PROJECT_ID", "my-firebase-project"),
                 ("FCM_SERVICE_ACCOUNT_EMAIL", SENDER),
             ],
         );
@@ -2006,7 +2006,7 @@ mod tests {
         assert_eq!(
             mock.oauth_hits.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "the key path caches exactly as before"
+            "the key path fetches one token and caches it"
         );
     }
 
