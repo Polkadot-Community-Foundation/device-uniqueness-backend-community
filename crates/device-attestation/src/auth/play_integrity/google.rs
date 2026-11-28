@@ -245,8 +245,7 @@ impl GoogleDecoder {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("http client: {e}"))?;
-        let metadata = WorkloadTokens::new(&endpoints.metadata_token)
-            .map_err(|e| format!("http client: {e}"))?;
+        let metadata = WorkloadTokens::new(&endpoints.metadata_token).map_err(|e| e.to_string())?;
         Self::with_source(
             TokenSource::Impersonate(Box::new(Impersonation {
                 service_account: service_account.to_string(),
@@ -1238,6 +1237,7 @@ mod tests {
             assert!(endpoints.https_only);
             assert!(endpoints.iam_api.starts_with("https://"));
             assert!(endpoints.decode_api.starts_with("https://"));
+            assert_eq!(endpoints.metadata_token, METADATA_TOKEN_URL);
         }
     }
 }

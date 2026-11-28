@@ -267,6 +267,18 @@ pub enum FcmInitError {
     InvalidPrivateKey(#[source] jsonwebtoken::errors::Error),
     #[error("could not build HTTP client: {0}")]
     HttpClient(#[source] reqwest::Error),
+    #[error("workload tokens are only fetched from the metadata server")]
+    NotMetadataServer,
+}
+
+/// The plain-HTTP token request may only go to Google's link-local metadata
+/// server, so nothing can point it at another host or path. Test builds also
+/// allow a loopback mock server.
+fn is_metadata_account(url: &str, allow_loopback: bool) -> bool {
+    url == METADATA_ACCOUNT_URL
+        || (allow_loopback
+            && reqwest::Url::parse(url)
+                .is_ok_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1")))
 }
 
 #[derive(Serialize)]
@@ -405,6 +417,13 @@ impl FcmProvider {
                 issuer: client_email,
             },
             FcmCredentials::Metadata { expected_email } => TokenSource::Metadata {
+                account_url: {
+                    let url = endpoints.metadata_account.trim_end_matches('/');
+                    if !is_metadata_account(url, cfg!(test)) {
+                        return Err(FcmInitError::NotMetadataServer);
+                    }
+                    url.to_string()
+                },
                 // The token comes back over plain HTTP from a node-local
                 // endpoint: never route that through a proxy taken from the
                 // environment, and never follow a redirect elsewhere.
@@ -415,7 +434,6 @@ impl FcmProvider {
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .map_err(FcmInitError::HttpClient)?,
-                account_url: endpoints.metadata_account.trim_end_matches('/').to_string(),
                 expected_email,
             },
         };
@@ -1583,6 +1601,47 @@ mod tests {
                 "{body} must not yield a token"
             );
         }
+    }
+
+    #[test]
+    fn only_the_metadata_server_is_asked_for_a_token() {
+        assert_eq!(
+            METADATA_ACCOUNT_URL,
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default"
+        );
+        assert!(is_metadata_account(METADATA_ACCOUNT_URL, false));
+        for url in [
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default",
+            "https://169.254.169.254/computeMetadata/v1/instance/service-accounts/default",
+            "http://169.254.169.254:8080/computeMetadata/v1/instance/service-accounts/default",
+            "http://169.254.169.254.example.com/computeMetadata/v1/instance/service-accounts/default",
+            "http://user@169.254.169.254/computeMetadata/v1/instance/service-accounts/default",
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/other",
+            "http://127.0.0.1:8080/sa",
+            "",
+            "HTTP://169.254.169.254/computeMetadata/v1/instance/service-accounts/default",
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/",
+            "http://169.254.169.254/computeMetadata/v1/instance%2Fservice-accounts/default",
+        ] {
+            assert!(!is_metadata_account(url, false), "{url}");
+        }
+        assert!(is_metadata_account("http://127.0.0.1:8080/sa", true));
+        assert!(!is_metadata_account("https://127.0.0.1:8080/sa", true));
+        for url in [
+            "http://10.0.0.1/sa",
+            "http://127.0.0.1@10.0.0.1/sa",
+            "http://127.0.0.1.example.com/sa",
+            "http://localhost/sa",
+        ] {
+            assert!(!is_metadata_account(url, true), "{url}");
+        }
+        let cfg = config(&[("FCM_PROJECT_ID", "example-project")])
+            .unwrap()
+            .expect("configured");
+        assert!(matches!(
+            FcmProvider::with_endpoints(cfg, endpoints("http://10.0.0.1", Duration::ZERO)),
+            Err(FcmInitError::NotMetadataServer)
+        ));
     }
 
     #[tokio::test]
