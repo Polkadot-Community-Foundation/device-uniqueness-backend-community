@@ -327,7 +327,6 @@ impl Drop for TickGuard {
 /// Maintainer configuration, loaded from the environment (independent of the
 /// api bin's [`crate::Config`] — the maintainer holds the inviter secret and
 /// no JWT material; the api holds JWT material and no secret).
-#[derive(Clone)]
 pub struct MaintainerConfig {
     /// Postgres connection string (invite-tickets' own DB).
     pub database_url: String,
