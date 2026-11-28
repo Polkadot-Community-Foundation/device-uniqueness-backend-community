@@ -4,7 +4,6 @@
 use std::future::Future;
 use std::str::FromStr as _;
 
-use anyhow::Context as _;
 use chain_types::{AssetHubConfig, PeopleConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 use subxt::utils::{AccountId32, MultiSignature};
@@ -53,7 +52,8 @@ impl SignError {
 }
 
 /// Where a worker's chain signing key comes from, chosen by configuration.
-#[derive(Clone)]
+/// Not `Clone`, so the secret it may hold is not duplicated by copying the
+/// configuration that carries it.
 pub enum SignerSource {
     /// A secret URI or raw sr25519 secret held by the process.
     Secret(SecretString),
@@ -140,9 +140,7 @@ impl ChainSigner {
     /// the account is known before anything is signed.
     pub async fn from_source(source: &SignerSource) -> anyhow::Result<Self> {
         match source {
-            SignerSource::Secret(secret) => {
-                WriterSigner::from_secret(secret.expose_secret()).map(Self::Local)
-            }
+            SignerSource::Secret(secret) => WriterSigner::from_secret(secret).map(Self::Local),
             SignerSource::Kms(name) => KmsSigner::connect(name).await.map(Self::Kms),
         }
     }
@@ -182,6 +180,17 @@ impl ChainSigner {
             Self::Local(signer) => Ok(MultiSignature::Sr25519(signer.sign_bytes(payload))),
             Self::Kms(signer) => signer.sign(payload).await.map(MultiSignature::Ed25519),
         }
+    }
+}
+
+/// Hand-written: the key itself never appears, only its kind and account.
+impl std::fmt::Debug for ChainSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChainSigner")
+            .field("kind", &self.label())
+            .field("public", &hex::encode(self.public_bytes()))
+            .field("kms_key_version", &self.kms_key_version())
+            .finish()
     }
 }
 
@@ -228,14 +237,29 @@ pub enum WriterSigner {
     Raw(schnorrkel::Keypair),
 }
 
+/// Hand-written: the keypair types' own `Debug` prints the secret key.
+impl std::fmt::Debug for WriterSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriterSigner")
+            .field("public", &hex::encode(self.public_bytes()))
+            .finish_non_exhaustive()
+    }
+}
+
 impl WriterSigner {
-    pub fn from_secret(secret: &str) -> anyhow::Result<Self> {
-        let trimmed = secret.trim();
+    /// A secret URI, or `0x` and a raw 64-byte expanded sr25519 secret key.
+    pub fn from_secret(secret: &SecretString) -> anyhow::Result<Self> {
+        // Every error here is a fixed message: the hex and URI parsers' own
+        // errors can quote characters of the secret.
+        let trimmed = secret.expose_secret().trim();
         if let Some(hex) = trimmed.strip_prefix("0x") {
             if hex.len() == 128 {
-                let bytes = hex::decode(hex).context("decoding raw sr25519 secret key")?;
+                let bytes = secrecy::zeroize::Zeroizing::new(
+                    hex::decode(hex)
+                        .map_err(|_| anyhow::anyhow!("raw sr25519 secret key is not hex"))?,
+                );
                 let secret = schnorrkel::SecretKey::from_ed25519_bytes(&bytes)
-                    .map_err(|e| anyhow::anyhow!("invalid 64-byte sr25519 secret key: {e}"))?;
+                    .map_err(|_| anyhow::anyhow!("invalid 64-byte sr25519 secret key"))?;
                 let keypair = schnorrkel::Keypair {
                     public: secret.to_public(),
                     secret,
@@ -243,10 +267,17 @@ impl WriterSigner {
                 return Ok(Self::Raw(keypair));
             }
         }
-        let uri =
-            subxt_signer::SecretUri::from_str(trimmed).context("parsing signer secret URI")?;
-        let keypair = subxt_signer::sr25519::Keypair::from_uri(&uri)
-            .context("building signer keypair from SURI")?;
+        let uri = subxt_signer::SecretUri::from_str(trimmed)
+            .map_err(|_| anyhow::anyhow!("signer secret is not a valid secret URI"))?;
+        let keypair = subxt_signer::sr25519::Keypair::from_uri(&uri).map_err(|error| {
+            use subxt_signer::sr25519::Error;
+            anyhow::anyhow!(match error {
+                Error::Hex(_) => "signer secret seed is not 32 bytes of hex",
+                Error::InvalidSeed => "signer secret seed has the wrong length",
+                Error::Phrase(_) => "signer secret mnemonic is not valid",
+                Error::Signature(_) => "signer secret does not give an sr25519 key",
+            })
+        })?;
         Ok(Self::Uri(keypair))
     }
 
@@ -300,7 +331,8 @@ mod tests {
 
     #[test]
     fn uri_path_derives_dev_alice() {
-        let signer = WriterSigner::from_secret("//Alice").expect("valid dev uri");
+        let signer =
+            WriterSigner::from_secret(&SecretString::from("//Alice")).expect("valid dev uri");
         let expected =
             hex::decode("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
                 .unwrap();
@@ -316,9 +348,11 @@ mod tests {
         let raw64 = keypair.secret.to_ed25519_bytes();
 
         let from_seed =
-            WriterSigner::from_secret(&format!("0x{}", hex::encode(seed))).expect("valid seed");
+            WriterSigner::from_secret(&SecretString::from(format!("0x{}", hex::encode(seed))))
+                .expect("valid seed");
         let from_raw =
-            WriterSigner::from_secret(&format!("0x{}", hex::encode(raw64))).expect("valid raw");
+            WriterSigner::from_secret(&SecretString::from(format!("0x{}", hex::encode(raw64))))
+                .expect("valid raw");
 
         assert!(matches!(from_seed, WriterSigner::Uri(_)));
         assert!(matches!(from_raw, WriterSigner::Raw(_)));
@@ -334,7 +368,8 @@ mod tests {
             .expand_to_keypair(ExpansionMode::Ed25519);
         let raw64 = keypair.secret.to_ed25519_bytes();
         let signer =
-            WriterSigner::from_secret(&format!("0x{}", hex::encode(raw64))).expect("valid raw");
+            WriterSigner::from_secret(&SecretString::from(format!("0x{}", hex::encode(raw64))))
+                .expect("valid raw");
 
         let message = b"dub";
         let sig = signer.sign_bytes(message);
@@ -416,6 +451,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_signer_prints_only_its_account() {
+        let seed = [7u8; 32];
+        let keypair = MiniSecretKey::from_bytes(&seed)
+            .unwrap()
+            .expand_to_keypair(ExpansionMode::Ed25519);
+        let raw64 = keypair.secret.to_ed25519_bytes();
+        let raw =
+            WriterSigner::from_secret(&SecretString::from(format!("0x{}", hex::encode(raw64))))
+                .unwrap();
+        let uri = WriterSigner::from_secret(&SecretString::from("//Alice")).unwrap();
+        for signer in [raw, uri] {
+            let public = hex::encode(signer.public_bytes());
+            assert_eq!(
+                format!("{signer:?}"),
+                format!("WriterSigner {{ public: \"{public}\", .. }}")
+            );
+            assert_eq!(
+                format!("{:?}", ChainSigner::Local(signer)),
+                format!(
+                    "ChainSigner {{ kind: \"sr25519-secret\", public: \"{public}\", \
+                     kms_key_version: None }}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_secret_error_does_not_quote_it() {
+        for (secret, expected) in [
+            (
+                format!("0x{}z", "a".repeat(127)),
+                "raw sr25519 secret key is not hex",
+            ),
+            (
+                format!("0x{}z", "a".repeat(63)),
+                "signer secret seed is not 32 bytes of hex",
+            ),
+            (
+                format!("0x{}", "a".repeat(62)),
+                "signer secret seed is not 32 bytes of hex",
+            ),
+            (
+                "bottom drive obey lake curtain smoke basket hold race lonely fit wall".into(),
+                "signer secret mnemonic is not valid",
+            ),
+        ] {
+            let error =
+                WriterSigner::from_secret(&SecretString::from(secret)).expect_err("malformed");
+            assert_eq!(format!("{error:#}"), expected);
+        }
+    }
+
     #[tokio::test]
     async fn a_local_signer_signs_sr25519() {
         let signer = ChainSigner::from_source(&SignerSource::Secret(SecretString::from("//Alice")))
@@ -445,7 +533,8 @@ mod tests {
 
     #[test]
     fn proxy_mode_is_derived_from_the_primary() {
-        let signer = WriterSigner::from_secret("//Alice").expect("valid dev uri");
+        let signer =
+            WriterSigner::from_secret(&SecretString::from("//Alice")).expect("valid dev uri");
         let own = AccountId32(signer.public_bytes());
         let other = AccountId32([2; 32]);
 

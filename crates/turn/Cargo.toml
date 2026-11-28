@@ -45,6 +45,7 @@ hex = "0.4"
 rand = "0.8"
 
 [dev-dependencies]
+secrecy = "0.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 ed25519-dalek = "2"
