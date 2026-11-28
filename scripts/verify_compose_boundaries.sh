@@ -94,6 +94,7 @@ forbid_key() {
 
 for service in device-attestation-api device-attestation-chain-writer username-indexer; do
   forbid_key "$service" INVITER_SIGNER_SURI
+  forbid_key "$service" INVITER_SIGNER_KMS_KEY
 done
 
 # Request-validation bounds are intake-only. They shape 400s, not extrinsics.
@@ -127,7 +128,7 @@ done
 # device-attestation DB — never signing secrets or JWT material. Its lease is the queue
 # liveness signal, so it needs its cadence knobs.
 for key in JWT_ED25519_SECRET JWT_ED25519_PUBLIC_KEY JWT_JWKS_JSON \
-           CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI INVITE_INVITER_SIGNER_SURI \
+           CHAIN_WRITER_SIGNER_SURI CHAIN_WRITER_SIGNER_KMS_KEY INVITER_SIGNER_SURI INVITER_SIGNER_KMS_KEY INVITE_INVITER_SIGNER_SURI \
            TURN_API_TOKEN TURN_SECRET; do
   forbid_key registration-queue "$key"
 done
@@ -145,7 +146,7 @@ require_key device-attestation-chain-writer QUEUE_FALLBACK_AFTER_SECS
 # public key admits authenticated callers past the proof-of-compute gate, but the
 # service can never mint a token. The signing secret and every other service's
 # secret stay out.
-for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI CHAIN_WRITER_SIGNER_KMS_KEY INVITER_SIGNER_SURI INVITER_SIGNER_KMS_KEY \
            INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN TURN_SECRET; do
   forbid_key username-indexer "$key"
 done
@@ -273,7 +274,7 @@ done
 
 # notify-relay is verify-only and holds its own push secrets, but never another
 # service's signing/DB secrets.
-for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI CHAIN_WRITER_SIGNER_KMS_KEY INVITER_SIGNER_SURI INVITER_SIGNER_KMS_KEY \
            INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN TURN_SECRET "${DB_URL_KEYS[@]}"; do
   forbid_key notify-relay "$key"
 done
@@ -286,7 +287,7 @@ require_key notify-relay NOTIFY_RATE_LIMIT_WINDOW_SECS
 # scoped to a subshell rather than left in place for whatever is added below.
 (
   rendered="$rendered_gateway"
-  for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+  for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI CHAIN_WRITER_SIGNER_KMS_KEY INVITER_SIGNER_SURI INVITER_SIGNER_KMS_KEY \
              INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN TURN_SECRET "${DB_URL_KEYS[@]}" JWT_JWKS_JSON \
              JWT_ED25519_PUBLIC_KEY APNS_PRIVATE_KEY APNS_PRIVATE_KEY_FILE \
              FCM_SERVICE_ACCOUNT_JSON POC_HMAC_SECRET \
@@ -323,7 +324,7 @@ fi
 (
   rendered="$rendered_observability"
   for service in prometheus loki alloy grafana; do
-    for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI INVITER_SIGNER_SURI \
+    for key in JWT_ED25519_SECRET CHAIN_WRITER_SIGNER_SURI CHAIN_WRITER_SIGNER_KMS_KEY INVITER_SIGNER_SURI INVITER_SIGNER_KMS_KEY \
                INVITE_INVITER_SIGNER_SURI TURN_API_TOKEN TURN_SECRET POC_HMAC_SECRET "${DB_URL_KEYS[@]}" \
                APNS_PRIVATE_KEY FCM_SERVICE_ACCOUNT_JSON; do
       forbid_key "$service" "$key"

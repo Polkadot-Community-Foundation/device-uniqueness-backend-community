@@ -44,6 +44,7 @@ pub(super) fn zero_init_submit_outcomes() {
         }
         metrics::counter!("dub_chain_batch_failed_total", "lane" => lane).absolute(0);
         metrics::counter!("dub_chain_batch_item_failed_total", "lane" => lane).absolute(0);
+        metrics::counter!("dub_chain_signing_failed_total", "lane" => lane).absolute(0);
     }
 }
 

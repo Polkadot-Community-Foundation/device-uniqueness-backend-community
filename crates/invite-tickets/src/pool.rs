@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
-use chain_client::WriterSigner;
+use chain_client::{ChainSigner, SignerSource};
 use sqlx::PgPool;
 use subxt::utils::AccountId32;
 
@@ -65,7 +65,7 @@ pub fn item_accepted(items: &[bool], index: usize) -> bool {
 /// The signing identity the maintainer submits with.
 pub struct InviterIdentity {
     /// Transaction signer (the inviter itself, or its proxy delegate).
-    pub signer: WriterSigner,
+    pub signer: ChainSigner,
     /// The inviter account whose quota funds tickets — stamped into rows, and
     /// the account the chain must see as the caller.
     pub inviter: AccountId32,
@@ -335,10 +335,12 @@ pub struct MaintainerConfig {
     pub network: Network,
     /// Inviter whose quota funds tickets; stamped into rows.
     pub inviter_address: String,
-    /// Secret of the hot inviter signing key (SURI or raw 64-byte hex). A key
-    /// whose account is not `inviter_address` proxies for it — see
-    /// [`chain_client::WriterSigner::proxy_for`].
-    pub signer_secret: String,
+    /// The hot inviter signing key: a secret (SURI or raw 64-byte hex,
+    /// `INVITER_SIGNER_SURI`) or a Cloud KMS Ed25519 key version
+    /// (`INVITER_SIGNER_KMS_KEY`), exactly one of them. A key whose account is
+    /// not `inviter_address` proxies for it — see
+    /// [`chain_client::ChainSigner::proxy_for`].
+    pub signer: SignerSource,
     pub dims: Vec<Dim>,
     pub tuning: PoolTuning,
 }
@@ -353,7 +355,7 @@ impl std::fmt::Debug for MaintainerConfig {
             .field("people_rpc_url", &self.people_rpc_url)
             .field("network", &self.network)
             .field("inviter_address", &self.inviter_address)
-            .field("signer_secret", &"<redacted>")
+            .field("signer", &self.signer)
             .field("dims", &self.dims)
             .field("tuning", &self.tuning)
             .finish()
@@ -364,7 +366,8 @@ impl MaintainerConfig {
     /// Read and validate maintainer configuration from the environment.
     ///
     /// Fails (rather than defaulting) for `DATABASE_URL`, `PEOPLE_RPC_URL`,
-    /// `PEOPLE_NETWORK`, `INVITER_ADDRESS`, and `INVITER_SIGNER_SURI`.
+    /// `PEOPLE_NETWORK`, `INVITER_ADDRESS`, and the signer (`INVITER_SIGNER_SURI`
+    /// or `INVITER_SIGNER_KMS_KEY`, not both).
     pub fn from_env() -> anyhow::Result<Self> {
         use std::str::FromStr as _;
 
@@ -379,7 +382,7 @@ impl MaintainerConfig {
         let inviter_address = required_env("INVITER_ADDRESS")?;
         AccountId32::from_str(&inviter_address)
             .map_err(|e| anyhow::anyhow!("INVITER_ADDRESS is not valid SS58: {e}"))?;
-        let signer_secret = required_env("INVITER_SIGNER_SURI")?;
+        let signer = SignerSource::from_env("INVITER_SIGNER_SURI", "INVITER_SIGNER_KMS_KEY")?;
 
         let dims_raw = std::env::var("POOL_DIMS").unwrap_or_else(|_| "Game,ProofOfInk".to_string());
         let dims = parse_pool_dims(&dims_raw)?;
@@ -394,7 +397,7 @@ impl MaintainerConfig {
             people_rpc_url,
             network,
             inviter_address,
-            signer_secret,
+            signer,
             dims,
             tuning: PoolTuning {
                 interval: Duration::from_secs(interval_secs),
@@ -425,7 +428,7 @@ async fn readiness(pool: PgPool, chain: PeopleChain) -> http_common::health::Rea
 pub async fn run(config: MaintainerConfig) -> anyhow::Result<()> {
     use std::str::FromStr as _;
 
-    let signer = WriterSigner::from_secret(&config.signer_secret)?;
+    let signer = ChainSigner::from_source(&config.signer).await?;
     let configured_inviter = AccountId32::from_str(&config.inviter_address)
         .context("parsing validated INVITER_ADDRESS")?;
     let mode = if signer.proxy_for(configured_inviter).is_some() {
@@ -441,6 +444,9 @@ pub async fn run(config: MaintainerConfig) -> anyhow::Result<()> {
         network = config.network.as_str(),
         inviter = %config.inviter_address,
         signer = %hex::encode(signer.public_bytes()),
+        signer_ss58 = %AccountId32(signer.public_bytes()),
+        signer_key = signer.label(),
+        kms_key_version = signer.kms_key_version().unwrap_or("-"),
         mode,
         dims = ?config.dims,
         target = config.tuning.target,
@@ -609,7 +615,12 @@ mod tests {
             people_rpc_url: "wss://rpc.example".to_string(),
             network: crate::tickets::Network::Paseo,
             inviter_address: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            signer_secret: "s3cret-inviter-suri".to_string(),
+            signer: chain_client::SignerSource::from_getter(
+                |key| (key == "INVITER_SIGNER_SURI").then(|| "s3cret-inviter-suri".to_string()),
+                "INVITER_SIGNER_SURI",
+                "INVITER_SIGNER_KMS_KEY",
+            )
+            .unwrap(),
             dims: vec![Dim::Game],
             tuning: super::PoolTuning::default(),
         };
