@@ -810,5 +810,6 @@ mod tests {
         let endpoints = KmsEndpoints::default();
         assert!(endpoints.https_only);
         assert!(endpoints.api.starts_with("https://"));
+        assert_eq!(endpoints.metadata_token, METADATA_TOKEN_URL);
     }
 }
