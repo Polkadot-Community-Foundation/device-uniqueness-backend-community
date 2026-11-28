@@ -57,7 +57,7 @@ const DEFAULT_DOTNS_BATCH_SIZE: u16 = 3;
 pub const PEOPLE_TX_MORTALITY_BLOCKS: u64 = 64;
 
 /// Chain-writer configuration, loaded from the environment.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WriterConfig {
     /// password, so it is a secret.
     pub database_url: SecretString,
