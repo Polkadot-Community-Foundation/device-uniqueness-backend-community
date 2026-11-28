@@ -97,6 +97,10 @@ pub struct Config {
     /// Legacy `GOOGLE_CREDENTIALS` service account (base64 JSON) for the
     /// temporary `decodeIntegrityToken` fallback. Delete with the fallback.
     pub google_credentials: Option<crate::auth::play_integrity::google::GoogleCredentials>,
+    /// `PLAY_INTEGRITY_SERVICE_ACCOUNT`: the service account the same fallback
+    /// authenticates as with the workload's own identity (GKE Workload
+    /// Identity), with no key. Exclusive with `google_credentials`.
+    pub play_integrity_service_account: Option<String>,
     /// Apple DeviceCheck (iOS uniqueness at username claim). `None` while
     /// `DEVICE_CHECK_IOS_ENABLED=false`; required key material otherwise.
     pub device_check: Option<DeviceCheckConfig>,
@@ -265,6 +269,7 @@ impl Config {
                 .map(|k| SecretBox::new(Box::new(k))),
             play_integrity_verification_key,
             google_credentials: parse_google_credentials()?,
+            play_integrity_service_account: parse_play_integrity_service_account()?,
             device_check: parse_device_check()?,
             widevine: parse_widevine()?,
         })
@@ -306,6 +311,7 @@ impl Config {
             play_integrity_decryption_key: None,
             play_integrity_verification_key: None,
             google_credentials: None,
+            play_integrity_service_account: None,
             device_check: None,
             widevine: None,
         }
@@ -463,6 +469,33 @@ fn decode_play_integrity_verification_key(raw: &str) -> Result<Option<Vec<u8>>, 
         reason: format!("expected DER SPKI EC P-256 public key: {e}"),
     })?;
     Ok(Some(der))
+}
+
+/// Parse the optional `PLAY_INTEGRITY_SERVICE_ACCOUNT`, the keyless
+/// alternative to `GOOGLE_CREDENTIALS` for the Google-API fallback. Setting
+/// both is refused: the two would authenticate as different identities.
+fn parse_play_integrity_service_account() -> Result<Option<String>, ConfigError> {
+    const KEY: &str = "PLAY_INTEGRITY_SERVICE_ACCOUNT";
+    let Some(email) = std::env::var(KEY).ok().filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if std::env::var("GOOGLE_CREDENTIALS").is_ok_and(|v| !v.trim().is_empty()) {
+        return Err(ConfigError::Invalid {
+            key: KEY,
+            reason: "set together with GOOGLE_CREDENTIALS; set the key or the service \
+                     account to act as, not both"
+                .to_string(),
+        });
+    }
+    if !crate::auth::play_integrity::google::is_service_account_email(&email) {
+        return Err(ConfigError::Invalid {
+            key: KEY,
+            reason: "not a user-managed service account email \
+                     (<name>@<project>.iam.gserviceaccount.com)"
+                .to_string(),
+        });
+    }
+    Ok(Some(email))
 }
 
 /// Parse the optional legacy `GOOGLE_CREDENTIALS` (base64 service-account
@@ -897,5 +930,44 @@ mod tests {
         for bad in ["treu", "tru", "", "2", "enabled", "t"] {
             assert_eq!(parse_bool(bad), None, "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn the_keyless_play_integrity_account_is_validated_and_exclusive() {
+        const SA: &str = "play-integrity-decoder@pcf-polkadot-app.iam.gserviceaccount.com";
+        let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let set = |account: Option<&str>, credentials: Option<&str>| {
+            for (key, value) in [
+                ("PLAY_INTEGRITY_SERVICE_ACCOUNT", account),
+                ("GOOGLE_CREDENTIALS", credentials),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let result = parse_play_integrity_service_account();
+            std::env::remove_var("PLAY_INTEGRITY_SERVICE_ACCOUNT");
+            std::env::remove_var("GOOGLE_CREDENTIALS");
+            result
+        };
+
+        assert_eq!(set(None, None).unwrap(), None);
+        assert_eq!(set(Some("  "), None).unwrap(), None);
+        assert_eq!(set(Some(SA), None).unwrap().as_deref(), Some(SA));
+        assert!(matches!(
+            set(Some(SA), Some("e30=")),
+            Err(ConfigError::Invalid { key: "PLAY_INTEGRITY_SERVICE_ACCOUNT", ref reason })
+                if reason.contains("not both")
+        ));
+        // Blank credentials do not count as set.
+        assert_eq!(set(Some(SA), Some(" ")).unwrap().as_deref(), Some(SA));
+        assert!(matches!(
+            set(Some("decoder@gmail.com"), None),
+            Err(ConfigError::Invalid {
+                key: "PLAY_INTEGRITY_SERVICE_ACCOUNT",
+                ..
+            })
+        ));
     }
 }

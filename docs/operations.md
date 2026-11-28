@@ -387,6 +387,45 @@ network, re-check all of them:
 None of these are things the software can provision. On a permissioned test
 network they are an ask of whoever operates it.
 
+### Play Integrity without a key file
+
+`device-attestation-api` verifies Play Integrity verdicts with the
+self-managed response keys (`PLAY_INTEGRITY_DECRYPTION_KEY` and
+`PLAY_INTEGRITY_VERIFICATION_KEY`), which decode locally and take precedence,
+or through Google's `decodeIntegrityToken`. For the Google path, set
+`GOOGLE_CREDENTIALS` (a service-account key) or, on Google Cloud,
+`PLAY_INTEGRITY_SERVICE_ACCOUNT` instead (setting both is refused at boot):
+
+- `decodeIntegrityToken` accepts only the `playintegrity` OAuth scope, while
+  a workload's own token from the metadata server is `cloud-platform`. So the
+  service asks the IAM Credentials API (`generateAccessToken`) for a
+  `playintegrity` token of the named service account, with its own token, and
+  caches it for most of its hour. No key is held.
+- **The named account must be in the Cloud project the app's tokens are tied
+  to.** Google, on `setCloudProjectNumber`: "Calls to decrypt the token on
+  Google's server must be authenticated using the cloud account that was
+  linked to the token in this request." An app that sets a Cloud project
+  number in its request can therefore only be decoded by an account of that
+  project, which must also be linked to the app in Play Console (Protected
+  with Play > Play Integrity API; up to five projects). Moving decoding to
+  another project means an app build that sends that project's number.
+- The decoder account holds **no** IAM roles. The workload's own Google
+  service account gets `roles/iam.serviceAccountTokenCreator` on that one
+  account only, never on the project. They must be two accounts: Google does
+  not let a service account mint a token for itself this way.
+- Give the API pod its own Kubernetes service account for the Workload
+  Identity binding. The chart in `helm/` renders no per-workload service
+  account, so its pods all share the namespace's `default` one, and binding
+  that would let every DUB workload mint the decoder's token.
+- At boot, unless self-managed keys are set, the service mints a token in the
+  background (five attempts, two seconds apart, for transient failures) and
+  logs `Play Integrity decoder token minted` or a warning with the reason. A
+  failure later is logged with its reason; the app sees only `play integrity
+  token unavailable`, or `decodeIntegrityToken rejected (<status>)` when Play
+  Integrity refuses the token (Google's explanation, which can name the
+  project, goes to the log). Under `ENFORCE_AUTH` either rejects the Android
+  attestation, so check the boot log and one real attestation after a change.
+
 ## Choosing a topology
 
 The backend deploys in one of two shapes. They serve an **identical** public API;
