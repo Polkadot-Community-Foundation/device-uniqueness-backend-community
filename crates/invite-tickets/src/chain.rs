@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use anyhow::Context as _;
-use chain_client::WriterSigner;
+use chain_client::ChainSigner;
 use chain_types::people;
 use chain_types::people::runtime_types::next_people_paseo_runtime::{ProxyType, RuntimeCall};
 use chain_types::people::runtime_types::{
     indiv_pallet_game, indiv_pallet_proof_of_ink, pallet_utility,
 };
-use chain_types::{PeopleConfig, PeopleExtrinsicParamsBuilder};
-use subxt::tx::TransactionStatus;
+use chain_types::{PeopleConfig, PeopleExtrinsicParamsBuilder, PeopleTransactionExtensions};
+use subxt::client::OnlineClientAtBlockImpl;
+use subxt::config::TransactionExtensions;
+use subxt::tx::{Payload, SubmittableTransaction, TransactionStatus};
 use subxt::utils::{AccountId32, MultiAddress};
 use subxt::OnlineClient;
 
@@ -82,6 +84,33 @@ impl PeopleChain {
         }
     }
 
+    /// Sign `payload` with `signer`. A key held in the process signs through
+    /// subxt; a Cloud KMS key signs over the network, so it
+    /// goes through the encoder that waits for the signature, and a signing
+    /// failure yields no transaction.
+    async fn sign_batch<P: Payload>(
+        &self,
+        payload: &P,
+        signer: &ChainSigner,
+        params: <PeopleTransactionExtensions<PeopleConfig> as TransactionExtensions<
+            PeopleConfig,
+        >>::Params,
+    ) -> anyhow::Result<SubmittableTransaction<PeopleConfig, OnlineClientAtBlockImpl<PeopleConfig>>>
+    {
+        match signer {
+            ChainSigner::Local(local) => Ok(self
+                .client
+                .tx()
+                .await?
+                .create_signed(payload, local, params)
+                .await?),
+            ChainSigner::Kms(_) => {
+                let at = self.client.at_current_block().await?;
+                Ok(chain_client::create_signed_v4(&at, payload, signer, params).await?)
+            }
+        }
+    }
+
     /// Sign and submit one `Utility.force_batch` of `set_invite_ticket` calls
     /// and wait for finalization, returning the ordered per-item outcomes.
     ///
@@ -92,7 +121,7 @@ impl PeopleChain {
         &self,
         tickets: &[AccountId32],
         dim: Dim,
-        signer: &WriterSigner,
+        signer: &ChainSigner,
         proxy_for: Option<&AccountId32>,
     ) -> anyhow::Result<FinalizedBatch> {
         let calls: Vec<RuntimeCall> = tickets
@@ -102,7 +131,6 @@ impl PeopleChain {
         // Nonce comes from the chain at sign time: this maintainer submits
         // one extrinsic at a time, so there is no in-flight lane to track.
         let params = PeopleExtrinsicParamsBuilder::new().build();
-        let mut tx_client = self.client.tx().await?;
 
         // The proxy wrap changes the payload's static type, so sign per branch.
         let signed = match proxy_for {
@@ -115,11 +143,11 @@ impl PeopleChain {
                     Some(ProxyType::Any),
                     inner,
                 );
-                tx_client.create_signed(&payload, signer, params).await?
+                self.sign_batch(&payload, signer, params).await?
             }
             None => {
                 let payload = people::tx().utility().force_batch(calls);
-                tx_client.create_signed(&payload, signer, params).await?
+                self.sign_batch(&payload, signer, params).await?
             }
         };
         let tx_hash = format!("{:?}", signed.hash());

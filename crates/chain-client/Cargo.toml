@@ -17,8 +17,18 @@ anyhow.workspace = true
 hex = "0.4"
 thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = "0.3"
+secrecy = "0.10"
+base64 = "0.22"
+ed25519-dalek = "2"
+# Cloud KMS signing and the workload's own token from the metadata server.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
+axum.workspace = true
 jsonrpsee-core = { version = "0.24", features = ["server"] }
 jsonrpsee-server = "0.24"
 tokio.workspace = true

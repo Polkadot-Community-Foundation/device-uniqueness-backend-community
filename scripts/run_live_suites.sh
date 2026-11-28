@@ -20,12 +20,12 @@ if [ "$mode" = "providers" ]; then
     "${cargo_cmd[@]}" -p notifications --test apns_live -- --ignored --nocapture
     ran_provider=true
   fi
-  if [ -n "${FCM_SERVICE_ACCOUNT_JSON:-}" ]; then
+  if [ -n "${FCM_SERVICE_ACCOUNT_JSON:-}" ] || [ -n "${FCM_PROJECT_ID:-}" ]; then
     "${cargo_cmd[@]}" -p notifications --test fcm_live -- --ignored --nocapture
     ran_provider=true
   fi
   if [ "$ran_provider" = false ]; then
-    echo "configure APNS_PRIVATE_KEY/APNS_PRIVATE_KEY_FILE or FCM_SERVICE_ACCOUNT_JSON" >&2
+    echo "configure APNS_PRIVATE_KEY/APNS_PRIVATE_KEY_FILE, FCM_SERVICE_ACCOUNT_JSON or FCM_PROJECT_ID" >&2
     exit 2
   fi
   exit 0

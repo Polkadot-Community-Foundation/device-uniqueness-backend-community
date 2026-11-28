@@ -20,7 +20,7 @@ use std::{
 };
 
 use anyhow::Result;
-use chain_client::WriterSigner;
+use chain_client::ChainSigner;
 use sqlx::PgPool;
 use subxt::{
     client::OnlineClientAtBlockT, extrinsics::ExtrinsicEvents, metadata::ArcMetadata,
@@ -58,7 +58,7 @@ const RECONCILE_READ_CHUNK: usize = 50;
 pub(super) struct Cx<'a> {
     pub pool: &'a PgPool,
     pub guard: &'a Guard,
-    pub signer: &'a WriterSigner,
+    pub signer: &'a ChainSigner,
     pub signer_account: &'a AccountId32,
     /// The attester authority to proxy for, or `None` when the signer *is* it.
     pub proxy_for: Option<[u8; 32]>,
@@ -467,7 +467,11 @@ impl<L: Lane> Drain<L> {
             Err(e) => {
                 // Reset the cached nonce; re-fetch on the next attempt.
                 self.nonce = None;
-                self.retry_batch(cx, rows, &e.to_string()).await
+                let reason = e.to_string();
+                if is_signing_failure(&reason) {
+                    return self.defer_unsigned(cx, rows, &reason).await;
+                }
+                self.retry_batch(cx, rows, &reason).await
             }
         }
     }
@@ -602,6 +606,23 @@ impl<L: Lane> Drain<L> {
             return Ok(());
         }
         self.defer_reconciled(cx, &unlanded, reason).await
+    }
+
+    /// Re-queue a set the chain signer could not sign. Nothing was submitted,
+    /// so it is not a batch failure: the size and its ceiling stay where they
+    /// are (a signer outage would otherwise leave the lane throttled for hours
+    /// after it recovers) and no attempt is spent.
+    async fn defer_unsigned(
+        &mut self,
+        cx: &Cx<'_>,
+        rows: &[impl Row],
+        reason: &str,
+    ) -> Result<(), WriterError> {
+        for r in rows {
+            self.record(cx, r.reservation(), signer_defer(reason))
+                .await?;
+        }
+        Ok(())
     }
 
     /// Re-queue a whole batch **without** spending anyone's attempt, on one
@@ -836,6 +857,10 @@ pub(super) const STALE_NONCE: &str = "Transaction is outdated";
 
 pub(super) const STALE_NONCE_BACKOFF_SECS: i64 = 6;
 
+/// How long a row waits after the chain signer failed to sign. A KMS refusal
+/// or timeout is the signer's condition; the next pass tries again.
+pub(super) const SIGNING_BACKOFF_SECS: i64 = 15;
+
 /// What [`finalize`] says when `finalize_timeout` runs out.
 ///
 /// It reads like a rejection and is not one: the transaction is still alive in
@@ -847,8 +872,16 @@ pub(super) const STALE_NONCE_BACKOFF_SECS: i64 = 6;
 /// after the writer stopped watching is assigned rather than written off.
 const FINALIZE_TIMEOUT: &str = "finalization timed out";
 
+/// Whether a failure is the chain signer failing to sign (see
+/// `chain_client::SignError`): nothing was submitted, so it is never a verdict
+/// on the row nor on the batch.
+pub(super) fn is_signing_failure(reason: &str) -> bool {
+    reason.contains(chain_client::SIGNER_UNAVAILABLE)
+}
+
 fn is_signer_contention(reason: &str) -> bool {
-    reason.contains(FINALIZE_TIMEOUT)
+    is_signing_failure(reason)
+        || reason.contains(FINALIZE_TIMEOUT)
         || reason.contains(STALE_NONCE)
         || SIGNER_CONTENTION
             .iter()
@@ -943,6 +976,45 @@ mod tests {
     const UNFUNDED_ERROR: &str = "max attempts reached: Error during transaction progress: \
          The transaction is not valid: Invalid transaction: Inability to pay some fees \
          (e.g. account balance too low)";
+
+    #[test]
+    fn a_signing_failure_is_told_apart_from_a_failed_batch() {
+        assert!(is_signing_failure(
+            "chain signer unavailable (kms quota exhausted)"
+        ));
+        for other in [
+            "Rpc error: the node answered something unexpected",
+            "finalization timed out",
+            "Priority is too low: (278 vs 278)",
+            "signer balance too low",
+        ] {
+            assert!(!is_signing_failure(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_signing_failure_defers_without_spending_attempts_or_landing() {
+        let candidate = [7; 32];
+        let reason = "chain signer unavailable (kms quota exhausted)";
+        // Even past the attempt budget: nothing was submitted, so nothing about
+        // the row has been tried.
+        for completed in [1, 3, 10] {
+            assert_eq!(
+                classify_submit_failure(reason, None, candidate, completed, 3),
+                SubmitFailureAction::Defer
+            );
+        }
+        // Never a success on its own word; only the chain showing the
+        // candidate already owns the name assigns it.
+        assert_eq!(
+            classify_submit_failure(reason, Some([8; 32]), candidate, 1, 3),
+            SubmitFailureAction::Defer
+        );
+        assert_eq!(
+            classify_submit_failure(reason, Some(candidate), candidate, 1, 3),
+            SubmitFailureAction::Assign
+        );
+    }
 
     #[test]
     fn an_unrecognised_failure_retries_then_fails_without_becoming_assigned() {

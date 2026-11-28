@@ -7,7 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::PgPool;
 use subxt::utils::AccountId32;
 
-use chain_client::WriterSigner;
+use chain_client::{ChainSigner, SignerSource, SignerSourceError};
 
 use super::{lease, outbox::Guard, people::PeopleChain};
 use crate::config::ConfigError;
@@ -62,11 +62,13 @@ pub struct WriterConfig {
     /// password, so it is a secret.
     pub database_url: SecretString,
     pub people_rpc_url: String,
-    /// SURI of the hot signing key (the proxy key, or the primary in dev).
-    pub signer_suri: SecretString,
+    /// The hot signing key (the proxy key, or the primary in dev): a secret
+    /// URI (`CHAIN_WRITER_SIGNER_SURI`) or a Cloud KMS Ed25519 key version
+    /// (`CHAIN_WRITER_SIGNER_KMS_KEY`), exactly one of them.
+    pub signer: SignerSource,
     /// Attester authority (`ATTESTER_ACCOUNT`), the account device-attestation-api also
     /// publishes. Proxying is derived from it — see
-    /// [`WriterSigner::proxy_for`].
+    /// [`ChainSigner::proxy_for`].
     pub attester: [u8; 32],
     pub holder_id: String,
     /// Lease row name (all writers of one account share it).
@@ -130,7 +132,15 @@ impl WriterConfig {
         let database_url = http_common::config::required_var("DEVICE_ATTESTATION_DATABASE_URL")?;
         let people_rpc_url = std::env::var("PEOPLE_RPC_URL")
             .unwrap_or_else(|_| "wss://paseo-people-next-system-rpc.polkadot.io".to_string());
-        let signer_suri = http_common::config::required_var("CHAIN_WRITER_SIGNER_SURI")?;
+        let signer =
+            SignerSource::from_env("CHAIN_WRITER_SIGNER_SURI", "CHAIN_WRITER_SIGNER_KMS_KEY")
+                .map_err(|error| match error {
+                    SignerSourceError::Missing { secret, .. } => ConfigError::Missing(secret),
+                    other => ConfigError::Invalid {
+                        key: "CHAIN_WRITER_SIGNER_KMS_KEY",
+                        reason: other.to_string(),
+                    },
+                })?;
         let attester = crate::config::attester_account_from_env()?;
         let holder_id = match std::env::var("CHAIN_WRITER_HOLDER_ID") {
             Ok(value) if !value.trim().is_empty() => value,
@@ -144,7 +154,7 @@ impl WriterConfig {
         Ok(Self {
             database_url: SecretString::from(database_url),
             people_rpc_url,
-            signer_suri: SecretString::from(signer_suri),
+            signer,
             attester,
             holder_id,
             lease_name: std::env::var("CHAIN_WRITER_LEASE_NAME")
@@ -188,7 +198,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
     );
     let pool = crate::db::connect(config.database_url.expose_secret()).await?;
     let chain = PeopleChain::connect(&config.people_rpc_url).await?;
-    let signer = WriterSigner::from_secret(config.signer_suri.expose_secret())?;
+    let signer = ChainSigner::from_source(&config.signer).await?;
     let signer_account = AccountId32(signer.public_bytes());
     let proxy_for = signer
         .proxy_for(AccountId32(config.attester))
@@ -199,8 +209,13 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
         settle = config.settle.enabled,
         "dotns lane connects on the first pass"
     );
+    // The signer's account is what the attester's proxy must be registered
+    // for; a new KMS key version is a new account.
     tracing::info!(
         signer = %hex_account(&signer_account.0),
+        signer_ss58 = %signer_account,
+        signer_key = signer.label(),
+        kms_key_version = signer.kms_key_version().unwrap_or("-"),
         attester = %hex_account(&config.attester),
         mode = if proxy_for.is_some() { "proxy" } else { "direct" },
         "device-attestation-chain-writer connected"
@@ -239,7 +254,7 @@ pub async fn run(config: WriterConfig) -> Result<(), WriterError> {
 struct Writer {
     pool: PgPool,
     chain: PeopleChain,
-    signer: WriterSigner,
+    signer: ChainSigner,
     signer_account: AccountId32,
     proxy_for: Option<[u8; 32]>,
     config: WriterConfig,
@@ -417,7 +432,7 @@ fn env_u16(key: &str, default: u16) -> u16 {
 fn cx_of<'a>(
     pool: &'a PgPool,
     guard: &'a Guard,
-    signer: &'a WriterSigner,
+    signer: &'a ChainSigner,
     signer_account: &'a AccountId32,
     proxy_for: Option<[u8; 32]>,
     config: &WriterConfig,
@@ -455,6 +470,7 @@ mod tests {
         "DEVICE_ATTESTATION_DATABASE_URL",
         "PEOPLE_RPC_URL",
         "CHAIN_WRITER_SIGNER_SURI",
+        "CHAIN_WRITER_SIGNER_KMS_KEY",
         "ATTESTER_ACCOUNT",
         "CHAIN_WRITER_HOLDER_ID",
         "CHAIN_WRITER_LEASE_NAME",
@@ -541,7 +557,9 @@ mod tests {
         );
         assert_eq!(config.people_rpc_url, "wss://people.example");
         assert_eq!(config.asset_hub_rpc_url, "wss://asset-hub.example");
-        assert_eq!(config.signer_suri.expose_secret(), "//Writer");
+        assert!(
+            matches!(&config.signer, SignerSource::Secret(suri) if suri.expose_secret() == "//Writer")
+        );
         let alice: [u8; 32] = hex::decode(ALICE_HEX).unwrap().try_into().unwrap();
         assert_eq!(config.attester, alice);
         assert_eq!(config.holder_id, "writer-test-1");
@@ -622,6 +640,39 @@ mod tests {
             err.to_string().contains("CHAIN_WRITER_SIGNER_SURI"),
             "{err}"
         );
+
+        // A Cloud KMS key version instead of the secret.
+        const KMS_KEY: &str = "projects/example-project/locations/us-east1/keyRings/dub/\
+                               cryptoKeys/chain-writer/cryptoKeyVersions/1";
+        let with_signer = |signer: &[(&'static str, &'static str)]| {
+            let mut vars: Vec<(&str, &str)> = REQUIRED_ENV
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != "CHAIN_WRITER_SIGNER_SURI")
+                .collect();
+            vars.extend_from_slice(signer);
+            from_env_with(&vars)
+        };
+        let config = with_signer(&[("CHAIN_WRITER_SIGNER_KMS_KEY", KMS_KEY)]).unwrap();
+        assert!(matches!(&config.signer, SignerSource::Kms(name) if name == KMS_KEY));
+        let err = with_signer(&[
+            ("CHAIN_WRITER_SIGNER_SURI", "//Writer"),
+            ("CHAIN_WRITER_SIGNER_KMS_KEY", KMS_KEY),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("both set"), "{err}");
+        assert!(
+            !err.contains("//Writer"),
+            "the secret is never echoed: {err}"
+        );
+        let err = with_signer(&[(
+            "CHAIN_WRITER_SIGNER_KMS_KEY",
+            "projects/example-project/locations/us-east1/keyRings/dub/cryptoKeys/chain-writer",
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("key version name"), "{err}");
 
         let mut vars = vec![
             (
