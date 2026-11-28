@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use notifications::{
-    routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, PushProvider,
-    RateLimiter, RateLimiterConfig, UnconfiguredProvider,
+    routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, IdentityCheck,
+    PushProvider, RateLimiter, RateLimiterConfig, UnconfiguredProvider,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -114,38 +114,43 @@ const IDENTITY_CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs
 /// until the identity is fixed. A service-account key makes no request here.
 fn spawn_workload_identity_check(provider: Arc<FcmProvider>) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!("no async runtime; skipping the FCM workload identity check");
         return;
     };
     runtime.spawn(async move {
-        for attempt in 1..=IDENTITY_CHECK_ATTEMPTS {
-            match provider.workload_identity().await {
-                Ok(None) => return,
-                Ok(Some(identity)) if identity.can_send_fcm() => {
-                    tracing::info!(
-                        email = %identity.email,
-                        scopes = ?identity.scopes,
-                        "FCM workload identity ready"
-                    );
-                    return;
-                }
-                Ok(Some(identity)) => {
-                    tracing::warn!(
-                        email = %identity.email,
-                        scopes = ?identity.scopes,
-                        "FCM workload identity's tokens carry no scope FCM accepts; \
-                         Android pushes will be rejected"
-                    );
-                    return;
-                }
-                Err(error) if attempt == IDENTITY_CHECK_ATTEMPTS => {
-                    tracing::warn!(
-                        %error,
-                        "FCM workload identity unavailable; Android pushes will report \
-                         provider failure until it is fixed"
-                    );
-                }
-                Err(_) => tokio::time::sleep(IDENTITY_CHECK_RETRY).await,
-            }
+        match provider
+            .check_workload_identity(IDENTITY_CHECK_ATTEMPTS, IDENTITY_CHECK_RETRY)
+            .await
+        {
+            IdentityCheck::NotApplicable => {}
+            IdentityCheck::Ready(identity) if provider.pins_identity() => tracing::info!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity ready"
+            ),
+            IdentityCheck::Ready(identity) => tracing::warn!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity ready but not pinned; check that this is the \
+                 intended push identity, and if it is a Google service account, set \
+                 FCM_SERVICE_ACCOUNT_EMAIL to it"
+            ),
+            IdentityCheck::UnusableScopes(identity) => tracing::warn!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity's tokens carry no scope FCM accepts; \
+                 Android pushes will be rejected"
+            ),
+            IdentityCheck::TokenUnavailable(error) => tracing::warn!(
+                %error,
+                "FCM workload identity unavailable; Android pushes will report \
+                 provider failure until it is fixed"
+            ),
+            IdentityCheck::IdentityUnreadable(error) => tracing::warn!(
+                %error,
+                "FCM access token fetched, but the identity behind it could not be \
+                 read; Android pushes may still work"
+            ),
         }
     });
 }
