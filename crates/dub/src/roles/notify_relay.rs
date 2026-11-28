@@ -84,14 +84,68 @@ fn build_apns_provider() -> anyhow::Result<Arc<dyn PushProvider>> {
 fn build_fcm_provider() -> anyhow::Result<Arc<dyn PushProvider>> {
     match FcmConfig::from_env().context("invalid FCM configuration")? {
         Some(config) => {
-            tracing::info!(project = %config.project_id, "FCM provider configured");
-            Ok(Arc::new(
-                FcmProvider::new(config).context("building FCM provider")?,
-            ))
+            tracing::info!(
+                project = %config.project_id,
+                credentials = config.credentials.label(),
+                "FCM provider configured"
+            );
+            let provider = Arc::new(FcmProvider::new(config).context("building FCM provider")?);
+            spawn_workload_identity_check(provider.clone());
+            Ok(provider)
         }
         None => {
             tracing::info!("FCM not configured; Android pushes will report provider failure");
             Ok(Arc::new(UnconfiguredProvider))
         }
     }
+}
+
+/// Attempts at the start-up identity check, and the pause between them: the
+/// GKE metadata server can take a few seconds to answer in a new pod.
+const IDENTITY_CHECK_ATTEMPTS: u32 = 5;
+const IDENTITY_CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Log which Google identity a keyless FCM provider sends as, so a missing
+/// Workload Identity binding or an unusable token scope shows at boot rather
+/// than on the first Android push.
+///
+/// Runs in the background and never fails start-up: the relay serves iOS and
+/// everything else regardless, and Android pushes report provider failure
+/// until the identity is fixed. A service-account key makes no request here.
+fn spawn_workload_identity_check(provider: Arc<FcmProvider>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        for attempt in 1..=IDENTITY_CHECK_ATTEMPTS {
+            match provider.workload_identity().await {
+                Ok(None) => return,
+                Ok(Some(identity)) if identity.can_send_fcm() => {
+                    tracing::info!(
+                        email = %identity.email,
+                        scopes = ?identity.scopes,
+                        "FCM workload identity ready"
+                    );
+                    return;
+                }
+                Ok(Some(identity)) => {
+                    tracing::warn!(
+                        email = %identity.email,
+                        scopes = ?identity.scopes,
+                        "FCM workload identity's tokens carry no scope FCM accepts; \
+                         Android pushes will be rejected"
+                    );
+                    return;
+                }
+                Err(error) if attempt == IDENTITY_CHECK_ATTEMPTS => {
+                    tracing::warn!(
+                        %error,
+                        "FCM workload identity unavailable; Android pushes will report \
+                         provider failure until it is fixed"
+                    );
+                }
+                Err(_) => tokio::time::sleep(IDENTITY_CHECK_RETRY).await,
+            }
+        }
+    });
 }

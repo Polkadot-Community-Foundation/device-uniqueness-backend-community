@@ -4,10 +4,12 @@
 use notifications::{FcmConfig, FcmProvider, PushProvider, PushRequest};
 
 #[tokio::test]
-#[ignore = "hits Google's live FCM servers; needs real FCM_SERVICE_ACCOUNT_JSON"]
+#[ignore = "hits Google's live FCM servers; needs FCM_SERVICE_ACCOUNT_JSON, or FCM_PROJECT_ID on Google Cloud"]
 async fn fcm_auth_and_connectivity_smoke() {
     let Some(config) = FcmConfig::from_env().expect("valid FCM config") else {
-        eprintln!("FCM_SERVICE_ACCOUNT_JSON not configured; skipping live smoke");
+        eprintln!(
+            "neither FCM_SERVICE_ACCOUNT_JSON nor FCM_PROJECT_ID configured; skipping live smoke"
+        );
         return;
     };
     let project = config.project_id.clone();

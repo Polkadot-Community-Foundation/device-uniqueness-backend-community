@@ -15,7 +15,7 @@ pub use jwt_verify::{JwtError, VerifiedClaims, Verifier};
 pub use notify::{NotifyResponse, PushError};
 pub use platform::Platform;
 pub use provider::apns::{ApnsConfig, ApnsEnvironment, ApnsProvider};
-pub use provider::fcm::{FcmConfig, FcmProvider};
+pub use provider::fcm::{FcmConfig, FcmCredentials, FcmProvider, WorkloadIdentity};
 pub use provider::{
     ProviderError, PushOutcome, PushProvider, PushRequest, RecordingProvider, UnconfiguredProvider,
 };

@@ -555,6 +555,7 @@ services:
       APNS_TOPIC: ${APNS_TOPIC:-}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-}
       FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       # Prometheus exporter, scraped on the private metrics network only.
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
