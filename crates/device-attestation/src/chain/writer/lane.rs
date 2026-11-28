@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 
 use super::{
     engine::{
-        Cx, PARK_BACKOFF_SECS, SIGNER_CONTENTION_BACKOFF_SECS, STALE_NONCE,
+        Cx, PARK_BACKOFF_SECS, SIGNER_CONTENTION_BACKOFF_SECS, SIGNING_BACKOFF_SECS, STALE_NONCE,
         STALE_NONCE_BACKOFF_SECS,
     },
     error::WriterError,
@@ -56,6 +56,10 @@ pub(super) enum Defer {
     /// condition rather than the row's, but nothing is queued ahead of it: the
     /// next pass re-reads the nonce and goes again.
     StaleNonce,
+    /// The chain signer could not produce a signature (a KMS key that timed
+    /// out, refused or ran out of quota). Nothing was submitted and nothing
+    /// about the row is wrong, so it spends no attempt.
+    Signing,
     /// The row will become submittable without anyone touching it: a dotNS
     /// signature dated ahead of the gateway's skew bound, or a People row
     /// signed for a runtime upgrade not enacted yet. Spends no attempt;
@@ -153,7 +157,9 @@ pub(super) fn signer_defer(reason: &str) -> Outcome<'_> {
 }
 
 fn signer_defer_cause(reason: &str) -> (i64, Defer) {
-    if reason.contains(STALE_NONCE) {
+    if reason.contains(chain_client::SIGNER_UNAVAILABLE) {
+        (SIGNING_BACKOFF_SECS, Defer::Signing)
+    } else if reason.contains(STALE_NONCE) {
         (STALE_NONCE_BACKOFF_SECS, Defer::StaleNonce)
     } else {
         (SIGNER_CONTENTION_BACKOFF_SECS, Defer::Signer)
@@ -181,6 +187,22 @@ pub(super) fn observe_defer(
                 reason,
                 "submission deferred without spending an attempt; the signer's nonce is \
                  held by an earlier transaction still in the node's pool"
+            );
+        }
+        Defer::Signing => {
+            record_submit_outcome(lane, "deferred");
+            // Its own counter: a signer that cannot sign at all (a removed
+            // grant, a disabled key version) defers every row indefinitely,
+            // and must not hide among ordinary nonce contention.
+            metrics::counter!("dub_chain_signing_failed_total", "lane" => lane).increment(1);
+            tracing::warn!(
+                lane,
+                id = r.id,
+                username = %r.full_username,
+                until = %until,
+                reason,
+                "submission deferred without spending an attempt; the chain signer could \
+                 not sign, so nothing was submitted"
             );
         }
         Defer::StaleNonce => {
@@ -303,6 +325,10 @@ mod tests {
         assert_eq!(
             signer_defer_cause("finalization timed out"),
             (SIGNER_CONTENTION_BACKOFF_SECS, Defer::Signer)
+        );
+        assert_eq!(
+            signer_defer_cause("chain signer unavailable (kms quota exhausted)"),
+            (SIGNING_BACKOFF_SECS, Defer::Signing)
         );
     }
 

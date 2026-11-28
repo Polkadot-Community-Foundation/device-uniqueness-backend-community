@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 
 use notifications::{
-    routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, PushProvider,
-    RateLimiter, RateLimiterConfig, UnconfiguredProvider,
+    routes, ApnsConfig, ApnsProvider, AppState, Config, FcmConfig, FcmProvider, IdentityCheck,
+    PushProvider, RateLimiter, RateLimiterConfig, UnconfiguredProvider,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -84,14 +84,73 @@ fn build_apns_provider() -> anyhow::Result<Arc<dyn PushProvider>> {
 fn build_fcm_provider() -> anyhow::Result<Arc<dyn PushProvider>> {
     match FcmConfig::from_env().context("invalid FCM configuration")? {
         Some(config) => {
-            tracing::info!(project = %config.project_id, "FCM provider configured");
-            Ok(Arc::new(
-                FcmProvider::new(config).context("building FCM provider")?,
-            ))
+            tracing::info!(
+                project = %config.project_id,
+                credentials = config.credentials.label(),
+                "FCM provider configured"
+            );
+            let provider = Arc::new(FcmProvider::new(config).context("building FCM provider")?);
+            spawn_workload_identity_check(provider.clone());
+            Ok(provider)
         }
         None => {
             tracing::info!("FCM not configured; Android pushes will report provider failure");
             Ok(Arc::new(UnconfiguredProvider))
         }
     }
+}
+
+/// Attempts at the start-up identity check, and the pause between them: the
+/// GKE metadata server can take a few seconds to answer in a new pod.
+const IDENTITY_CHECK_ATTEMPTS: u32 = 5;
+const IDENTITY_CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Log which Google identity a keyless FCM provider sends as, so a missing
+/// Workload Identity binding or an unusable token scope shows at boot rather
+/// than on the first Android push.
+///
+/// Runs in the background and never fails start-up: the relay serves iOS and
+/// everything else regardless, and Android pushes report provider failure
+/// until the identity is fixed. A service-account key makes no request here.
+fn spawn_workload_identity_check(provider: Arc<FcmProvider>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!("no async runtime; skipping the FCM workload identity check");
+        return;
+    };
+    runtime.spawn(async move {
+        match provider
+            .check_workload_identity(IDENTITY_CHECK_ATTEMPTS, IDENTITY_CHECK_RETRY)
+            .await
+        {
+            IdentityCheck::NotApplicable => {}
+            IdentityCheck::Ready(identity) if provider.pins_identity() => tracing::info!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity ready"
+            ),
+            IdentityCheck::Ready(identity) => tracing::warn!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity ready but not pinned; check that this is the \
+                 intended push identity, and if it is a Google service account, set \
+                 FCM_SERVICE_ACCOUNT_EMAIL to it"
+            ),
+            IdentityCheck::UnusableScopes(identity) => tracing::warn!(
+                email = ?identity.email,
+                scopes = ?identity.scopes,
+                "FCM workload identity's tokens carry no scope FCM accepts; \
+                 Android pushes will be rejected"
+            ),
+            IdentityCheck::TokenUnavailable(error) => tracing::warn!(
+                %error,
+                "FCM workload identity unavailable; Android pushes will report \
+                 provider failure until it is fixed"
+            ),
+            IdentityCheck::IdentityUnreadable(error) => tracing::warn!(
+                %error,
+                "FCM access token fetched, but the identity behind it could not be \
+                 read; Android pushes may still work"
+            ),
+        }
+    });
 }

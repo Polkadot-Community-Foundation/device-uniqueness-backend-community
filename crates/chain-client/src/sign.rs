@@ -20,9 +20,29 @@ use subxt::{
         encode_v4_signed_with_info_to, encode_v4_signer_payload_with_info, ExtrinsicEncodeError,
         ExtrinsicInfoError, ExtrinsicTypeInfo as _,
     },
-    tx::{Payload, Signer, SubmittableTransaction},
+    tx::{Payload, SubmittableTransaction},
     Config,
 };
+
+use crate::signer::{ChainSign, SignError};
+
+/// Why [`create_signed_v4`] produced no transaction. Either way nothing was
+/// signed that could be submitted.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateSignedError {
+    /// The call or its extensions could not be built or encoded.
+    #[error(transparent)]
+    Extrinsic(#[from] ExtrinsicError),
+    /// The signer could not produce a signature.
+    #[error(transparent)]
+    Signer(#[from] SignError),
+}
+
+impl From<ExtrinsicEncodeError> for CreateSignedError {
+    fn from(error: ExtrinsicEncodeError) -> Self {
+        Self::Extrinsic(error.into())
+    }
+}
 
 /// The only transaction-extension version sp-runtime reads a v4 signed
 /// extrinsic with (`Preamble::Signed` decodes `ExtensionV0`).
@@ -34,16 +54,19 @@ const V4_EXTENSION_VERSION: u8 = 0;
 /// Like `create_signed`, it first checks `call` against the live metadata, so a
 /// call whose shape changed since the vendored metadata fails here with
 /// `IncompatibleCodegen` instead of being signed and submitted.
+///
+/// Signing may wait on the network (a Cloud KMS key); a signing failure is
+/// returned as [`CreateSignedError::Signer`] and yields no transaction.
 pub async fn create_signed_v4<T, Call, S>(
     at: &ClientAtBlock<T, OnlineClientAtBlockImpl<T>>,
     call: &Call,
     signer: &S,
     mut params: <T::TransactionExtensions as TransactionExtensions<T>>::Params,
-) -> Result<SubmittableTransaction<T, OnlineClientAtBlockImpl<T>>, ExtrinsicError>
+) -> Result<SubmittableTransaction<T, OnlineClientAtBlockImpl<T>>, CreateSignedError>
 where
     T: Config,
     Call: Payload,
-    S: Signer<T>,
+    S: ChainSign<T>,
 {
     let transactions = at.transactions();
     transactions.validate(call)?;
@@ -60,7 +83,8 @@ where
         transaction_version: at.transaction_version(),
         metadata: at.metadata(),
     };
-    let extensions = <T::TransactionExtensions as TransactionExtensions<T>>::new(&state, params)?;
+    let extensions = <T::TransactionExtensions as TransactionExtensions<T>>::new(&state, params)
+        .map_err(ExtrinsicError::from)?;
 
     let metadata = at.metadata_ref();
     let call_info = metadata
@@ -78,7 +102,7 @@ where
         &call_info,
         &extension_info,
     )?;
-    let signature = signer.sign(&payload);
+    let signature = signer.sign_payload(&payload).await?;
     let address: T::Address = account.into();
 
     let mut encoded = Vec::new();

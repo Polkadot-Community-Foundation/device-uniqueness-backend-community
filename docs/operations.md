@@ -57,6 +57,33 @@ it and a "simplification" here is a real downgrade:
   selectors are not secrets but are still service-scoped: a copy elsewhere means
   another service was meant to mint credentials.
 - Push credentials (`APNS_*` / `FCM_*`) live only in `notify-relay`.
+  On GKE, Android push needs no key at all: set `FCM_PROJECT_ID` instead of
+  `FCM_SERVICE_ACCOUNT_JSON` (the relay refuses to start with both), and bind
+  a Kubernetes service account **used by `notify-relay` alone** through
+  Workload Identity to a Google service account that holds
+  `cloudmessaging.messages.create` on the Firebase project. Set
+  `FCM_SERVICE_ACCOUNT_EMAIL` to that account so the relay refuses to send as
+  any other identity the metadata server might hand it. Never bind the
+  namespace's `default` service account: every pod running as it would get the
+  send identity. (The chart in `helm/` renders no per-workload service account,
+  so its pods all run as `default`; give `notify-relay` its own before using
+  this there.) Also:
+  - no `hostNetwork: true` — a host-network pod reaches the node's metadata
+    server, not the GKE one, and sends as the node's service account;
+  - a NetworkPolicy that restricts egress must allow the GKE metadata server
+    (see Google's Workload Identity Federation for GKE docs for the address and
+    port on your dataplane);
+  - at boot the relay logs `FCM workload identity ready` with the service
+    account and its token scopes, or a warning if the token cannot be fetched,
+    belongs to another account than `FCM_SERVICE_ACCOUNT_EMAIL`, or carries no
+    scope FCM accepts, and a warning too when no `FCM_SERVICE_ACCOUNT_EMAIL`
+    pins it. It makes five attempts two seconds apart, since the metadata
+    server can take a few seconds to answer in a new pod (longer against a
+    server that accepts connections and stalls), and never blocks start-up;
+  - the pin needs a Google service account bound through Workload Identity.
+    With direct Workload Identity Federation there is none, the metadata
+    server reports the pool name instead, and `FCM_SERVICE_ACCOUNT_EMAIL` must
+    stay unset.
 
 Compose uses the root `.env` for interpolation only, and gives every application
 container an explicit environment allowlist, so no service can read another's
@@ -119,10 +146,10 @@ The values you must decide, at minimum:
 | `PEOPLE_RPC_URL` | People Chain RPC. Must be a **full** node serving the legacy `state_queryStorageAt` — see the availability failure mode below. |
 | `ASSET_HUB_RPC_URL` | Asset Hub RPC. **Required** by both `device-attestation-api` (reads `LiteLabelOwner` for availability and the digit choice) and the writer (submits `reserve_name`). Same `state_queryStorageAt` requirement. **Must name the same network as `PEOPLE_RPC_URL`** — a split pair claims labels on the wrong chain, unrecoverably. |
 | `ATTESTER_ACCOUNT` | The on-chain attester authority (SS58). |
-| `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. |
+| `CHAIN_WRITER_SIGNER_SURI` | The writer's signing key; must be an authorized attester or its proxy, and funded. Or `CHAIN_WRITER_SIGNER_KMS_KEY` instead, on Google Cloud: see [Signing keys in Cloud KMS](#signing-keys-in-cloud-kms). |
 | `JWT_ED25519_SECRET` | 32 bytes. `device-attestation-api` only. |
 | `JWT_ED25519_PUBLIC_KEY` or `JWT_JWKS_JSON` | The verify-only half, for the other services. |
-| `INVITE_INVITER_SIGNER_SURI` | `testnet` only: the invite pool's own account — **not** the writer's. Unused on `polkadot`. |
+| `INVITE_INVITER_SIGNER_SURI` | `testnet` only: the invite pool's own account — **not** the writer's. Unused on `polkadot`. The pool also takes `INVITER_SIGNER_KMS_KEY` instead. |
 | `TURN_PROVIDER` | `cloudflare` (the code default) or `coturn`. Picks which of the two rows below is required. `.env.example` selects `coturn`, because that provider needs no account anywhere and so lets the quickstart stack boot offline. |
 | `TURN_API_TOKEN` + `TURN_KEY_ID` | `cloudflare` only. The token is the secret; the key id is not, but both are `turn-api` only — and `verify_compose_boundaries.sh` fails if either appears on another service. |
 | `TURN_SECRET` + `TURN_REALM` + `ICE_SERVERS` | `coturn` only, all three required. The secret and algorithm must match your relay's `--use-auth-secret` config exactly, and `ICE_SERVERS` must name at least one relay: nothing upstream supplies it on this provider, so an empty list would mint credentials with nothing to use them against. |
@@ -387,6 +414,101 @@ network, re-check all of them:
 None of these are things the software can provision. On a permissioned test
 network they are an ask of whoever operates it.
 
+### Play Integrity without a key file
+
+`device-attestation-api` verifies Play Integrity verdicts with the
+self-managed response keys (`PLAY_INTEGRITY_DECRYPTION_KEY` and
+`PLAY_INTEGRITY_VERIFICATION_KEY`), which decode locally and take precedence,
+or through Google's `decodeIntegrityToken`. For the Google path, set
+`GOOGLE_CREDENTIALS` (a service-account key) or, on Google Cloud,
+`PLAY_INTEGRITY_SERVICE_ACCOUNT` instead (setting both is refused at boot):
+
+- `decodeIntegrityToken` accepts only the `playintegrity` OAuth scope, while
+  a workload's own token from the metadata server is `cloud-platform`. So the
+  service asks the IAM Credentials API (`generateAccessToken`) for a
+  `playintegrity` token of the named service account, with its own token, and
+  caches it for most of its hour. No key is held.
+- **The named account must be in the Cloud project the app's tokens are tied
+  to.** Google, on `setCloudProjectNumber`: "Calls to decrypt the token on
+  Google's server must be authenticated using the cloud account that was
+  linked to the token in this request." An app that sets a Cloud project
+  number in its request can therefore only be decoded by an account of that
+  project, which must also be linked to the app in Play Console (Protected
+  with Play > Play Integrity API; up to five projects). Moving decoding to
+  another project means an app build that sends that project's number.
+- The decoder account holds **no** IAM roles. The workload's own Google
+  service account gets `roles/iam.serviceAccountTokenCreator` on that one
+  account only, never on the project. They must be two accounts: Google does
+  not let a service account mint a token for itself this way.
+- Give the API pod its own Kubernetes service account for the Workload
+  Identity binding. The chart in `helm/` renders no per-workload service
+  account, so its pods all share the namespace's `default` one, and binding
+  that would let every DUB workload mint the decoder's token.
+- At boot, unless self-managed keys are set, the service mints a token in the
+  background (five attempts, two seconds apart, for transient failures) and
+  logs `Play Integrity decoder token minted` or a warning with the reason. A
+  failure later is logged with its reason; the app sees only `play integrity
+  token unavailable`, or `decodeIntegrityToken rejected (<status>)` when Play
+  Integrity refuses the token (Google's explanation, which can name the
+  project, goes to the log). Under `ENFORCE_AUTH` either rejects the Android
+  attestation, so check the boot log and one real attestation after a change.
+
+### Signing keys in Cloud KMS
+
+On Google Cloud the writer and the invite pool can sign with an Ed25519 key
+that stays in Cloud KMS: set `CHAIN_WRITER_SIGNER_KMS_KEY` (writer) or
+`INVITER_SIGNER_KMS_KEY` (pool) to a key **version** resource name,
+`projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/N`, instead
+of the `*_SIGNER_SURI` secret. Setting both is refused at boot. People and
+Asset Hub take an Ed25519 `MultiSignature`, and the key only ever signs as the
+attester's (or inviter's) proxy, so the attester's address does not change.
+
+- **The account is the key version.** At boot the process reads the version's
+  public key and logs the account (`signer`, `signer_ss58`,
+  `kms_key_version`). That account must already be registered as the proxy,
+  and funded, before the process starts submitting. A new key version is a new
+  account: rotating means creating the version, registering and funding its
+  proxy, then pointing the setting at it. **Never point a worker at a version
+  whose proxy is not registered yet**: the chain rejects its `Proxy.proxy` with
+  `NotProxy`, which spends each row's attempts like any proxy error and can
+  fail registrations for good. Read the account from the key's public key
+  first (or from a worker that has nothing to submit).
+- **Identity.** The process signs with its own Google identity from the
+  metadata server (GKE Workload Identity); no key file. Give the worker its
+  own Kubernetes service account, bound to its own Google service account,
+  which needs `cloudkms.cryptoKeyVersions.useToSign` and
+  `cloudkms.cryptoKeyVersions.viewPublicKey` on that one key, and nothing on
+  any other. (The chart in `helm/` renders no per-workload service account and
+  requires the `*_SIGNER_SURI` secrets, so it cannot run this mode as shipped.)
+- **Start-up.** Reading the public key is retried for about 30 s while the
+  failure is transient (the GKE metadata server takes a few seconds to answer
+  in a new pod; KMS unreachable, 5xx or 429). A refusal, an unknown version,
+  another algorithm or an answer for another version stops the process at
+  once.
+- **Each signature is a network call**: one `asymmetricSign` per extrinsic.
+  A KMS request times out after 10 s and a workload token fetch (about once an
+  hour) after another 10 s; a 401 drops the token and sends the request once
+  more with a new one, so one signature waits at most about 40 s. The People and
+  dotNS lanes sign concurrently, each one extrinsic at a time, so the round
+  trip adds to every submission on a lane; a batch carries up to its lane's
+  batch size of rows, so the cost per row is small. The KMS client ignores
+  proxy settings: the node needs a direct route to `cloudkms.googleapis.com`
+  (Private Google Access on a private cluster). Quotas: Cloud KMS limits cryptographic requests
+  per project ([quotas](https://docs.cloud.google.com/kms/quotas)) far above
+  this load; exceeding them is `429`, a signing failure like any other.
+- **A signing failure submits nothing.** A timeout, a quota refusal, a denied
+  identity or a signature that does not verify against the key all fail
+  before the row is marked `SUBMITTING`, with a `chain signer unavailable
+  (…)` reason. The row is deferred for 15 s and retried without spending an
+  attempt, like a signer that cannot pay, single row or whole batch alike; a
+  batch's size is left alone, since nothing about the batch failed. The nonce
+  read for it is not consumed, so the next pass reads it again. The invite
+  pool's batch fails before any ticket is stored and the next interval tries
+  again. The detail is in the process log, and each deferred row counts on
+  `dub_chain_signing_failed_total{lane}`: alert when it keeps rising, since a
+  removed grant or a disabled key version defers every row until fixed (and
+  dotNS rows age out meanwhile).
+
 ## Choosing a topology
 
 The backend deploys in one of two shapes. They serve an **identical** public API;
@@ -598,7 +720,9 @@ of 1 rather than alternating 1 → 2 → fail and paying a fee on every other pa
   first climbing with the second flat means the chain, not the claims. A batch
   that *submitted* but had to be resolved from chain state is neither: it counts
   on `dub_chain_batch_reconciled_total{lane}`, leaving the lane's size and
-  failure counter untouched.
+  failure counter untouched. A batch the chain signer could not sign is not a
+  batch failure either: its rows count on `dub_chain_signing_failed_total{lane}`
+  (see [Signing keys in Cloud KMS](#signing-keys-in-cloud-kms)).
 - `dub_registration_latency_seconds` is end-to-end intake→on-chain, measured per
   row from its own `created_at`. Only assignments this writer's own submission
   produced are recorded; a row the chain already showed as owned (an idempotent
@@ -757,7 +881,7 @@ Everything is in the checkout's `.env` (mode 600); apply changes with
 | Rotating | Consequence |
 | --- | --- |
 | `JWT_ED25519_SECRET` | Invalidates outstanding JWTs; clients re-authenticate. Update the verify-only half everywhere in the same change. |
-| the writer key | Must be an authorized attester or proxy, and funded, **before** the switch. |
+| the writer key | Must be an authorized attester or proxy, and funded, **before** the switch. With a KMS key, every new key version is a new account. |
 | `TURN_API_TOKEN` (`cloudflare`) | Does **not** invalidate credentials already issued — Cloudflare honours those until they expire (up to `TURN_TTL_SECS`). Roll the token in Cloudflare, update every `turn-api`, then recreate each service. A stale token only stops *new* issuance: Cloudflare answers 4xx, which is treated as permanent rather than transient, so it is **not** served out of the outage cache — issuance goes to 503 at once and the `cloudflare rejected TURN issuance` log line names it. Rolling with the old token still live avoids the gap. |
 | `TURN_SECRET` (`coturn`) | **Does** invalidate outstanding credentials (up to `TURN_TTL_SECS` old), because the relay recomputes the HMAC. Update the relay and every `turn-api` together, then recreate each service — a mismatch means the relay rejects everything this service mints. |
 | `POC_HMAC_SECRET` | Invalidates outstanding puzzles (≤90s old); in-flight solvers get a `402` and request a new one. Safe to rotate any time. |

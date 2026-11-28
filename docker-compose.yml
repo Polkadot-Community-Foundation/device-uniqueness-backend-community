@@ -78,11 +78,13 @@ services:
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
       # Play Integrity: the self-managed key pair (set both or neither), or the
-      # temporary GOOGLE_CREDENTIALS fallback. Blank = not configured.
+      # temporary Google fallback, with GOOGLE_CREDENTIALS or (keyless)
+      # PLAY_INTEGRITY_SERVICE_ACCOUNT. Blank = not configured.
       PLAY_INTEGRITY_MODE: ${PLAY_INTEGRITY_MODE:-strict}
       PLAY_INTEGRITY_DECRYPTION_KEY: ${PLAY_INTEGRITY_DECRYPTION_KEY:-}
       PLAY_INTEGRITY_VERIFICATION_KEY: ${PLAY_INTEGRITY_VERIFICATION_KEY:-}
       GOOGLE_CREDENTIALS: ${GOOGLE_CREDENTIALS:-}
+      PLAY_INTEGRITY_SERVICE_ACCOUNT: ${PLAY_INTEGRITY_SERVICE_ACCOUNT:-}
       # Apple DeviceCheck. Enabled, the team id, key id and key are required.
       # The URL keeps a non-blank default: the config reads a blank one as-is.
       DEVICE_CHECK_IOS_ENABLED: ${DEVICE_CHECK_IOS_ENABLED:-false}
@@ -555,6 +557,8 @@ services:
       APNS_TOPIC: ${APNS_TOPIC:-}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-}
       FCM_SERVICE_ACCOUNT_JSON: ${FCM_SERVICE_ACCOUNT_JSON:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_SERVICE_ACCOUNT_EMAIL: ${FCM_SERVICE_ACCOUNT_EMAIL:-}
       # Prometheus exporter, scraped on the private metrics network only.
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_ADDR: ${METRICS_ADDR:-0.0.0.0:9090}
