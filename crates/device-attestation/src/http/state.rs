@@ -33,7 +33,8 @@ pub struct AppState {
     /// Cached Android attestation revocation list (fetched lazily).
     pub crl: CrlCache,
     /// Temporary Play Integrity `decodeIntegrityToken` fallback client
-    /// (present only while `GOOGLE_CREDENTIALS` is configured).
+    /// (present only while `GOOGLE_CREDENTIALS` or
+    /// `PLAY_INTEGRITY_SERVICE_ACCOUNT` is configured).
     pub play_integrity_google: Option<Arc<GoogleDecoder>>,
     /// Apple DeviceCheck client (present only while `DEVICE_CHECK_IOS_ENABLED`).
     pub device_check: Option<Arc<device_check::Client>>,
@@ -66,10 +67,37 @@ impl AppState {
             config.android_crl_cache_ttl,
             config.android_crl_max_stale,
         );
-        let play_integrity_google = config.google_credentials.clone().map(|credentials| {
+        let play_integrity_google = match (
+            config.google_credentials.clone(),
+            config.play_integrity_service_account.as_deref(),
+        ) {
             // The RSA key already parsed during Config::from_env (fail-fast).
-            Arc::new(GoogleDecoder::new(credentials).expect("credentials validated at startup"))
-        });
+            (Some(credentials), _) => Some(Arc::new(
+                GoogleDecoder::new(credentials).expect("credentials validated at startup"),
+            )),
+            // The email already validated during Config::from_env (fail-fast).
+            (None, Some(service_account)) => Some(Arc::new(
+                GoogleDecoder::impersonating(service_account)
+                    .expect("service account validated at startup"),
+            )),
+            (None, None) => None,
+        };
+        let self_managed = config.play_integrity_decryption_key.is_some();
+        if let Some(decoder) = &play_integrity_google {
+            if self_managed {
+                tracing::info!(
+                    credentials = decoder.label(),
+                    "Play Integrity Google decode fallback configured but unused: \
+                     self-managed keys take precedence"
+                );
+            } else {
+                tracing::info!(
+                    credentials = decoder.label(),
+                    "Play Integrity Google decode fallback configured"
+                );
+                spawn_decoder_check(decoder.clone());
+            }
+        }
         let device_check = config.device_check.clone().map(|dc| {
             // The EC key already parsed during Config::from_env (fail-fast).
             Arc::new(
@@ -94,4 +122,35 @@ impl AppState {
             device_check,
         }
     }
+}
+
+/// Attempts at the start-up mint, and the pause between them: the GKE metadata
+/// server can take a few seconds to answer in a new pod.
+const DECODER_CHECK_ATTEMPTS: u32 = 5;
+const DECODER_CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Mint a keyless Play Integrity token once, in the background, so a missing
+/// grant or an unreachable metadata server shows at start-up rather than on
+/// the first Android attestation. Never blocks or fails start-up; a key makes
+/// no request here.
+fn spawn_decoder_check(decoder: Arc<GoogleDecoder>) {
+    use crate::auth::play_integrity::google::DecoderCheck;
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!("no async runtime; skipping the Play Integrity decoder check");
+        return;
+    };
+    runtime.spawn(async move {
+        match decoder
+            .check(DECODER_CHECK_ATTEMPTS, DECODER_CHECK_RETRY)
+            .await
+        {
+            DecoderCheck::NotApplicable => {}
+            DecoderCheck::Ready => tracing::info!("Play Integrity decoder token minted"),
+            DecoderCheck::Unavailable(reason) => tracing::warn!(
+                reason,
+                "Play Integrity decoder token unavailable; Android attestations through \
+                 the Google fallback fail until it is fixed"
+            ),
+        }
+    });
 }
