@@ -57,6 +57,33 @@ it and a "simplification" here is a real downgrade:
   selectors are not secrets but are still service-scoped: a copy elsewhere means
   another service was meant to mint credentials.
 - Push credentials (`APNS_*` / `FCM_*`) live only in `notify-relay`.
+  On GKE, Android push needs no key at all: set `FCM_PROJECT_ID` instead of
+  `FCM_SERVICE_ACCOUNT_JSON` (the relay refuses to start with both), and bind
+  a Kubernetes service account **used by `notify-relay` alone** through
+  Workload Identity to a Google service account that holds
+  `cloudmessaging.messages.create` on the Firebase project. Set
+  `FCM_SERVICE_ACCOUNT_EMAIL` to that account so the relay refuses to send as
+  any other identity the metadata server might hand it. Never bind the
+  namespace's `default` service account: every pod running as it would get the
+  send identity. (The chart in `helm/` renders no per-workload service account,
+  so its pods all run as `default`; give `notify-relay` its own before using
+  this there.) Also:
+  - no `hostNetwork: true` — a host-network pod reaches the node's metadata
+    server, not the GKE one, and sends as the node's service account;
+  - a NetworkPolicy that restricts egress must allow the GKE metadata server
+    (see Google's Workload Identity Federation for GKE docs for the address and
+    port on your dataplane);
+  - at boot the relay logs `FCM workload identity ready` with the service
+    account and its token scopes, or a warning if the token cannot be fetched,
+    belongs to another account than `FCM_SERVICE_ACCOUNT_EMAIL`, or carries no
+    scope FCM accepts, and a warning too when no `FCM_SERVICE_ACCOUNT_EMAIL`
+    pins it. It makes five attempts two seconds apart, since the metadata
+    server can take a few seconds to answer in a new pod (longer against a
+    server that accepts connections and stalls), and never blocks start-up;
+  - the pin needs a Google service account bound through Workload Identity.
+    With direct Workload Identity Federation there is none, the metadata
+    server reports the pool name instead, and `FCM_SERVICE_ACCOUNT_EMAIL` must
+    stay unset.
 
 Compose uses the root `.env` for interpolation only, and gives every application
 container an explicit environment allowlist, so no service can read another's
