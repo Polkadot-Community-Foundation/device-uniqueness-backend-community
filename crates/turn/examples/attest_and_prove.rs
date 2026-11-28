@@ -62,9 +62,9 @@ fn generate_candidate() -> anyhow::Result<Candidate> {
 }
 
 async fn attest(rpc: &str, state_path: &str) -> anyhow::Result<()> {
-    let attester = chain_client::WriterSigner::from_secret(
-        &std::env::var("ATTESTER_SURI").context("missing ATTESTER_SURI env var")?,
-    )?;
+    let attester = chain_client::WriterSigner::from_secret(&secrecy::SecretString::from(
+        std::env::var("ATTESTER_SURI").context("missing ATTESTER_SURI env var")?,
+    ))?;
     let attester_account = subxt::utils::AccountId32(attester.public_bytes());
     println!("attester: {attester_account}");
 
