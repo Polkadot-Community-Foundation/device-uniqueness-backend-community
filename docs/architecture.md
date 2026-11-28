@@ -46,7 +46,7 @@ create now. See "How the workspace grows" below.
 | Concept | Name | Where it lives |
 |---|---|---|
 | generated People Chain (subxt) typed surface | `chain-types` | crate; consumed by device-attestation, username-indexer, invite-tickets |
-| chain connection / RPC transport + writer signing key | `chain-client` | crate (reconnecting connect + `WriterSigner` + `proxy_target`) |
+| chain connection / RPC transport + writer signing key | `chain-client` | crate (reconnecting connect + `ChainSigner`: an sr25519 secret or a Cloud KMS Ed25519 key version + `proxy_target`) |
 | Postgres connection + bootstrap | `postgres` | still a module inside device-attestation / username-indexer |
 | config loading + fail-fast validation | `config` | still a module per service |
 | telemetry (logs / metrics / tracing) | `telemetry` | `http-common` (`telemetry::init` installs the log subscriber, `metrics::spawn` the Prometheus exporter); every process calls both. Logs go to stdout only — labelling, shipping, storage, and retention belong to the host's monitoring project, not to a service |
