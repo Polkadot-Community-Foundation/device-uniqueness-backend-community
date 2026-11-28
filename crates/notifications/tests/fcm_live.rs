@@ -3,6 +3,19 @@
 
 use notifications::{FcmConfig, FcmProvider, PushProvider, PushRequest};
 
+/// Text that marks a refusal of the caller rather than of the device token:
+/// the FCM v1 `error.status` values for 401/403, the provider's fallback for an
+/// unparseable 401/403 body, and the messages Google attaches to them.
+const AUTH_ERROR_MARKERS: &[&str] = &[
+    "UNAUTHENTICATED",
+    "PERMISSION_DENIED",
+    "(status 401)",
+    "(status 403)",
+    "authentication credential",
+    "Permission '",
+    "SenderId mismatch",
+];
+
 #[tokio::test]
 #[ignore = "hits Google's live FCM servers; needs real FCM_SERVICE_ACCOUNT_JSON"]
 async fn fcm_auth_and_connectivity_smoke() {
@@ -21,38 +34,29 @@ async fn fcm_auth_and_connectivity_smoke() {
         voip: None,
     };
 
-    let outcome = provider
-        .send(&request)
-        .await
-        .unwrap_or_else(|error| panic!("FCM request failed before a token verdict: {error}"));
-
-    if outcome.success {
-        eprintln!("FCM accepted the push (unexpected for a dummy token, but auth is valid)");
-        return;
-    }
-
-    let error = outcome
-        .errors
-        .as_ref()
-        .and_then(|errors| errors.first())
-        .expect("a failure should carry an error");
-    let http = error
-        .status
-        .as_ref()
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let fcm_status = error
-        .response
-        .as_ref()
-        .and_then(|value| value.get("status"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<none>");
-    eprintln!(
-        "FCM project={project} http={http} status={fcm_status} — token exchange + credentials accepted, token rejected as expected"
-    );
+    // The provider returns `Err` for every FCM rejection, so a dummy token is
+    // expected to come back as an error. What matters is which stage produced
+    // it: one raised before FCM gave a verdict, or FCM refusing the caller.
+    let error = match provider.send(&request).await {
+        Ok(_) => {
+            eprintln!("FCM accepted the push (unexpected for a dummy token, but auth is valid)");
+            return;
+        }
+        Err(error) => error.to_string(),
+    };
 
     assert!(
-        http != 401 && http != 403 && !matches!(fcm_status, "PERMISSION_DENIED" | "UNAUTHENTICATED"),
-        "FCM rejected the credentials (http={http}, status={fcm_status}); check the service-account key, project, and that the FCM API is enabled"
+        !error.starts_with("fcm "),
+        "FCM request failed before a token verdict: {error}"
+    );
+    assert!(
+        !AUTH_ERROR_MARKERS
+            .iter()
+            .any(|marker| error.contains(marker)),
+        "FCM rejected the credentials ({error}); check the service account, its \
+         cloudmessaging.messages.create grant on {project}, and that the FCM API is enabled"
+    );
+    eprintln!(
+        "FCM project={project}: credentials accepted, dummy token rejected as expected ({error})"
     );
 }
