@@ -23,7 +23,6 @@ async fn fcm_auth_and_connectivity_smoke() {
         eprintln!("FCM_SERVICE_ACCOUNT_JSON not configured; skipping live smoke");
         return;
     };
-    let project = config.project_id.clone();
     let provider = FcmProvider::new(config).expect("build FCM provider");
 
     let request = PushRequest {
@@ -54,9 +53,7 @@ async fn fcm_auth_and_connectivity_smoke() {
             .iter()
             .any(|marker| error.contains(marker)),
         "FCM rejected the credentials ({error}); check the service account, its \
-         cloudmessaging.messages.create grant on {project}, and that the FCM API is enabled"
+         cloudmessaging.messages.create grant on the project, and that the FCM API is enabled"
     );
-    eprintln!(
-        "FCM project={project}: credentials accepted, dummy token rejected as expected ({error})"
-    );
+    eprintln!("FCM credentials accepted, dummy token rejected as expected ({error})");
 }
