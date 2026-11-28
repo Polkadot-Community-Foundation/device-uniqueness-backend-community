@@ -66,8 +66,30 @@ pub(crate) struct WorkloadTokens {
     refresh: tokio::sync::Mutex<()>,
 }
 
+/// Why a token source could not be built.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BuildError {
+    #[error("workload tokens are only fetched from the metadata server")]
+    NotMetadataServer,
+    #[error("http client: {0}")]
+    Client(#[from] reqwest::Error),
+}
+
+/// The plain-HTTP token request may only go to Google's link-local metadata
+/// server, so nothing can point it at another host or path. Test builds also
+/// allow a loopback mock server.
+fn is_metadata_server(url: &str, allow_loopback: bool) -> bool {
+    url == METADATA_TOKEN_URL
+        || (allow_loopback
+            && reqwest::Url::parse(url)
+                .is_ok_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1")))
+}
+
 impl WorkloadTokens {
-    pub(crate) fn new(url: &str) -> Result<Self, reqwest::Error> {
+    pub(crate) fn new(url: &str) -> Result<Self, BuildError> {
+        if !is_metadata_server(url, cfg!(test)) {
+            return Err(BuildError::NotMetadataServer);
+        }
         // The token comes back over plain HTTP from a node-local endpoint:
         // never through a proxy from the environment, never via a redirect.
         let client = reqwest::Client::builder()
@@ -340,6 +362,45 @@ mod tests {
                 .unwrap_err();
             assert_eq!((error.why, error.transient), (why, transient));
         }
+    }
+
+    #[test]
+    fn only_the_metadata_server_is_asked_for_a_token() {
+        assert_eq!(
+            METADATA_TOKEN_URL,
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
+        );
+        assert!(is_metadata_server(METADATA_TOKEN_URL, false));
+        for url in [
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            "https://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
+            "http://169.254.169.254:8080/computeMetadata/v1/instance/service-accounts/default/token",
+            "http://169.254.169.254.example.com/computeMetadata/v1/instance/service-accounts/default/token",
+            "http://user@169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/other/token",
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token?x=1",
+            "http://127.0.0.1:8080/token",
+            "",
+            "HTTP://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
+            "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token/",
+            "http://169.254.169.254/computeMetadata/v1/instance%2Fservice-accounts/default/token",
+        ] {
+            assert!(!is_metadata_server(url, false), "{url}");
+        }
+        assert!(is_metadata_server("http://127.0.0.1:8080/token", true));
+        assert!(!is_metadata_server("https://127.0.0.1:8080/token", true));
+        for url in [
+            "http://10.0.0.1/token",
+            "http://127.0.0.1@10.0.0.1/token",
+            "http://127.0.0.1.example.com/token",
+            "http://localhost/token",
+        ] {
+            assert!(!is_metadata_server(url, true), "{url}");
+        }
+        assert!(matches!(
+            WorkloadTokens::new("http://10.0.0.1/token"),
+            Err(BuildError::NotMetadataServer)
+        ));
     }
 
     #[tokio::test]
