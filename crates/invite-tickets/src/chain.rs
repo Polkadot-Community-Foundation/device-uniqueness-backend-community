@@ -85,7 +85,7 @@ impl PeopleChain {
     }
 
     /// Sign `payload` with `signer`. A key held in the process signs through
-    /// subxt as it always has; a Cloud KMS key signs over the network, so it
+    /// subxt; a Cloud KMS key signs over the network, so it
     /// goes through the encoder that waits for the signature, and a signing
     /// failure yields no transaction.
     async fn sign_batch<P: Payload>(

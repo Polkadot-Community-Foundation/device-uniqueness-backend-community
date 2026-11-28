@@ -433,9 +433,8 @@ or through Google's `decodeIntegrityToken`. For the Google path, set
   Google's server must be authenticated using the cloud account that was
   linked to the token in this request." An app that sets a Cloud project
   number in its request can therefore only be decoded by an account of that
-  project, which must also be linked to the app in Play Console (Protected
-  with Play > Play Integrity API; up to five projects). Moving decoding to
-  another project means an app build that sends that project's number.
+  project. Moving decoding to another project means an app build that sends
+  that project's number.
 - The decoder account holds **no** IAM roles. The workload's own Google
   service account gets `roles/iam.serviceAccountTokenCreator` on that one
   account only, never on the project. They must be two accounts: Google does
@@ -460,8 +459,9 @@ that stays in Cloud KMS: set `CHAIN_WRITER_SIGNER_KMS_KEY` (writer) or
 `INVITER_SIGNER_KMS_KEY` (pool) to a key **version** resource name,
 `projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/N`, instead
 of the `*_SIGNER_SURI` secret. Setting both is refused at boot. People and
-Asset Hub take an Ed25519 `MultiSignature`, and the key only ever signs as the
-attester's (or inviter's) proxy, so the attester's address does not change.
+Asset Hub take an Ed25519 `MultiSignature`, and a key whose account is not the
+attester (or inviter) signs as its proxy, so the attester's address does not
+change.
 
 - **The account is the key version.** At boot the process reads the version's
   public key and logs the account (`signer`, `signer_ss58`,
