@@ -170,10 +170,17 @@ impl FcmConfig {
     }
 
     fn from_service_account_json(raw: &str) -> Result<Self, ConfigError> {
+        // Only the error's category and position: serde quotes the offending
+        // value, which for a double-encoded secret is the whole key.
         let account: ServiceAccount =
             serde_json::from_str(raw).map_err(|error| ConfigError::Invalid {
                 key: "FCM_SERVICE_ACCOUNT_JSON",
-                reason: format!("not valid service-account JSON: {error}"),
+                reason: format!(
+                    "not valid service-account JSON ({:?} error at line {}, column {})",
+                    error.classify(),
+                    error.line(),
+                    error.column()
+                ),
             })?;
         if account.project_id.is_empty()
             || account.client_email.is_empty()
@@ -1076,6 +1083,23 @@ mod tests {
                 "{good:?} should be accepted"
             );
         }
+    }
+
+    #[test]
+    fn a_malformed_key_json_error_never_quotes_the_key() {
+        // A double-encoded secret: the whole service-account JSON as one JSON string.
+        let double_encoded = serde_json::to_string(&service_account_json()).unwrap();
+        let ConfigError::Invalid { reason, .. } =
+            config(&[("FCM_SERVICE_ACCOUNT_JSON", &double_encoded)]).unwrap_err()
+        else {
+            panic!("expected an invalid-value error");
+        };
+        assert!(!reason.contains("PRIVATE KEY"), "{reason}");
+        assert!(!reason.contains("push@brevity-proj"), "{reason}");
+        assert!(
+            reason.starts_with("not valid service-account JSON (Data error at line 1, column "),
+            "{reason}"
+        );
     }
 
     #[test]
