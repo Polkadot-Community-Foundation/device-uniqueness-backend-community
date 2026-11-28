@@ -796,20 +796,20 @@ mod tests {
             "",
             "decoder",
             "decoder@gmail.com",
-            "Decoder@pcf-polkadot-app.iam.gserviceaccount.com",
-            "decoder@pcf-polkadot-app.iam.gserviceaccount.com.evil",
+            "Decoder@example-project.iam.gserviceaccount.com",
+            "decoder@example-project.iam.gserviceaccount.com.evil",
             "123456-compute@developer.gserviceaccount.com",
-            "decoder@pcf/../x.iam.gserviceaccount.com",
-            "a/b@pcf-polkadot-app.iam.gserviceaccount.com",
-            "decoder@pcf-polkadot-app.iam.gserviceaccount.com\n",
-            "dec@pcf-polkadot-app.iam.gserviceaccount.com",
+            "decoder@example/../x.iam.gserviceaccount.com",
+            "a/b@example-project.iam.gserviceaccount.com",
+            "decoder@example-project.iam.gserviceaccount.com\n",
+            "dec@example-project.iam.gserviceaccount.com",
         ] {
             assert!(!is_service_account_email(bad), "{bad:?}");
         }
         assert!(GoogleDecoder::impersonating("decoder@gmail.com").is_err());
     }
 
-    const SA: &str = "play-integrity-decoder@pcf-polkadot-app.iam.gserviceaccount.com";
+    const SA: &str = "play-integrity-decoder@example-project.iam.gserviceaccount.com";
     const PACKAGE: &str = "io.pcf.polkadotapp";
 
     mod impersonation {

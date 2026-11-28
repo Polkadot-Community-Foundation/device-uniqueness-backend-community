@@ -40,8 +40,8 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 /// Whether `name` is a Cloud KMS key *version* resource name:
 /// `projects/P/locations/L/keyRings/R/cryptoKeys/K/cryptoKeyVersions/V`.
 ///
-/// A version, not a key: each version is a different account, so the version
-/// an operator registered as the proxy must be the one used.
+/// A version, not a key: each version is a different account, so a key name
+/// alone does not identify the signer.
 pub fn is_key_version_name(name: &str) -> bool {
     let parts: Vec<&str> = name.split('/').collect();
     let segment = |s: &str, max: usize| {
@@ -576,7 +576,7 @@ mod tests {
             "projects/example-project/locations/us-east1/keyRings/dub/cryptoKeys/chain-writer/cryptoKeyVersions/0",
             "projects/example-project/locations/us-east1/keyRings/dub/cryptoKeys/chain-writer/cryptoKeyVersions/01",
             "projects/example-project/locations/us-east1/keyRings/dub/cryptoKeys/chain-writer/cryptoKeyVersions/1/x",
-            "projects/PCF/locations/us-east1/keyRings/dub/cryptoKeys/k/cryptoKeyVersions/1",
+            "projects/Example-Project/locations/us-east1/keyRings/dub/cryptoKeys/k/cryptoKeyVersions/1",
             "projects/123456789012/locations/us-east1/keyRings/dub/cryptoKeys/k/cryptoKeyVersions/1",
             "projects/example-project/locations/us-east1/keyRings/../cryptoKeys/k/cryptoKeyVersions/1",
             "projects/example-project/locations/us-east1/keyRings/dub/cryptoKeys/k?x/cryptoKeyVersions/1",

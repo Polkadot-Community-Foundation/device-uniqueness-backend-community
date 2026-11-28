@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn the_keyless_play_integrity_account_is_validated_and_exclusive() {
-        const SA: &str = "play-integrity-decoder@pcf-polkadot-app.iam.gserviceaccount.com";
+        const SA: &str = "play-integrity-decoder@example-project.iam.gserviceaccount.com";
         let _guard = crate::ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let set = |account: Option<&str>, credentials: Option<&str>| {
             for (key, value) in [

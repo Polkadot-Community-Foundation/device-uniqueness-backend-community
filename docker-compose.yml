@@ -77,8 +77,8 @@ services:
       ANDROID_PACKAGE_NAMES: ${ANDROID_PACKAGE_NAMES:-}
       ANDROID_SIGNING_DIGEST_PLAYSTORE: ${ANDROID_SIGNING_DIGEST_PLAYSTORE:-}
       ANDROID_SIGNING_DIGEST_WEBSITE: ${ANDROID_SIGNING_DIGEST_WEBSITE:-}
-      # Play Integrity: the self-managed key pair (set both or neither), or the
-      # temporary Google fallback, with GOOGLE_CREDENTIALS or (keyless)
+      # Play Integrity: the self-managed key pair (set both or neither), or
+      # Google's decodeIntegrityToken, with GOOGLE_CREDENTIALS or (keyless)
       # PLAY_INTEGRITY_SERVICE_ACCOUNT. Blank = not configured.
       PLAY_INTEGRITY_MODE: ${PLAY_INTEGRITY_MODE:-strict}
       PLAY_INTEGRITY_DECRYPTION_KEY: ${PLAY_INTEGRITY_DECRYPTION_KEY:-}

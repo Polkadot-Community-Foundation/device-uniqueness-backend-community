@@ -131,9 +131,8 @@ fn spawn_workload_identity_check(provider: Arc<FcmProvider>) {
             IdentityCheck::Ready(identity) => tracing::warn!(
                 email = ?identity.email,
                 scopes = ?identity.scopes,
-                "FCM workload identity ready but not pinned; check that this is the \
-                 intended push identity, and if it is a Google service account, set \
-                 FCM_SERVICE_ACCOUNT_EMAIL to it"
+                "FCM workload identity ready but not pinned: FCM_SERVICE_ACCOUNT_EMAIL \
+                 is unset, so tokens for any identity the metadata server reports are used"
             ),
             IdentityCheck::UnusableScopes(identity) => tracing::warn!(
                 email = ?identity.email,
